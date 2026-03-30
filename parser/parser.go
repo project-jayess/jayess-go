@@ -79,7 +79,7 @@ func (p *Parser) parseExternFunction() (*ast.ExternFunctionDecl, error) {
 	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
 		return nil, err
 	}
-	return &ast.ExternFunctionDecl{Name: name, Params: params}, nil
+	return &ast.ExternFunctionDecl{Name: name, NativeSymbol: name, Params: params}, nil
 }
 
 func (p *Parser) parseFunction() (*ast.FunctionDecl, error) {

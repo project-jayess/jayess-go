@@ -59,9 +59,10 @@ Current class scope is intentionally small:
 - `super.property` access for inherited properties
 
 Native wrapper interop is available in a first pass:
-- `native import "./native/math.c";`
-- `extern function jayess_add(a, b);`
-- extern wrapper calls receive boxed Jayess runtime values and return boxed Jayess runtime values
+- `import { jayess_add } from "./native/math.c";`
+- `import { jayess_add as add } from "./native/math.c";`
+- `import "./native/math.c";` for side-effect-only linking
+- imported native wrapper calls receive boxed Jayess runtime values and return boxed Jayess runtime values
 - wrappers should include [jayess_runtime.h](/C:/Users/ncksd/Documents/it/jayess/jayess-go/runtime/jayess_runtime.h)
 - C++ wrappers should export C ABI entrypoints with `extern "C"`
 
@@ -125,10 +126,7 @@ Current export support is limited to:
 Native wrapper example:
 
 ```javascript
-native import "./native/math.c";
-
-extern function jayess_add(a, b);
-extern function jayess_greet(name);
+import { jayess_add, jayess_greet } from "./native/math.c";
 
 function main(args) {
   print(jayess_add(3, 4));

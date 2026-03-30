@@ -24,7 +24,11 @@ func Lower(program *ast.Program) (*ir.Module, error) {
 		globalSymbols[global.Name] = ir.ValueDynamic
 	}
 	for _, fn := range program.ExternFunctions {
-		lowered := ir.ExternFunction{Name: fn.Name}
+		symbolName := fn.NativeSymbol
+		if symbolName == "" {
+			symbolName = fn.Name
+		}
+		lowered := ir.ExternFunction{Name: fn.Name, SymbolName: symbolName, Variadic: fn.Variadic}
 		for _, param := range fn.Params {
 			lowered.Params = append(lowered.Params, ir.Parameter{Name: param.Name, Kind: ir.ValueDynamic})
 		}

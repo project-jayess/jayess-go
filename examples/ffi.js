@@ -1,8 +1,4 @@
-native import "./native/math.c";
-extern function jayess_add(a, b);
-extern function jayess_greet(name);
-extern function jayess_toggle(value);
-extern function jayess_make_profile(name, score);
+import { jayess_add, jayess_greet, jayess_toggle, jayess_make_profile as makeProfile } from "./native/math.c";
 
 function main(args)
 {
@@ -10,6 +6,6 @@ function main(args)
   print(total);
   print(jayess_greet("Kimchi"));
   print(jayess_toggle(true));
-  print(jayess_make_profile("Kimchi", total));
+  print(makeProfile("Kimchi", total));
   return total;
 }

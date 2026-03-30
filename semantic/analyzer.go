@@ -13,9 +13,11 @@ type symbol struct {
 
 type functionSignature struct {
 	name       string
+	nativeName string
 	paramCount int
 	isMain     bool
 	isExtern   bool
+	variadic   bool
 }
 
 type Analyzer struct{}
@@ -56,7 +58,7 @@ func (a *Analyzer) Analyze(program *ast.Program) error {
 		if _, exists := functions[fn.Name]; exists {
 			return fmt.Errorf("duplicate function %s", fn.Name)
 		}
-		functions[fn.Name] = functionSignature{name: fn.Name, paramCount: len(fn.Params), isExtern: true}
+		functions[fn.Name] = functionSignature{name: fn.Name, nativeName: fn.NativeSymbol, paramCount: len(fn.Params), isExtern: true, variadic: fn.Variadic}
 	}
 	for _, fn := range program.Functions {
 		if _, exists := globalSymbols[fn.Name]; exists {
@@ -434,7 +436,7 @@ func validateCallExpression(call *ast.CallExpression, symbols map[string]symbol,
 		if !ok {
 			return "", fmt.Errorf("unknown function %s", call.Callee)
 		}
-		if len(call.Arguments) != fn.paramCount {
+		if !fn.variadic && len(call.Arguments) != fn.paramCount {
 			return "", fmt.Errorf("function %s expects %d arguments", call.Callee, fn.paramCount)
 		}
 		for _, arg := range call.Arguments {

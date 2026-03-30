@@ -78,8 +78,10 @@ type Function struct {
 }
 
 type ExternFunction struct {
-	Name   string
-	Params []Parameter
+	Name       string
+	SymbolName string
+	Params     []Parameter
+	Variadic   bool
 }
 
 type Statement interface {

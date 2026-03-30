@@ -109,12 +109,16 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare i1 @jayess_value_is_truthy(ptr)\n\n")
 
 	for _, fn := range module.ExternFunctions {
-		fmt.Fprintf(&buf, "declare ptr @%s(", fn.Name)
-		for i := range fn.Params {
-			if i > 0 {
-				buf.WriteString(", ")
+		fmt.Fprintf(&buf, "declare ptr @%s(", fn.SymbolName)
+		if fn.Variadic {
+			buf.WriteString("...")
+		} else {
+			for i := range fn.Params {
+				if i > 0 {
+					buf.WriteString(", ")
+				}
+				buf.WriteString("ptr")
 			}
-			buf.WriteString("ptr")
 		}
 		buf.WriteString(")\n")
 	}
@@ -835,10 +839,10 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 				args = append(args, "ptr "+boxed)
 			}
 			tmp := state.nextTemp()
-			if len(ext.Params) == 0 {
-				fmt.Fprintf(buf, "  %s = call ptr @%s()\n", tmp, call.Callee)
+			if len(args) == 0 {
+				fmt.Fprintf(buf, "  %s = call ptr @%s()\n", tmp, ext.SymbolName)
 			} else {
-				fmt.Fprintf(buf, "  %s = call ptr @%s(%s)\n", tmp, call.Callee, strings.Join(args, ", "))
+				fmt.Fprintf(buf, "  %s = call ptr @%s(%s)\n", tmp, ext.SymbolName, strings.Join(args, ", "))
 			}
 			return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 		}

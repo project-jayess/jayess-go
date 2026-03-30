@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 
+	"jayess-go/ast"
 	"jayess-go/codegen"
 	"jayess-go/lexer"
 	"jayess-go/lifetime"
@@ -21,7 +22,7 @@ type Result struct {
 }
 
 func Compile(source string, opts Options) (*Result, error) {
-	return compileLoadedSource(source, opts)
+	return compileLoadedSource(source, nil, opts)
 }
 
 func CompilePath(inputPath string, opts Options) (*Result, error) {
@@ -29,7 +30,7 @@ func CompilePath(inputPath string, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load sources: %w", err)
 	}
-	result, err := compileLoadedSource(bundle.Source, opts)
+	result, err := compileLoadedSource(bundle.Source, bundle.NativeSymbols, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +38,7 @@ func CompilePath(inputPath string, opts Options) (*Result, error) {
 	return result, nil
 }
 
-func compileLoadedSource(source string, opts Options) (*Result, error) {
+func compileLoadedSource(source string, extraExterns []*ast.ExternFunctionDecl, opts Options) (*Result, error) {
 	rewrittenSource, err := transpileClasses(source)
 	if err != nil {
 		return nil, fmt.Errorf("class transpilation failed: %w", err)
@@ -50,6 +51,7 @@ func compileLoadedSource(source string, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse failed: %w", err)
 	}
+	program.ExternFunctions = append(extraExterns, program.ExternFunctions...)
 
 	if err := semantic.New().Analyze(program); err != nil {
 		return nil, fmt.Errorf("semantic analysis failed: %w", err)

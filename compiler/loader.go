@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"jayess-go/ast"
 )
 
 var (
@@ -62,6 +64,7 @@ type packageJSON struct {
 type loadedSourceTree struct {
 	Source        string
 	NativeImports []string
+	NativeSymbols []*ast.ExternFunctionDecl
 }
 
 func loadSourceTree(entryPath string) (*loadedSourceTree, error) {
@@ -70,20 +73,21 @@ func loadSourceTree(entryPath string) (*loadedSourceTree, error) {
 	var parts []string
 	nativeSet := map[string]bool{}
 	var nativeImports []string
+	var nativeSymbols []*ast.ExternFunctionDecl
 
 	absEntry, err := filepath.Abs(entryPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve entry path: %w", err)
 	}
 
-	if _, err := loadSourceFile(absEntry, modules, active, &parts, nativeSet, &nativeImports); err != nil {
+	if _, err := loadSourceFile(absEntry, modules, active, &parts, nativeSet, &nativeImports, &nativeSymbols); err != nil {
 		return nil, err
 	}
 
-	return &loadedSourceTree{Source: strings.Join(parts, "\n\n"), NativeImports: nativeImports}, nil
+	return &loadedSourceTree{Source: strings.Join(parts, "\n\n"), NativeImports: nativeImports, NativeSymbols: nativeSymbols}, nil
 }
 
-func loadSourceFile(path string, modules map[string]*loadedModule, active map[string]bool, parts *[]string, nativeSet map[string]bool, nativeImports *[]string) (*loadedModule, error) {
+func loadSourceFile(path string, modules map[string]*loadedModule, active map[string]bool, parts *[]string, nativeSet map[string]bool, nativeImports *[]string, nativeSymbols *[]*ast.ExternFunctionDecl) (*loadedModule, error) {
 	if module, ok := modules[path]; ok {
 		return module, nil
 	}
@@ -125,21 +129,35 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 
 		case bareImportLinePattern.MatchString(line):
 			matches := bareImportLinePattern.FindStringSubmatch(line)
+			if isNativeImportSpec(matches[1]) {
+				nativePath, err := resolveNativeImportPath(path, matches[1])
+				if err != nil {
+					return nil, err
+				}
+				if !nativeSet[nativePath] {
+					nativeSet[nativePath] = true
+					*nativeImports = append(*nativeImports, nativePath)
+				}
+				continue
+			}
 			importedPath, err := resolveImportPath(path, matches[1])
 			if err != nil {
 				return nil, err
 			}
-			if _, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports); err != nil {
+			if _, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols); err != nil {
 				return nil, err
 			}
 
 		case defaultAndNamedImportLinePattern.MatchString(line):
 			matches := defaultAndNamedImportLinePattern.FindStringSubmatch(line)
+			if isNativeImportSpec(matches[3]) {
+				return nil, fmt.Errorf("default imports from native sources are not supported")
+			}
 			importedPath, err := resolveImportPath(path, matches[3])
 			if err != nil {
 				return nil, err
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports)
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
 			if err != nil {
 				return nil, err
 			}
@@ -160,11 +178,14 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 
 		case defaultImportLinePattern.MatchString(line):
 			matches := defaultImportLinePattern.FindStringSubmatch(line)
+			if isNativeImportSpec(matches[2]) {
+				return nil, fmt.Errorf("default imports from native sources are not supported")
+			}
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
 				return nil, err
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports)
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
 			if err != nil {
 				return nil, err
 			}
@@ -176,11 +197,14 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 
 		case namespaceImportLinePattern.MatchString(line):
 			matches := namespaceImportLinePattern.FindStringSubmatch(line)
+			if isNativeImportSpec(matches[2]) {
+				return nil, fmt.Errorf("namespace imports from native sources are not supported")
+			}
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
 				return nil, err
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports)
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
 			if err != nil {
 				return nil, err
 			}
@@ -188,11 +212,29 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 
 		case namedImportLinePattern.MatchString(line):
 			matches := namedImportLinePattern.FindStringSubmatch(line)
+			if isNativeImportSpec(matches[2]) {
+				nativePath, err := resolveNativeImportPath(path, matches[2])
+				if err != nil {
+					return nil, err
+				}
+				if !nativeSet[nativePath] {
+					nativeSet[nativePath] = true
+					*nativeImports = append(*nativeImports, nativePath)
+				}
+				for _, spec := range parseImportedNames(matches[1]) {
+					*nativeSymbols = append(*nativeSymbols, &ast.ExternFunctionDecl{
+						Name:         spec.local,
+						NativeSymbol: spec.exported,
+						Variadic:     true,
+					})
+				}
+				continue
+			}
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
 				return nil, err
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports)
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
 			if err != nil {
 				return nil, err
 			}
@@ -273,7 +315,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if err != nil {
 				return nil, err
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports)
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
 			if err != nil {
 				return nil, err
 			}
@@ -433,6 +475,15 @@ func resolveNativeImportPath(fromPath, importPath string) (string, error) {
 		return absPath, nil
 	default:
 		return "", fmt.Errorf("native import %q must point to a .c/.cc/.cpp/.cxx file", filepath.ToSlash(importPath))
+	}
+}
+
+func isNativeImportSpec(importPath string) bool {
+	switch strings.ToLower(filepath.Ext(importPath)) {
+	case ".c", ".cc", ".cpp", ".cxx":
+		return true
+	default:
+		return false
 	}
 }
 

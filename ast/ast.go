@@ -81,8 +81,10 @@ type FunctionDecl struct {
 func (*FunctionDecl) node() {}
 
 type ExternFunctionDecl struct {
-	Name   string
-	Params []Parameter
+	Name         string
+	NativeSymbol string
+	Params       []Parameter
+	Variadic     bool
 }
 
 func (*ExternFunctionDecl) node() {}
