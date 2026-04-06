@@ -9,6 +9,12 @@ type Lexer struct {
 	column int
 }
 
+type State struct {
+	Pos    int
+	Line   int
+	Column int
+}
+
 func New(input string) *Lexer {
 	return &Lexer{input: []rune(input), line: 1, column: 1}
 }
@@ -24,6 +30,13 @@ func (l *Lexer) NextToken() Token {
 	}
 
 	switch ch {
+	case '`':
+		l.advance()
+		literal, ok := l.readTemplate()
+		if !ok {
+			return Token{Type: TokenIllegal, Literal: "unterminated template", Line: startLine, Column: startColumn}
+		}
+		return Token{Type: TokenTemplate, Literal: literal, Line: startLine, Column: startColumn}
 	case '(':
 		l.advance()
 		return Token{Type: TokenLParen, Literal: "(", Line: startLine, Column: startColumn}
@@ -46,14 +59,31 @@ func (l *Lexer) NextToken() Token {
 		l.advance()
 		return Token{Type: TokenSemicolon, Literal: ";", Line: startLine, Column: startColumn}
 	case '=':
+		if l.peek() == '=' && l.peekSecond() == '=' {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Type: TokenStrictEq, Literal: "===", Line: startLine, Column: startColumn}
+		}
 		if l.peek() == '=' {
 			l.advance()
 			l.advance()
 			return Token{Type: TokenEq, Literal: "==", Line: startLine, Column: startColumn}
 		}
+		if l.peek() == '>' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenArrow, Literal: "=>", Line: startLine, Column: startColumn}
+		}
 		l.advance()
 		return Token{Type: TokenAssign, Literal: "=", Line: startLine, Column: startColumn}
 	case '!':
+		if l.peek() == '=' && l.peekSecond() == '=' {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Type: TokenStrictNe, Literal: "!==", Line: startLine, Column: startColumn}
+		}
 		if l.peek() == '=' {
 			l.advance()
 			l.advance()
@@ -61,13 +91,44 @@ func (l *Lexer) NextToken() Token {
 		}
 		l.advance()
 		return Token{Type: TokenBang, Literal: "!", Line: startLine, Column: startColumn}
+	case '?':
+		if l.peek() == '?' && l.peekSecond() == '=' {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Type: TokenNullishAssign, Literal: "??=", Line: startLine, Column: startColumn}
+		}
+		if l.peek() == '.' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenQuestionDot, Literal: "?.", Line: startLine, Column: startColumn}
+		}
+		if l.peek() == '?' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenNullish, Literal: "??", Line: startLine, Column: startColumn}
+		}
+		l.advance()
+		return Token{Type: TokenQuestion, Literal: "?", Line: startLine, Column: startColumn}
 	case '&':
+		if l.peek() == '&' && l.peekSecond() == '=' {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Type: TokenAndAssign, Literal: "&&=", Line: startLine, Column: startColumn}
+		}
 		if l.peek() == '&' {
 			l.advance()
 			l.advance()
 			return Token{Type: TokenAnd, Literal: "&&", Line: startLine, Column: startColumn}
 		}
 	case '|':
+		if l.peek() == '|' && l.peekSecond() == '=' {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Type: TokenOrAssign, Literal: "||=", Line: startLine, Column: startColumn}
+		}
 		if l.peek() == '|' {
 			l.advance()
 			l.advance()
@@ -96,18 +157,47 @@ func (l *Lexer) NextToken() Token {
 		l.advance()
 		return Token{Type: TokenColon, Literal: ":", Line: startLine, Column: startColumn}
 	case '.':
+		if l.peek() == '.' && l.peekSecond() == '.' {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Type: TokenEllipsis, Literal: "...", Line: startLine, Column: startColumn}
+		}
 		l.advance()
 		return Token{Type: TokenDot, Literal: ".", Line: startLine, Column: startColumn}
+	case '#':
+		l.advance()
+		return Token{Type: TokenHash, Literal: "#", Line: startLine, Column: startColumn}
 	case '+':
+		if l.peek() == '=' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenAddAssign, Literal: "+=", Line: startLine, Column: startColumn}
+		}
 		l.advance()
 		return Token{Type: TokenPlus, Literal: "+", Line: startLine, Column: startColumn}
 	case '-':
+		if l.peek() == '=' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenSubAssign, Literal: "-=", Line: startLine, Column: startColumn}
+		}
 		l.advance()
 		return Token{Type: TokenMinus, Literal: "-", Line: startLine, Column: startColumn}
 	case '*':
+		if l.peek() == '=' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenMulAssign, Literal: "*=", Line: startLine, Column: startColumn}
+		}
 		l.advance()
 		return Token{Type: TokenStar, Literal: "*", Line: startLine, Column: startColumn}
 	case '/':
+		if l.peek() == '=' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenDivAssign, Literal: "/=", Line: startLine, Column: startColumn}
+		}
 		l.advance()
 		return Token{Type: TokenSlash, Literal: "/", Line: startLine, Column: startColumn}
 	case '"':
@@ -135,10 +225,38 @@ func (l *Lexer) NextToken() Token {
 func (l *Lexer) skipWhitespace() {
 	for {
 		ch := l.current()
-		if ch == 0 || !unicode.IsSpace(ch) {
+		if ch == 0 {
 			return
 		}
-		l.advance()
+		if unicode.IsSpace(ch) {
+			l.advance()
+			continue
+		}
+		if ch == '/' && l.peek() == '/' {
+			for ch != 0 && ch != '\n' {
+				l.advance()
+				ch = l.current()
+			}
+			continue
+		}
+		if ch == '/' && l.peek() == '*' {
+			l.advance()
+			l.advance()
+			for {
+				ch = l.current()
+				if ch == 0 {
+					return
+				}
+				if ch == '*' && l.peek() == '/' {
+					l.advance()
+					l.advance()
+					break
+				}
+				l.advance()
+			}
+			continue
+		}
+		return
 	}
 }
 
@@ -183,6 +301,34 @@ func (l *Lexer) readString() (string, bool) {
 	}
 }
 
+func (l *Lexer) readTemplate() (string, bool) {
+	start := l.pos
+	depth := 0
+	for {
+		ch := l.current()
+		if ch == 0 {
+			return "", false
+		}
+		if ch == '`' && depth == 0 {
+			literal := string(l.input[start:l.pos])
+			l.advance()
+			return literal, true
+		}
+		if ch == '$' && l.peek() == '{' {
+			depth++
+			l.advance()
+			l.advance()
+			continue
+		}
+		if ch == '}' && depth > 0 {
+			depth--
+			l.advance()
+			continue
+		}
+		l.advance()
+	}
+}
+
 func (l *Lexer) current() rune {
 	if l.pos >= len(l.input) {
 		return 0
@@ -195,6 +341,13 @@ func (l *Lexer) peek() rune {
 		return 0
 	}
 	return l.input[l.pos+1]
+}
+
+func (l *Lexer) peekSecond() rune {
+	if l.pos+2 >= len(l.input) {
+		return 0
+	}
+	return l.input[l.pos+2]
 }
 
 func (l *Lexer) advance() {
@@ -210,6 +363,16 @@ func (l *Lexer) advance() {
 	l.pos++
 }
 
+func (l *Lexer) Snapshot() State {
+	return State{Pos: l.pos, Line: l.line, Column: l.column}
+}
+
+func (l *Lexer) Restore(state State) {
+	l.pos = state.Pos
+	l.line = state.Line
+	l.column = state.Column
+}
+
 func isIdentifierStart(ch rune) bool {
 	return ch == '_' || unicode.IsLetter(ch)
 }
@@ -222,12 +385,28 @@ func lookupIdent(literal string) TokenType {
 	switch literal {
 	case "function":
 		return TokenFunction
+	case "class":
+		return TokenClass
+	case "extends":
+		return TokenExtends
 	case "extern":
 		return TokenExtern
 	case "import":
 		return TokenImport
 	case "native":
 		return TokenNative
+	case "static":
+		return TokenStatic
+	case "new":
+		return TokenNew
+	case "typeof":
+		return TokenTypeof
+	case "instanceof":
+		return TokenInstanceof
+	case "this":
+		return TokenThis
+	case "super":
+		return TokenSuper
 	case "var":
 		return TokenVar
 	case "let":
@@ -248,10 +427,30 @@ func lookupIdent(literal string) TokenType {
 		return TokenWhile
 	case "for":
 		return TokenFor
+	case "of":
+		return TokenOf
+	case "in":
+		return TokenIn
+	case "switch":
+		return TokenSwitch
+	case "case":
+		return TokenCase
+	case "default":
+		return TokenDefault
 	case "break":
 		return TokenBreak
 	case "continue":
 		return TokenContinue
+	case "delete":
+		return TokenDelete
+	case "try":
+		return TokenTry
+	case "catch":
+		return TokenCatch
+	case "finally":
+		return TokenFinally
+	case "throw":
+		return TokenThrow
 	case "true":
 		return TokenTrue
 	case "false":

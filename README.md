@@ -19,15 +19,20 @@ The current source subset is intentionally small:
 function main(args) {
   const delay = 500;
   var total = 10.5 + 2 * 3;
-  print(total);
-  print(args[0]);
+  console.log(total);
+  console.log(args[0]);
   sleep(delay);
   var name = readLine("What is your name? ");
-  print(name);
+  console.log(name);
   readKey("Press any key to continue");
   return 0;
 }
 ```
+
+Documentation index: [docs/index.md](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/index.md)
+
+Console output is documented in [docs/console.md](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/console.md).
+`print(...)` still works, but it is deprecated in favor of `console.log(...)`.
 
 Jayess variable declarations are:
 - `var` for mutable block-scoped bindings
@@ -73,7 +78,7 @@ import { add, twice } from "./lib/math.js";
 
 function main(args) {
   var value = add(3, 4);
-  print(twice(value));
+  console.log(twice(value));
   return value;
 }
 ```
@@ -122,6 +127,8 @@ Current export support is limited to:
 - `export default <expression>;`
 - `export { local, other as renamed };`
 - `export { local as renamed } from "@demo/math";`
+- `export * from "./more.js";`
+- `export * as math from "./more.js";`
 
 Native wrapper example:
 
@@ -129,8 +136,8 @@ Native wrapper example:
 import { jayess_add, jayess_greet } from "./native/math.c";
 
 function main(args) {
-  print(jayess_add(3, 4));
-  print(jayess_greet("Kimchi"));
+  console.log(jayess_add(3, 4));
+  console.log(jayess_greet("Kimchi"));
   return 0;
 }
 ```

@@ -26,6 +26,7 @@ const (
 	ValueArgsArray ValueKind = "args_array"
 	ValueArray     ValueKind = "array"
 	ValueObject    ValueKind = "object"
+	ValueFunction  ValueKind = "function"
 	ValueDynamic   ValueKind = "dynamic"
 )
 
@@ -42,12 +43,14 @@ const (
 )
 
 const (
-	OperatorEq  ComparisonOperator = "=="
-	OperatorNe  ComparisonOperator = "!="
-	OperatorLt  ComparisonOperator = "<"
-	OperatorLte ComparisonOperator = "<="
-	OperatorGt  ComparisonOperator = ">"
-	OperatorGte ComparisonOperator = ">="
+	OperatorEq       ComparisonOperator = "=="
+	OperatorNe       ComparisonOperator = "!="
+	OperatorStrictEq ComparisonOperator = "==="
+	OperatorStrictNe ComparisonOperator = "!=="
+	OperatorLt       ComparisonOperator = "<"
+	OperatorLte      ComparisonOperator = "<="
+	OperatorGt       ComparisonOperator = ">"
+	OperatorGte      ComparisonOperator = ">="
 )
 
 const (
@@ -62,12 +65,37 @@ const (
 type Module struct {
 	Globals         []VariableDecl
 	ExternFunctions []ExternFunction
+	Classes         []ClassDecl
 	Functions       []Function
 }
 
+type ClassDecl struct {
+	Name       string
+	SuperClass string
+	Fields     []ClassField
+	Methods    []ClassMethod
+}
+
+type ClassField struct {
+	Name           string
+	Private        bool
+	Static         bool
+	HasInitializer bool
+}
+
+type ClassMethod struct {
+	Name          string
+	Private       bool
+	Static        bool
+	IsConstructor bool
+	ParamCount    int
+}
+
 type Parameter struct {
-	Name string
-	Kind ValueKind
+	Name    string
+	Kind    ValueKind
+	Rest    bool
+	Default Expression
 }
 
 type Function struct {
@@ -142,6 +170,27 @@ type ContinueStatement struct{}
 
 func (*ContinueStatement) statementNode() {}
 
+type DeleteStatement struct {
+	Target Expression
+}
+
+func (*DeleteStatement) statementNode() {}
+
+type ThrowStatement struct {
+	Value Expression
+}
+
+func (*ThrowStatement) statementNode() {}
+
+type TryStatement struct {
+	TryBody     []Statement
+	CatchName   string
+	CatchBody   []Statement
+	FinallyBody []Statement
+}
+
+func (*TryStatement) statementNode() {}
+
 type ExpressionStatement struct {
 	Expression Expression
 }
@@ -179,8 +228,10 @@ type StringLiteral struct {
 func (*StringLiteral) expressionNode() {}
 
 type ObjectProperty struct {
-	Key   string
-	Value Expression
+	Key      string
+	KeyExpr  Expression
+	Value    Expression
+	Computed bool
 }
 
 type ObjectLiteral struct {
@@ -195,12 +246,32 @@ type ArrayLiteral struct {
 
 func (*ArrayLiteral) expressionNode() {}
 
+type TemplateLiteral struct {
+	Parts  []string
+	Values []Expression
+}
+
+func (*TemplateLiteral) expressionNode() {}
+
+type SpreadExpression struct {
+	Value Expression
+}
+
+func (*SpreadExpression) expressionNode() {}
+
 type VariableRef struct {
 	Name string
 	Kind ValueKind
 }
 
 func (*VariableRef) expressionNode() {}
+
+type FunctionValue struct {
+	Name        string
+	Environment Expression
+}
+
+func (*FunctionValue) expressionNode() {}
 
 type CallExpression struct {
 	Callee    string
@@ -209,6 +280,21 @@ type CallExpression struct {
 }
 
 func (*CallExpression) expressionNode() {}
+
+type InvokeExpression struct {
+	Callee    Expression
+	Arguments []Expression
+	Kind      ValueKind
+	Optional  bool
+}
+
+func (*InvokeExpression) expressionNode() {}
+
+type NewTargetExpression struct {
+	Kind ValueKind
+}
+
+func (*NewTargetExpression) expressionNode() {}
 
 type BinaryExpression struct {
 	Operator BinaryOperator
@@ -234,6 +320,14 @@ type LogicalExpression struct {
 
 func (*LogicalExpression) expressionNode() {}
 
+type NullishCoalesceExpression struct {
+	Left  Expression
+	Right Expression
+	Kind  ValueKind
+}
+
+func (*NullishCoalesceExpression) expressionNode() {}
+
 type UnaryExpression struct {
 	Operator UnaryOperator
 	Right    Expression
@@ -241,10 +335,25 @@ type UnaryExpression struct {
 
 func (*UnaryExpression) expressionNode() {}
 
+type TypeofExpression struct {
+	Value Expression
+}
+
+func (*TypeofExpression) expressionNode() {}
+
+type InstanceofExpression struct {
+	Left      Expression
+	Right     Expression
+	ClassName string
+}
+
+func (*InstanceofExpression) expressionNode() {}
+
 type IndexExpression struct {
-	Target Expression
-	Index  Expression
-	Kind   ValueKind
+	Target   Expression
+	Index    Expression
+	Kind     ValueKind
+	Optional bool
 }
 
 func (*IndexExpression) expressionNode() {}
@@ -253,6 +362,7 @@ type MemberExpression struct {
 	Target   Expression
 	Property string
 	Kind     ValueKind
+	Optional bool
 }
 
 func (*MemberExpression) expressionNode() {}

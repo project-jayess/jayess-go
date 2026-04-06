@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,8 @@ var (
 	exportDefaultExprLinePattern     = regexp.MustCompile(`^\s*export\s+default\s+(.+)\s*;\s*$`)
 	exportListLinePattern            = regexp.MustCompile(`^\s*export\s*\{\s*([^}]*)\s*\}\s*;\s*$`)
 	exportFromLinePattern            = regexp.MustCompile(`^\s*export\s*\{\s*([^}]*)\s*\}\s*from\s+["']([^"']+)["']\s*;\s*$`)
+	exportStarFromLinePattern        = regexp.MustCompile(`^\s*export\s+\*\s+from\s+["']([^"']+)["']\s*;\s*$`)
+	exportStarAsFromLinePattern      = regexp.MustCompile(`^\s*export\s+\*\s+as\s+([A-Za-z_][A-Za-z0-9_]*)\s*from\s+["']([^"']+)["']\s*;\s*$`)
 
 	functionHeaderPattern = regexp.MustCompile(`^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)`)
 	functionNamePattern   = regexp.MustCompile(`^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\b`)
@@ -38,6 +41,7 @@ const defaultExportLocalName = "__jayess_default_export"
 
 type loadedModule struct {
 	exports       map[string]exportInfo
+	namespaces    map[string]map[string]exportInfo
 	defaultExport *exportInfo
 	body          string
 	declared      map[string]exportInfo
@@ -67,6 +71,31 @@ type loadedSourceTree struct {
 	NativeSymbols []*ast.ExternFunctionDecl
 }
 
+type LoaderDiagnosticError struct {
+	File    string
+	Line    int
+	Column  int
+	Message string
+	Notes   []string
+}
+
+func (e *LoaderDiagnosticError) Error() string {
+	if e == nil {
+		return ""
+	}
+	location := e.File
+	if e.Line > 0 {
+		location = fmt.Sprintf("%s:%d", location, e.Line)
+		if e.Column > 0 {
+			location = fmt.Sprintf("%s:%d", location, e.Column)
+		}
+	}
+	if location != "" {
+		return fmt.Sprintf("%s: %s", location, e.Message)
+	}
+	return e.Message
+}
+
 func loadSourceTree(entryPath string) (*loadedSourceTree, error) {
 	modules := map[string]*loadedModule{}
 	active := map[string]bool{}
@@ -80,19 +109,19 @@ func loadSourceTree(entryPath string) (*loadedSourceTree, error) {
 		return nil, fmt.Errorf("resolve entry path: %w", err)
 	}
 
-	if _, err := loadSourceFile(absEntry, modules, active, &parts, nativeSet, &nativeImports, &nativeSymbols); err != nil {
+	if _, err := loadSourceFile(absEntry, modules, active, &parts, nativeSet, &nativeImports, &nativeSymbols, nil); err != nil {
 		return nil, err
 	}
 
 	return &loadedSourceTree{Source: strings.Join(parts, "\n\n"), NativeImports: nativeImports, NativeSymbols: nativeSymbols}, nil
 }
 
-func loadSourceFile(path string, modules map[string]*loadedModule, active map[string]bool, parts *[]string, nativeSet map[string]bool, nativeImports *[]string, nativeSymbols *[]*ast.ExternFunctionDecl) (*loadedModule, error) {
+func loadSourceFile(path string, modules map[string]*loadedModule, active map[string]bool, parts *[]string, nativeSet map[string]bool, nativeImports *[]string, nativeSymbols *[]*ast.ExternFunctionDecl, stack []string) (*loadedModule, error) {
 	if module, ok := modules[path]; ok {
 		return module, nil
 	}
 	if active[path] {
-		return nil, fmt.Errorf("import cycle detected at %s", path)
+		return nil, &LoaderDiagnosticError{File: path, Message: fmt.Sprintf("import cycle detected at %s", filepath.ToSlash(path))}
 	}
 
 	sourceBytes, err := os.ReadFile(path)
@@ -101,15 +130,20 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 	}
 
 	active[path] = true
+	defer delete(active, path)
 	module := &loadedModule{
-		exports:  map[string]exportInfo{},
-		declared: map[string]exportInfo{},
+		exports:    map[string]exportInfo{},
+		namespaces: map[string]map[string]exportInfo{},
+		declared:   map[string]exportInfo{},
 	}
 
 	var bodyLines []string
 	braceDepth := 0
 	namespaceImports := map[string]map[string]exportInfo{}
-	for _, line := range strings.Split(string(sourceBytes), "\n") {
+	importedLocals := map[string]string{}
+	for index, line := range strings.Split(string(sourceBytes), "\n") {
+		lineNumber := index + 1
+		column := firstSignificantColumn(line)
 		if braceDepth != 0 {
 			bodyLines = append(bodyLines, applyNamespaceRewrites(line, namespaceImports))
 			braceDepth = updateBraceDepth(braceDepth, line)
@@ -120,7 +154,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			matches := nativeImportLinePattern.FindStringSubmatch(line)
 			nativePath, err := resolveNativeImportPath(path, matches[1])
 			if err != nil {
-				return nil, err
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
 			}
 			if !nativeSet[nativePath] {
 				nativeSet[nativePath] = true
@@ -132,7 +166,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if isNativeImportSpec(matches[1]) {
 				nativePath, err := resolveNativeImportPath(path, matches[1])
 				if err != nil {
-					return nil, err
+					return nil, wrapLoaderImportError(path, lineNumber, column, err)
 				}
 				if !nativeSet[nativePath] {
 					nativeSet[nativePath] = true
@@ -142,34 +176,50 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			}
 			importedPath, err := resolveImportPath(path, matches[1])
 			if err != nil {
-				return nil, err
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
 			}
-			if _, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols); err != nil {
+			if active[importedPath] {
+				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
+			}
+			if _, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path)); err != nil {
 				return nil, err
 			}
 
 		case defaultAndNamedImportLinePattern.MatchString(line):
 			matches := defaultAndNamedImportLinePattern.FindStringSubmatch(line)
 			if isNativeImportSpec(matches[3]) {
-				return nil, fmt.Errorf("default imports from native sources are not supported")
+				return nil, loaderError(path, lineNumber, column, "default imports from native sources are not supported")
 			}
 			importedPath, err := resolveImportPath(path, matches[3])
 			if err != nil {
-				return nil, err
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
+			if active[importedPath] {
+				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
+			}
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
 			aliasLine, err := buildDefaultImportDeclaration(matches[1], importedModule, matches[3])
 			if err != nil {
-				return nil, err
+				return nil, loaderError(path, lineNumber, column, err.Error())
+			}
+			if err := registerImportedLocal(importedLocals, matches[1], matches[3]); err != nil {
+				return nil, loaderError(path, lineNumber, column, err.Error())
 			}
 			bodyLines = append(bodyLines, aliasLine)
 			for _, spec := range parseImportedNames(matches[2]) {
+				if err := registerImportedLocal(importedLocals, spec.local, matches[3]); err != nil {
+					return nil, loaderError(path, lineNumber, column, err.Error())
+				}
+				if namespace, ok := importedModule.namespaces[spec.exported]; ok {
+					namespaceImports[spec.local] = namespace
+					continue
+				}
 				aliasLine, err := buildNamedImportDeclaration(spec, importedModule, matches[3])
 				if err != nil {
-					return nil, err
+					return nil, loaderError(path, lineNumber, column, err.Error())
 				}
 				if aliasLine != "" {
 					bodyLines = append(bodyLines, aliasLine)
@@ -179,34 +229,46 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 		case defaultImportLinePattern.MatchString(line):
 			matches := defaultImportLinePattern.FindStringSubmatch(line)
 			if isNativeImportSpec(matches[2]) {
-				return nil, fmt.Errorf("default imports from native sources are not supported")
+				return nil, loaderError(path, lineNumber, column, "default imports from native sources are not supported")
 			}
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
-				return nil, err
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
+			if active[importedPath] {
+				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
+			}
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
 			aliasLine, err := buildDefaultImportDeclaration(matches[1], importedModule, matches[2])
 			if err != nil {
-				return nil, err
+				return nil, loaderError(path, lineNumber, column, err.Error())
+			}
+			if err := registerImportedLocal(importedLocals, matches[1], matches[2]); err != nil {
+				return nil, loaderError(path, lineNumber, column, err.Error())
 			}
 			bodyLines = append(bodyLines, aliasLine)
 
 		case namespaceImportLinePattern.MatchString(line):
 			matches := namespaceImportLinePattern.FindStringSubmatch(line)
 			if isNativeImportSpec(matches[2]) {
-				return nil, fmt.Errorf("namespace imports from native sources are not supported")
+				return nil, loaderError(path, lineNumber, column, "namespace imports from native sources are not supported")
 			}
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
-				return nil, err
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
+			if active[importedPath] {
+				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
+			}
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
+			}
+			if err := registerImportedLocal(importedLocals, matches[1], matches[2]); err != nil {
+				return nil, loaderError(path, lineNumber, column, err.Error())
 			}
 			namespaceImports[matches[1]] = exportedBindings(importedModule)
 
@@ -215,13 +277,16 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if isNativeImportSpec(matches[2]) {
 				nativePath, err := resolveNativeImportPath(path, matches[2])
 				if err != nil {
-					return nil, err
+					return nil, wrapLoaderImportError(path, lineNumber, column, err)
 				}
 				if !nativeSet[nativePath] {
 					nativeSet[nativePath] = true
 					*nativeImports = append(*nativeImports, nativePath)
 				}
 				for _, spec := range parseImportedNames(matches[1]) {
+					if err := registerImportedLocal(importedLocals, spec.local, matches[2]); err != nil {
+						return nil, loaderError(path, lineNumber, column, err.Error())
+					}
 					*nativeSymbols = append(*nativeSymbols, &ast.ExternFunctionDecl{
 						Name:         spec.local,
 						NativeSymbol: spec.exported,
@@ -232,16 +297,26 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			}
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
-				return nil, err
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
+			if active[importedPath] {
+				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
+			}
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
 			for _, spec := range parseImportedNames(matches[1]) {
+				if err := registerImportedLocal(importedLocals, spec.local, matches[2]); err != nil {
+					return nil, loaderError(path, lineNumber, column, err.Error())
+				}
+				if namespace, ok := importedModule.namespaces[spec.exported]; ok {
+					namespaceImports[spec.local] = namespace
+					continue
+				}
 				aliasLine, err := buildNamedImportDeclaration(spec, importedModule, matches[2])
 				if err != nil {
-					return nil, err
+					return nil, loaderError(path, lineNumber, column, err.Error())
 				}
 				if aliasLine != "" {
 					bodyLines = append(bodyLines, aliasLine)
@@ -252,7 +327,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			processed := exportDefaultFunctionLinePattern.ReplaceAllString(line, "${1}function")
 			name := parseFunctionName(processed)
 			if name == "" {
-				return nil, fmt.Errorf("default export function in %s must be named", path)
+				return nil, loaderError(path, lineNumber, column, "default export function must be named")
 			}
 			info := exportInfo{kind: "function", paramCount: parseFunctionParamCount(processed), localName: name, visibility: "public"}
 			module.defaultExport = &info
@@ -269,7 +344,9 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 		case exportClassLinePattern.MatchString(line):
 			matches := exportClassLinePattern.FindStringSubmatch(line)
 			info := exportInfo{kind: "function", localName: matches[2], visibility: "public"}
-			module.exports[matches[2]] = info
+			if err := registerExport(module, matches[2], info); err != nil {
+				return nil, err
+			}
 			module.declared[matches[2]] = info
 			bodyLines = append(bodyLines, strings.Replace(line, "export ", "", 1))
 
@@ -277,17 +354,21 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			processed := exportFunctionLinePattern.ReplaceAllString(line, "${1}function")
 			name := parseFunctionName(processed)
 			if name == "" {
-				return nil, fmt.Errorf("exported function in %s must be named", path)
+				return nil, loaderError(path, lineNumber, column, "exported function must be named")
 			}
 			info := exportInfo{kind: "function", paramCount: parseFunctionParamCount(processed), localName: name, visibility: "public"}
-			module.exports[name] = info
+			if err := registerExport(module, name, info); err != nil {
+				return nil, loaderError(path, lineNumber, column, err.Error())
+			}
 			module.declared[name] = info
 			bodyLines = append(bodyLines, processed)
 
 		case exportConstVarLinePattern.MatchString(line):
 			matches := exportConstVarLinePattern.FindStringSubmatch(line)
 			info := exportInfo{kind: matches[1], localName: matches[2], visibility: "public"}
-			module.exports[matches[2]] = info
+			if err := registerExport(module, matches[2], info); err != nil {
+				return nil, loaderError(path, lineNumber, column, err.Error())
+			}
 			module.declared[matches[2]] = info
 			bodyLines = append(bodyLines, strings.Replace(line, "export ", "", 1))
 
@@ -296,16 +377,18 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			for _, spec := range parseImportedNames(matches[1]) {
 				info, ok := module.declared[spec.exported]
 				if !ok {
-					return nil, fmt.Errorf("cannot export unknown symbol %s", spec.exported)
+					return nil, loaderErrorf(path, lineNumber, column, "cannot export unknown symbol %s", spec.exported)
 				}
 				if info.visibility == "private" {
-					return nil, fmt.Errorf("cannot export private symbol %s", spec.exported)
+					return nil, loaderErrorf(path, lineNumber, column, "cannot export private symbol %s", spec.exported)
 				}
-				module.exports[spec.local] = exportInfo{
+				if err := registerExport(module, spec.local, exportInfo{
 					kind:       info.kind,
 					paramCount: info.paramCount,
 					localName:  info.localName,
 					visibility: "public",
+				}); err != nil {
+					return nil, loaderError(path, lineNumber, column, err.Error())
 				}
 			}
 
@@ -313,19 +396,62 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			matches := exportFromLinePattern.FindStringSubmatch(line)
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
-				return nil, err
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols)
+			if active[importedPath] {
+				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
+			}
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
 			for _, spec := range parseImportedNames(matches[1]) {
 				info, ok := importedModule.exports[spec.exported]
 				if !ok {
-					return nil, fmt.Errorf("module %s does not export %s", filepath.ToSlash(matches[2]), spec.exported)
+					return nil, loaderErrorf(path, lineNumber, column, "module %s does not export %s", filepath.ToSlash(matches[2]), spec.exported)
 				}
-				module.exports[spec.local] = info
+				if err := registerExport(module, spec.local, info); err != nil {
+					return nil, loaderError(path, lineNumber, column, err.Error())
+				}
 			}
+
+		case exportStarFromLinePattern.MatchString(line):
+			matches := exportStarFromLinePattern.FindStringSubmatch(line)
+			importedPath, err := resolveImportPath(path, matches[1])
+			if err != nil {
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
+			}
+			if active[importedPath] {
+				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
+			}
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			if err != nil {
+				return nil, err
+			}
+			for name, info := range importedModule.exports {
+				if err := registerExport(module, name, info); err != nil {
+					return nil, loaderError(path, lineNumber, column, err.Error())
+				}
+			}
+
+		case exportStarAsFromLinePattern.MatchString(line):
+			matches := exportStarAsFromLinePattern.FindStringSubmatch(line)
+			importedPath, err := resolveImportPath(path, matches[2])
+			if err != nil {
+				return nil, wrapLoaderImportError(path, lineNumber, column, err)
+			}
+			if active[importedPath] {
+				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
+			}
+			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			if err != nil {
+				return nil, err
+			}
+			info := exportInfo{kind: "const", localName: matches[1], visibility: "public"}
+			if err := registerExport(module, matches[1], info); err != nil {
+				return nil, loaderError(path, lineNumber, column, err.Error())
+			}
+			module.namespaces[matches[1]] = exportedBindings(importedModule)
 
 		case exportDefaultExprLinePattern.MatchString(line):
 			matches := exportDefaultExprLinePattern.FindStringSubmatch(line)
@@ -345,10 +471,64 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 	}
 
 	module.body = strings.Join(bodyLines, "\n")
-	active[path] = false
 	modules[path] = module
 	*parts = append(*parts, module.body)
 	return module, nil
+}
+
+func loaderError(file string, line int, column int, message string) error {
+	return &LoaderDiagnosticError{
+		File:    file,
+		Line:    line,
+		Column:  column,
+		Message: message,
+	}
+}
+
+func loaderErrorf(file string, line int, column int, format string, args ...any) error {
+	return loaderError(file, line, column, fmt.Sprintf(format, args...))
+}
+
+func loaderErrorWithNotes(file string, line int, column int, message string, notes []string) error {
+	return &LoaderDiagnosticError{
+		File:    file,
+		Line:    line,
+		Column:  column,
+		Message: message,
+		Notes:   notes,
+	}
+}
+
+func wrapLoaderImportError(file string, line int, column int, err error) error {
+	var diagnostic *LoaderDiagnosticError
+	if errors.As(err, &diagnostic) {
+		return diagnostic
+	}
+	return loaderError(file, line, column, err.Error())
+}
+
+func firstSignificantColumn(line string) int {
+	for index, r := range line {
+		if r != ' ' && r != '\t' {
+			return index + 1
+		}
+	}
+	return 1
+}
+
+func formatImportCycle(stack []string, repeated string) string {
+	start := 0
+	for index, item := range stack {
+		if item == repeated {
+			start = index
+			break
+		}
+	}
+	cycle := append(append([]string{}, stack[start:]...), repeated)
+	for index := range cycle {
+		cycle[index] = filepath.ToSlash(cycle[index])
+	}
+	return "import cycle: " + strings.Join(cycle, " -> ")
 }
 
 func buildDefaultImportDeclaration(local string, module *loadedModule, importPath string) (string, error) {
@@ -449,6 +629,22 @@ func buildAliasDeclaration(local string, info exportInfo) string {
 	}
 }
 
+func registerImportedLocal(imports map[string]string, local string, importPath string) error {
+	if existing, ok := imports[local]; ok {
+		return fmt.Errorf("duplicate import binding %s from %s; already imported from %s", local, filepath.ToSlash(importPath), filepath.ToSlash(existing))
+	}
+	imports[local] = importPath
+	return nil
+}
+
+func registerExport(module *loadedModule, name string, info exportInfo) error {
+	if _, exists := module.exports[name]; exists {
+		return fmt.Errorf("duplicate export %s", name)
+	}
+	module.exports[name] = info
+	return nil
+}
+
 func resolveImportPath(fromPath, importPath string) (string, error) {
 	if strings.HasPrefix(importPath, ".") {
 		resolved := filepath.Join(filepath.Dir(fromPath), filepath.FromSlash(importPath))
@@ -499,7 +695,7 @@ func resolvePackageImport(startDir, importPath string) (string, error) {
 			break
 		}
 	}
-	return "", fmt.Errorf("package %q was not found in node_modules", importPath)
+	return "", fmt.Errorf("package %q was not found in node_modules; run npm install or check package.json dependencies", importPath)
 }
 
 func resolvePackageEntry(packageDir, subpath, importPath string) (string, error) {
@@ -511,16 +707,27 @@ func resolvePackageEntry(packageDir, subpath, importPath string) (string, error)
 	data, err := os.ReadFile(packageJSONPath)
 	if err == nil {
 		var pkg packageJSON
-		if err := json.Unmarshal(data, &pkg); err == nil {
-			for _, entry := range []string{pkg.Jayess, pkg.Module, pkg.Main} {
-				if strings.TrimSpace(entry) == "" {
-					continue
-				}
-				resolved, err := resolveSourceFile(filepath.Join(packageDir, filepath.FromSlash(entry)))
-				if err == nil {
-					return resolved, nil
-				}
+		if err := json.Unmarshal(data, &pkg); err != nil {
+			return "", fmt.Errorf("package %q has an invalid package.json: %w", importPath, err)
+		}
+		var firstEntryErr error
+		for _, entry := range []string{pkg.Jayess, pkg.Module, pkg.Main} {
+			if strings.TrimSpace(entry) == "" {
+				continue
 			}
+			if filepath.Ext(entry) != "" && strings.ToLower(filepath.Ext(entry)) != ".js" {
+				return "", fmt.Errorf("package %q entry %q is not a supported Jayess .js module", importPath, filepath.ToSlash(entry))
+			}
+			resolved, err := resolveSourceFile(filepath.Join(packageDir, filepath.FromSlash(entry)))
+			if err == nil {
+				return resolved, nil
+			}
+			if firstEntryErr == nil {
+				firstEntryErr = fmt.Errorf("package %q entry %q could not be resolved: %w", importPath, filepath.ToSlash(entry), err)
+			}
+		}
+		if firstEntryErr != nil {
+			return "", firstEntryErr
 		}
 	}
 
@@ -528,7 +735,7 @@ func resolvePackageEntry(packageDir, subpath, importPath string) (string, error)
 	if err == nil {
 		return resolved, nil
 	}
-	return "", fmt.Errorf("package %q does not expose a Jayess .js entrypoint", importPath)
+	return "", fmt.Errorf("package %q does not expose a supported Jayess .js entrypoint via jayess/module/main or index.js", importPath)
 }
 
 func resolveSourceFile(path string) (string, error) {
@@ -582,6 +789,11 @@ func exportedBindings(module *loadedModule) map[string]exportInfo {
 	result := map[string]exportInfo{}
 	for name, info := range module.exports {
 		result[name] = info
+	}
+	for namespace, exports := range module.namespaces {
+		for exportName, info := range exports {
+			result[namespace+"."+exportName] = info
+		}
 	}
 	if module.defaultExport != nil {
 		result["default"] = *module.defaultExport
