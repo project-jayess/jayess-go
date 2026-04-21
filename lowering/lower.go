@@ -281,6 +281,12 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 		return &ir.CallExpression{Callee: "__jayess_current_this", Kind: ir.ValueDynamic}, nil
 	case *ast.NewTargetExpression:
 		return &ir.NewTargetExpression{Kind: ir.ValueDynamic}, nil
+	case *ast.AwaitExpression:
+		value, err := lowerExpression(expr.Value, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		return &ir.CallExpression{Callee: "__jayess_await", Arguments: []ir.Expression{value}, Kind: ir.ValueDynamic}, nil
 	case *ast.StringLiteral:
 		return &ir.StringLiteral{Value: expr.Value}, nil
 	case *ast.ObjectLiteral:
@@ -466,6 +472,8 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 		switch expr.Callee {
 		case "readLine", "readKey":
 			call.Kind = ir.ValueString
+		case "compile", "compileFile":
+			call.Kind = ir.ValueDynamic
 		case "__jayess_array_push":
 			call.Kind = ir.ValueNumber
 		case "__jayess_array_pop":
@@ -486,8 +494,12 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 			call.Kind = ir.ValueDynamic
 		case "__jayess_object_rest":
 			call.Kind = ir.ValueDynamic
-		case "__jayess_std_map_new", "__jayess_std_set_new", "__jayess_std_date_new", "__jayess_std_regexp_new", "__jayess_std_date_now", "__jayess_std_json_stringify", "__jayess_std_json_parse", "__jayess_iter_values":
+		case "__jayess_std_map_new", "__jayess_std_set_new", "__jayess_std_date_new", "__jayess_std_regexp_new", "__jayess_std_date_now", "__jayess_std_json_stringify", "__jayess_std_json_parse", "__jayess_iter_values", "__jayess_std_error_new", "__jayess_std_aggregate_error_new", "__jayess_std_array_buffer_new", "__jayess_std_uint8_array_new", "__jayess_std_data_view_new", "__jayess_std_uint8_array_from_string", "__jayess_std_uint8_array_concat", "__jayess_std_iterator_from", "__jayess_std_promise_resolve", "__jayess_std_promise_reject", "__jayess_std_promise_all", "__jayess_std_promise_race", "__jayess_std_promise_all_settled", "__jayess_std_promise_any", "__jayess_timers_sleep", "__jayess_timers_set_timeout", "__jayess_timers_clear_timeout", "__jayess_await":
 			call.Kind = ir.ValueDynamic
+		case "__jayess_std_uint8_array_equals":
+			call.Kind = ir.ValueDynamic
+		case "__jayess_std_uint8_array_compare":
+			call.Kind = ir.ValueNumber
 		case "__jayess_math_floor", "__jayess_math_ceil", "__jayess_math_round", "__jayess_math_min", "__jayess_math_max", "__jayess_math_abs", "__jayess_math_pow", "__jayess_math_sqrt", "__jayess_math_random":
 			call.Kind = ir.ValueNumber
 		case "__jayess_number_is_nan", "__jayess_number_is_finite":
@@ -498,11 +510,19 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 			call.Kind = ir.ValueUndefined
 		case "__jayess_console_log", "__jayess_console_warn", "__jayess_console_error":
 			call.Kind = ir.ValueUndefined
-		case "__jayess_process_cwd", "__jayess_process_env", "__jayess_process_argv", "__jayess_process_exit", "__jayess_fs_read_file", "__jayess_fs_write_file", "__jayess_fs_exists", "__jayess_fs_read_dir", "__jayess_fs_stat", "__jayess_fs_mkdir", "__jayess_fs_remove", "__jayess_fs_copy_file", "__jayess_fs_rename", "__jayess_path_parse", "__jayess_path_is_absolute":
+		case "__jayess_process_cwd", "__jayess_process_env", "__jayess_process_argv", "__jayess_process_exit", "__jayess_fs_read_file", "__jayess_fs_read_file_async", "__jayess_fs_write_file", "__jayess_fs_write_file_async", "__jayess_fs_create_read_stream", "__jayess_fs_create_write_stream", "__jayess_fs_exists", "__jayess_fs_read_dir", "__jayess_fs_stat", "__jayess_fs_mkdir", "__jayess_fs_remove", "__jayess_fs_copy_file", "__jayess_fs_rename", "__jayess_path_parse", "__jayess_path_is_absolute", "__jayess_url_parse", "__jayess_querystring_parse", "__jayess_dns_lookup", "__jayess_dns_lookup_all", "__jayess_dns_reverse", "__jayess_net_connect", "__jayess_net_listen", "__jayess_http_parse_request", "__jayess_http_parse_response", "__jayess_http_request", "__jayess_http_request_stream", "__jayess_http_request_stream_async", "__jayess_http_get", "__jayess_http_get_stream", "__jayess_http_get_stream_async", "__jayess_http_request_async", "__jayess_http_get_async", "__jayess_https_request", "__jayess_https_request_stream", "__jayess_https_request_stream_async", "__jayess_https_get", "__jayess_https_get_stream", "__jayess_https_get_stream_async", "__jayess_https_request_async", "__jayess_https_get_async":
 			call.Kind = ir.ValueDynamic
-		case "__jayess_process_platform", "__jayess_path_join", "__jayess_path_normalize", "__jayess_path_resolve", "__jayess_path_relative", "__jayess_path_format", "__jayess_path_basename", "__jayess_path_dirname", "__jayess_path_extname":
+		case "__jayess_process_thread_pool_size":
+			call.Kind = ir.ValueNumber
+		case "__jayess_net_is_ip":
+			call.Kind = ir.ValueNumber
+		case "__jayess_tls_is_available", "__jayess_https_is_available", "__jayess_tls_connect":
+			call.Kind = ir.ValueDynamic
+		case "__jayess_process_platform", "__jayess_path_join", "__jayess_path_normalize", "__jayess_path_resolve", "__jayess_path_relative", "__jayess_path_format", "__jayess_path_basename", "__jayess_path_dirname", "__jayess_path_extname", "__jayess_url_format", "__jayess_querystring_stringify", "__jayess_http_format_request", "__jayess_http_format_response":
 			call.Kind = ir.ValueString
-		case "print", "sleep":
+		case "__jayess_tls_backend", "__jayess_https_backend":
+			call.Kind = ir.ValueString
+		case "print", "sleep", "sleepAsync", "setTimeout", "clearTimeout":
 			call.Kind = ""
 		default:
 			call.Kind = ir.ValueDynamic

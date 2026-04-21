@@ -39,6 +39,8 @@ const (
 	TokenCatch         TokenType = "CATCH"
 	TokenFinally       TokenType = "FINALLY"
 	TokenThrow         TokenType = "THROW"
+	TokenAwait         TokenType = "AWAIT"
+	TokenAsync         TokenType = "ASYNC"
 	TokenTrue          TokenType = "TRUE"
 	TokenFalse         TokenType = "FALSE"
 	TokenNull          TokenType = "NULL"

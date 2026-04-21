@@ -171,6 +171,7 @@ Jayess supports:
 - function expressions
 - arrow functions
 - closures
+- optional parameter and return type annotations
 - default parameters
 - rest parameters
 - spread in arrays and calls
@@ -178,15 +179,41 @@ Jayess supports:
 Examples:
 
 ```javascript
-function add(a, b = 1) {
+function add(a: number, b: number = 1): number {
   return a + b;
 }
 
-var twice = (value) => value * 2;
+var twice = (value: number): number => value * 2;
 var wrap = function(name) {
   return `hello ${name}`;
 };
 ```
+
+Type annotations are checked for the supported built-in kinds, but Jayess does not yet have a full structural/static type system.
+
+Annotations are optional. Unannotated bindings and parameters remain dynamic:
+
+```javascript
+var value = 1;
+value = "kimchi"; // allowed because value is unannotated
+```
+
+Annotated variables, parameters, call arguments, assignments, and return values are checked:
+
+```javascript
+function add(a: number, b: number): number {
+  return a + b;
+}
+
+var total: number = add(1, 2);
+total = "kimchi"; // compile error
+add("kimchi", 2); // compile error
+```
+
+Current boundary:
+
+- annotations are enforced for the simple built-in annotation names
+- object shapes, array element types, union types, generics, and user-defined type aliases are not implemented yet
 
 Functions are first-class values. They can be:
 
@@ -230,6 +257,37 @@ Supported control flow includes:
 
 Compile-time errors are still compile-time diagnostics. `try / catch / finally` only applies to runtime-thrown Jayess values.
 
+## Await and Iteration
+
+Jayess supports a pragmatic async/promise surface:
+
+```javascript
+async function loadValue(): number {
+  return 10;
+}
+
+var value = await Promise.resolve(10);
+console.log(await loadValue());
+```
+
+See [Async Runtime](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/async.md) for the supported Promise and async file I/O surface. See [Timers](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/timers.md) for timer APIs.
+
+Important boundary:
+
+- `await` does not compile functions into native suspend/resume state machines yet.
+- `function*` and `yield` are not implemented yet.
+- Network async I/O is not implemented yet.
+
+The iterator protocol surface currently includes:
+
+```javascript
+var iter = Iterator.from([1, 2]);
+console.log(iter.next().value);
+console.log(iter.next().done);
+```
+
+`for...of` works with arrays, `Map`, `Set`, and the supported iterable bridge.
+
 ## Input and Timing
 
 Supported builtins:
@@ -237,6 +295,11 @@ Supported builtins:
 - `readLine(prompt)`
 - `readKey(prompt)`
 - `sleep(milliseconds)`
+- `compile(source, outputPath?)`
+- `compileFile(inputPath, outputPathOrOptions?)`
+- `timers.sleep(milliseconds, value?)`
+- `timers.setTimeout(callback, milliseconds)`
+- `timers.clearTimeout(id)`
 
 Examples:
 
@@ -244,4 +307,11 @@ Examples:
 var name = readLine("Name: ");
 readKey("Press any key");
 sleep(500);
+var compiled = compile("function main() { return 0; }", "build/generated");
+console.log(compiled.ok);
+var configured = compile("function main() { return 0; }", { output: "build/generated", emit: "exe" });
+console.log(configured.stderr);
+var fileCompiled = compileFile("src/main.js", { output: "build/main" });
+console.log(fileCompiled.ok);
+console.log(await timers.sleep(10, "ready"));
 ```

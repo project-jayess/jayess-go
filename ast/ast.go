@@ -113,10 +113,11 @@ type Program struct {
 func (*Program) node() {}
 
 type Parameter struct {
-	Name    string
-	Pattern Pattern
-	Rest    bool
-	Default Expression
+	Name           string
+	Pattern        Pattern
+	Rest           bool
+	Default        Expression
+	TypeAnnotation string
 }
 
 type ClassMember interface {
@@ -129,6 +130,8 @@ type FunctionDecl struct {
 	Visibility Visibility
 	Name       string
 	Params     []Parameter
+	ReturnType string
+	IsAsync    bool
 	Body       []Statement
 }
 
@@ -137,6 +140,8 @@ func (*FunctionDecl) node() {}
 type FunctionExpression struct {
 	BaseNode
 	Params          []Parameter
+	ReturnType      string
+	IsAsync         bool
 	Body            []Statement
 	ExpressionBody  Expression
 	IsArrowFunction bool
@@ -199,10 +204,11 @@ func (*ClassMethodDecl) classMemberNode() {}
 
 type VariableDecl struct {
 	BaseNode
-	Visibility Visibility
-	Kind       DeclarationKind
-	Name       string
-	Value      Expression
+	Visibility     Visibility
+	Kind           DeclarationKind
+	Name           string
+	TypeAnnotation string
+	Value          Expression
 }
 
 func (*VariableDecl) node()          {}
@@ -530,6 +536,14 @@ type NewTargetExpression struct{ BaseNode }
 
 func (*NewTargetExpression) node()           {}
 func (*NewTargetExpression) expressionNode() {}
+
+type AwaitExpression struct {
+	BaseNode
+	Value Expression
+}
+
+func (*AwaitExpression) node()           {}
+func (*AwaitExpression) expressionNode() {}
 
 type BinaryExpression struct {
 	BaseNode

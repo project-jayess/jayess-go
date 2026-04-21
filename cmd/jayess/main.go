@@ -14,18 +14,41 @@ import (
 	"jayess-go/target"
 )
 
+type stringListFlag []string
+
+func (f *stringListFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *stringListFlag) Set(value string) error {
+	if value == "" {
+		return nil
+	}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			*f = append(*f, part)
+		}
+	}
+	return nil
+}
+
 func main() {
 	var emit string
 	var targetName string
 	var output string
+	var warningPolicy string
+	var allowedWarningCategories stringListFlag
 
 	flag.StringVar(&emit, "emit", "", "output kind: llvm or exe")
 	flag.StringVar(&targetName, "target", "host", "target name such as windows-x64 or darwin-arm64")
 	flag.StringVar(&output, "o", "", "output file path")
+	flag.StringVar(&warningPolicy, "warnings", "default", "warning policy: default, none, or error")
+	flag.Var(&allowedWarningCategories, "allow-warning", "warning category to allow when --warnings=error; repeatable or comma-separated")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
-		exitf("usage: jayess [--target=<name>] [--emit=llvm|exe] [-o output] <input.js>")
+		exitf("usage: jayess [--target=<name>] [--emit=llvm|exe] [--warnings=default|none|error] [--allow-warning=<category>] [-o output] <input.js>")
 	}
 
 	inputPath := flag.Arg(0)
@@ -47,14 +70,12 @@ func main() {
 		exitf("create output directory: %v", err)
 	}
 
-	opts := compiler.Options{TargetTriple: targetTriple}
+	opts := compiler.Options{TargetTriple: targetTriple, WarningPolicy: warningPolicy, AllowedWarningCategories: allowedWarningCategories}
 	result, err := compiler.CompilePath(inputPath, opts)
 	if err != nil {
 		exitDiagnostic(inputPath, err)
 	}
-	for _, warning := range result.Warnings {
-		fmt.Fprintln(os.Stderr, formatDiagnosticWithSnippet(warning))
-	}
+	printWarnings(result.Warnings)
 
 	switch emit {
 	case "llvm":
@@ -71,6 +92,12 @@ func main() {
 		}
 	default:
 		exitf("unsupported emit mode %q", emit)
+	}
+}
+
+func printWarnings(warnings []compiler.Diagnostic) {
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, formatDiagnosticWithSnippet(warning))
 	}
 }
 

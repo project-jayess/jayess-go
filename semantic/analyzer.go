@@ -19,7 +19,10 @@ type functionSignature struct {
 	hasRest    bool
 	isMain     bool
 	isExtern   bool
+	isAsync    bool
 	variadic   bool
+	paramTypes []string
+	returnType string
 }
 
 type Analyzer struct{}
@@ -82,14 +85,17 @@ func (a *Analyzer) Analyze(program *ast.Program) error {
 	globalSymbols := map[string]symbol{}
 	availableFunctions := map[string]functionSignature{}
 	for _, fn := range program.ExternFunctions {
-		availableFunctions[fn.Name] = functionSignature{name: fn.Name, nativeName: fn.NativeSymbol, paramCount: len(fn.Params), minArgs: minRequiredParams(fn.Params), hasRest: hasRestParam(fn.Params), isExtern: true, variadic: fn.Variadic}
+		availableFunctions[fn.Name] = functionSignature{name: fn.Name, nativeName: fn.NativeSymbol, paramCount: len(fn.Params), minArgs: minRequiredParams(fn.Params), hasRest: hasRestParam(fn.Params), isExtern: true, variadic: fn.Variadic, paramTypes: parameterTypes(fn.Params)}
 	}
 	for _, fn := range program.Functions {
-		availableFunctions[fn.Name] = functionSignature{name: fn.Name, paramCount: len(fn.Params), minArgs: minRequiredParams(fn.Params), hasRest: hasRestParam(fn.Params), isMain: fn.Name == "main"}
+		availableFunctions[fn.Name] = functionSignature{name: fn.Name, paramCount: len(fn.Params), minArgs: minRequiredParams(fn.Params), hasRest: hasRestParam(fn.Params), isMain: fn.Name == "main", isAsync: fn.IsAsync, paramTypes: parameterTypes(fn.Params), returnType: normalizeTypeAnnotation(fn.ReturnType)}
 	}
 	for _, global := range program.Globals {
 		if global.Kind != ast.DeclarationConst && global.Kind != ast.DeclarationVar {
 			return errorAt(global, "top-level variables must use var or const")
+		}
+		if err := validateVariableAnnotation(global); err != nil {
+			return err
 		}
 		if _, exists := globalSymbols[global.Name]; exists {
 			return errorAt(global, "duplicate global %s", global.Name)
@@ -98,10 +104,17 @@ func (a *Analyzer) Analyze(program *ast.Program) error {
 		if err != nil {
 			return err
 		}
+		if expected := normalizeTypeAnnotation(global.TypeAnnotation); expected != "" && !isAssignableTo(expected, kind) {
+			return errorAt(global, "cannot initialize %s variable %s with %s", expected, global.Name, kind)
+		}
 		if !isRuntimeValueKind(kind) {
 			return errorAt(global, "global %s must be a runtime value", global.Name)
 		}
-		globalSymbols[global.Name] = symbol{kind: "dynamic", mutable: global.Kind == ast.DeclarationVar}
+		globalKind := "dynamic"
+		if global.TypeAnnotation != "" {
+			globalKind = normalizeTypeAnnotation(global.TypeAnnotation)
+		}
+		globalSymbols[global.Name] = symbol{kind: globalKind, mutable: global.Kind == ast.DeclarationVar}
 	}
 
 	seenMain := false
@@ -113,7 +126,7 @@ func (a *Analyzer) Analyze(program *ast.Program) error {
 		if _, exists := functions[fn.Name]; exists {
 			return errorAt(fn, "duplicate function %s", fn.Name)
 		}
-		functions[fn.Name] = functionSignature{name: fn.Name, nativeName: fn.NativeSymbol, paramCount: len(fn.Params), minArgs: minRequiredParams(fn.Params), hasRest: hasRestParam(fn.Params), isExtern: true, variadic: fn.Variadic}
+		functions[fn.Name] = functionSignature{name: fn.Name, nativeName: fn.NativeSymbol, paramCount: len(fn.Params), minArgs: minRequiredParams(fn.Params), hasRest: hasRestParam(fn.Params), isExtern: true, variadic: fn.Variadic, paramTypes: parameterTypes(fn.Params)}
 	}
 	for _, fn := range program.Functions {
 		if _, exists := globalSymbols[fn.Name]; exists {
@@ -122,7 +135,7 @@ func (a *Analyzer) Analyze(program *ast.Program) error {
 		if _, exists := functions[fn.Name]; exists {
 			return errorAt(fn, "duplicate function %s", fn.Name)
 		}
-		functions[fn.Name] = functionSignature{name: fn.Name, paramCount: len(fn.Params), minArgs: minRequiredParams(fn.Params), hasRest: hasRestParam(fn.Params), isMain: fn.Name == "main"}
+		functions[fn.Name] = functionSignature{name: fn.Name, paramCount: len(fn.Params), minArgs: minRequiredParams(fn.Params), hasRest: hasRestParam(fn.Params), isMain: fn.Name == "main", isAsync: fn.IsAsync, paramTypes: parameterTypes(fn.Params), returnType: normalizeTypeAnnotation(fn.ReturnType)}
 		if fn.Name == "main" {
 			seenMain = true
 		}
@@ -290,28 +303,45 @@ func validateFunction(fn *ast.FunctionDecl, functions map[string]functionSignatu
 	if err := validateParameterList(fn.Params); err != nil {
 		return errorAt(fn, "function %s: %v", fn.Name, err)
 	}
+	if fn.ReturnType != "" && !isSupportedTypeAnnotation(fn.ReturnType) {
+		return errorAt(fn, "function %s has unsupported return type annotation %s", fn.Name, fn.ReturnType)
+	}
 	if fn.Name == "main" && len(fn.Params) > 1 {
 		return errorAt(fn, "main supports at most one parameter: args")
+	}
+	if fn.Name == "main" && fn.IsAsync {
+		return errorAt(fn, "main cannot be async")
 	}
 
 	symbols := cloneSymbols(globals)
 	if fn.Name == "main" && len(fn.Params) == 1 {
+		if expected := normalizeTypeAnnotation(fn.Params[0].TypeAnnotation); expected != "" && expected != "array" && expected != "dynamic" {
+			return errorAt(fn, "main args parameter must be annotated as array or dynamic")
+		}
 		symbols[fn.Params[0].Name] = symbol{kind: "args_array", mutable: false}
 	}
 	if fn.Name != "main" {
 		for _, param := range fn.Params {
-			symbols[param.Name] = symbol{kind: "dynamic", mutable: true}
+			kind := normalizeTypeAnnotation(param.TypeAnnotation)
+			if kind == "" {
+				kind = "dynamic"
+			}
+			symbols[param.Name] = symbol{kind: kind, mutable: true}
 		}
 	}
 	for _, param := range fn.Params {
 		if param.Default != nil {
-			if _, err := inferExpressionKind(param.Default, symbols, functions); err != nil {
+			kind, err := inferExpressionKind(param.Default, symbols, functions)
+			if err != nil {
 				return err
+			}
+			if expected := normalizeTypeAnnotation(param.TypeAnnotation); expected != "" && !isAssignableTo(expected, kind) {
+				return errorAt(param.Default, "default value for parameter %s must be %s, got %s", param.Name, expected, kind)
 			}
 		}
 	}
 
-	if err := validateStatements(fn.Body[:len(fn.Body)-1], symbols, false, functions); err != nil {
+	if err := validateStatementsWithReturn(fn.Body[:len(fn.Body)-1], symbols, false, functions, normalizeTypeAnnotation(fn.ReturnType)); err != nil {
 		return err
 	}
 
@@ -323,6 +353,9 @@ func validateFunction(fn *ast.FunctionDecl, functions map[string]functionSignatu
 	if err != nil {
 		return err
 	}
+	if expected := normalizeTypeAnnotation(fn.ReturnType); expected != "" && !isAssignableTo(expected, kind) {
+		return errorAt(lastReturn, "function %s must return %s, got %s", fn.Name, expected, kind)
+	}
 	if fn.Name == "main" && kind != "number" && kind != "dynamic" {
 		return errorAt(lastReturn, "function %s must return a number-like value", fn.Name)
 	}
@@ -333,14 +366,26 @@ func validateFunction(fn *ast.FunctionDecl, functions map[string]functionSignatu
 }
 
 func validateStatements(statements []ast.Statement, symbols map[string]symbol, inLoop bool, functions map[string]functionSignature) error {
+	return validateStatementsWithReturn(statements, symbols, inLoop, functions, "")
+}
+
+func validateStatementsWithReturn(statements []ast.Statement, symbols map[string]symbol, inLoop bool, functions map[string]functionSignature, expectedReturn string) error {
 	for _, stmt := range statements {
 		switch stmt := stmt.(type) {
 		case *ast.VariableDecl:
+			if err := validateVariableAnnotation(stmt); err != nil {
+				return err
+			}
 			kind, err := inferExpressionKind(stmt.Value, symbols, functions)
 			if err != nil {
 				return err
 			}
-			if stmt.Kind == ast.DeclarationVar {
+			if expected := normalizeTypeAnnotation(stmt.TypeAnnotation); expected != "" {
+				if !isAssignableTo(expected, kind) {
+					return errorAt(stmt, "cannot initialize %s variable %s with %s", expected, stmt.Name, kind)
+				}
+				kind = expected
+			} else if stmt.Kind == ast.DeclarationVar {
 				kind = "dynamic"
 			}
 			symbols[stmt.Name] = symbol{kind: kind, mutable: stmt.Kind != ast.DeclarationConst}
@@ -362,23 +407,27 @@ func validateStatements(statements []ast.Statement, symbols map[string]symbol, i
 			}
 		case *ast.TryStatement:
 			trySymbols := cloneSymbols(symbols)
-			if err := validateStatements(stmt.TryBody, trySymbols, inLoop, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.TryBody, trySymbols, inLoop, functions, expectedReturn); err != nil {
 				return err
 			}
 			catchSymbols := cloneSymbols(symbols)
 			if stmt.CatchName != "" {
 				catchSymbols[stmt.CatchName] = symbol{kind: "dynamic", mutable: true}
 			}
-			if err := validateStatements(stmt.CatchBody, catchSymbols, inLoop, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.CatchBody, catchSymbols, inLoop, functions, expectedReturn); err != nil {
 				return err
 			}
 			finallySymbols := cloneSymbols(symbols)
-			if err := validateStatements(stmt.FinallyBody, finallySymbols, inLoop, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.FinallyBody, finallySymbols, inLoop, functions, expectedReturn); err != nil {
 				return err
 			}
 		case *ast.ReturnStatement:
-			if _, err := inferExpressionKind(stmt.Value, symbols, functions); err != nil {
+			kind, err := inferExpressionKind(stmt.Value, symbols, functions)
+			if err != nil {
 				return err
+			}
+			if expectedReturn != "" && !isAssignableTo(expectedReturn, kind) {
+				return errorAt(stmt, "return expects %s, got %s", expectedReturn, kind)
 			}
 		case *ast.ExpressionStatement:
 			if _, err := inferExpressionKind(stmt.Expression, symbols, functions); err != nil {
@@ -389,11 +438,11 @@ func validateStatements(statements []ast.Statement, symbols map[string]symbol, i
 				return err
 			}
 			consequenceSymbols := cloneSymbols(symbols)
-			if err := validateStatements(stmt.Consequence, consequenceSymbols, inLoop, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.Consequence, consequenceSymbols, inLoop, functions, expectedReturn); err != nil {
 				return err
 			}
 			alternativeSymbols := cloneSymbols(symbols)
-			if err := validateStatements(stmt.Alternative, alternativeSymbols, inLoop, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.Alternative, alternativeSymbols, inLoop, functions, expectedReturn); err != nil {
 				return err
 			}
 		case *ast.WhileStatement:
@@ -401,7 +450,7 @@ func validateStatements(statements []ast.Statement, symbols map[string]symbol, i
 				return err
 			}
 			bodySymbols := cloneSymbols(symbols)
-			if err := validateStatements(stmt.Body, bodySymbols, true, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.Body, bodySymbols, true, functions, expectedReturn); err != nil {
 				return err
 			}
 		case *ast.ForStatement:
@@ -417,7 +466,7 @@ func validateStatements(statements []ast.Statement, symbols map[string]symbol, i
 				}
 			}
 			bodySymbols := cloneSymbols(loopSymbols)
-			if err := validateStatements(stmt.Body, bodySymbols, true, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.Body, bodySymbols, true, functions, expectedReturn); err != nil {
 				return err
 			}
 			if stmt.Update != nil {
@@ -439,7 +488,7 @@ func validateStatements(statements []ast.Statement, symbols map[string]symbol, i
 				bindingKind = "dynamic"
 			}
 			loopSymbols[stmt.Name] = symbol{kind: bindingKind, mutable: stmt.Kind != ast.DeclarationConst}
-			if err := validateStatements(stmt.Body, loopSymbols, true, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.Body, loopSymbols, true, functions, expectedReturn); err != nil {
 				return err
 			}
 		case *ast.ForInStatement:
@@ -452,7 +501,7 @@ func validateStatements(statements []ast.Statement, symbols map[string]symbol, i
 			}
 			loopSymbols := cloneSymbols(symbols)
 			loopSymbols[stmt.Name] = symbol{kind: "string", mutable: stmt.Kind != ast.DeclarationConst}
-			if err := validateStatements(stmt.Body, loopSymbols, true, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.Body, loopSymbols, true, functions, expectedReturn); err != nil {
 				return err
 			}
 		case *ast.SwitchStatement:
@@ -464,12 +513,12 @@ func validateStatements(statements []ast.Statement, symbols map[string]symbol, i
 					return err
 				}
 				caseSymbols := cloneSymbols(symbols)
-				if err := validateStatements(switchCase.Consequent, caseSymbols, inLoop, functions); err != nil {
+				if err := validateStatementsWithReturn(switchCase.Consequent, caseSymbols, inLoop, functions, expectedReturn); err != nil {
 					return err
 				}
 			}
 			defaultSymbols := cloneSymbols(symbols)
-			if err := validateStatements(stmt.Default, defaultSymbols, inLoop, functions); err != nil {
+			if err := validateStatementsWithReturn(stmt.Default, defaultSymbols, inLoop, functions, expectedReturn); err != nil {
 				return err
 			}
 		case *ast.BreakStatement, *ast.ContinueStatement:
@@ -608,6 +657,11 @@ func inferExpressionKind(expr ast.Expression, symbols map[string]symbol, functio
 	case *ast.ThisExpression:
 		return "dynamic", nil
 	case *ast.NewTargetExpression:
+		return "dynamic", nil
+	case *ast.AwaitExpression:
+		if _, err := inferExpressionKind(expr.Value, symbols, functions); err != nil {
+			return "", err
+		}
 		return "dynamic", nil
 	case *ast.StringLiteral:
 		return "string", nil
@@ -832,6 +886,11 @@ func inferExpressionKind(expr ast.Expression, symbols map[string]symbol, functio
 		}
 		return "dynamic", nil
 	case *ast.InvokeExpression:
+		if ident, ok := expr.Callee.(*ast.Identifier); ok {
+			if fn, exists := functions[ident.Name]; exists {
+				return validateFunctionArguments(ident.Name, fn, expr.Arguments, symbols, functions, expr)
+			}
+		}
 		calleeKind, err := inferExpressionKind(expr.Callee, symbols, functions)
 		if err != nil {
 			return "", err
@@ -851,6 +910,13 @@ func inferExpressionKind(expr ast.Expression, symbols map[string]symbol, functio
 		return "dynamic", nil
 	case *ast.CallExpression:
 		return validateCallExpression(expr, symbols, functions)
+	case *ast.NewExpression:
+		for _, arg := range expr.Arguments {
+			if _, err := inferExpressionKind(arg, symbols, functions); err != nil {
+				return "", err
+			}
+		}
+		return "dynamic", nil
 	default:
 		return "", errorAt(expr, "unsupported expression")
 	}
@@ -908,6 +974,11 @@ func validateCallExpression(call *ast.CallExpression, symbols map[string]symbol,
 			return "", errorAt(call, "__jayess_process_arch expects 0 arguments")
 		}
 		return "string", nil
+	case "__jayess_process_thread_pool_size":
+		if len(call.Arguments) != 0 {
+			return "", errorAt(call, "__jayess_process_thread_pool_size expects 0 arguments")
+		}
+		return "number", nil
 	case "__jayess_process_exit":
 		if len(call.Arguments) != 1 {
 			return "", errorAt(call, "__jayess_process_exit expects 1 argument")
@@ -947,7 +1018,62 @@ func validateCallExpression(call *ast.CallExpression, symbols map[string]symbol,
 			return "", errorAt(call, "%s expects 0 arguments", call.Callee)
 		}
 		return "string", nil
+	case "__jayess_tls_is_available", "__jayess_https_is_available":
+		if len(call.Arguments) != 0 {
+			return "", errorAt(call, "%s expects 0 arguments", call.Callee)
+		}
+		return "dynamic", nil
+	case "__jayess_tls_backend", "__jayess_https_backend":
+		if len(call.Arguments) != 0 {
+			return "", errorAt(call, "%s expects 0 arguments", call.Callee)
+		}
+		return "string", nil
+	case "__jayess_tls_connect":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "%s expects 1 argument", call.Callee)
+		}
+		return "dynamic", nil
 	case "__jayess_path_basename", "__jayess_path_dirname", "__jayess_path_extname":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "%s expects 1 argument", call.Callee)
+		}
+		return "string", nil
+	case "__jayess_url_parse", "__jayess_querystring_parse":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "%s expects 1 argument", call.Callee)
+		}
+		return "dynamic", nil
+	case "__jayess_dns_lookup", "__jayess_dns_lookup_all", "__jayess_dns_reverse":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "%s expects 1 argument", call.Callee)
+		}
+		return "dynamic", nil
+	case "__jayess_http_parse_request", "__jayess_http_parse_response", "__jayess_http_request", "__jayess_http_request_stream", "__jayess_http_request_stream_async", "__jayess_http_get", "__jayess_http_get_stream", "__jayess_http_get_stream_async", "__jayess_http_request_async", "__jayess_http_get_async", "__jayess_https_request", "__jayess_https_request_stream", "__jayess_https_request_stream_async", "__jayess_https_get", "__jayess_https_get_stream", "__jayess_https_get_stream_async", "__jayess_https_request_async", "__jayess_https_get_async":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "%s expects 1 argument", call.Callee)
+		}
+		return "dynamic", nil
+	case "__jayess_net_is_ip":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "__jayess_net_is_ip expects 1 argument")
+		}
+		return "number", nil
+	case "__jayess_net_connect":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "__jayess_net_connect expects 1 argument")
+		}
+		return "dynamic", nil
+	case "__jayess_net_listen":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "__jayess_net_listen expects 1 argument")
+		}
+		return "dynamic", nil
+	case "__jayess_url_format", "__jayess_querystring_stringify":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "%s expects 1 argument", call.Callee)
+		}
+		return "string", nil
+	case "__jayess_http_format_request", "__jayess_http_format_response":
 		if len(call.Arguments) != 1 {
 			return "", errorAt(call, "%s expects 1 argument", call.Callee)
 		}
@@ -957,9 +1083,24 @@ func validateCallExpression(call *ast.CallExpression, symbols map[string]symbol,
 			return "", errorAt(call, "__jayess_fs_read_file expects 1 or 2 arguments")
 		}
 		return "dynamic", nil
+	case "__jayess_fs_read_file_async":
+		if len(call.Arguments) != 1 && len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_fs_read_file_async expects 1 or 2 arguments")
+		}
+		return "dynamic", nil
 	case "__jayess_fs_write_file":
 		if len(call.Arguments) != 2 {
 			return "", errorAt(call, "__jayess_fs_write_file expects 2 arguments")
+		}
+		return "dynamic", nil
+	case "__jayess_fs_write_file_async":
+		if len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_fs_write_file_async expects 2 arguments")
+		}
+		return "dynamic", nil
+	case "__jayess_fs_create_read_stream", "__jayess_fs_create_write_stream":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "%s expects 1 argument", call.Callee)
 		}
 		return "dynamic", nil
 	case "__jayess_fs_exists":
@@ -992,6 +1133,21 @@ func validateCallExpression(call *ast.CallExpression, symbols map[string]symbol,
 			return "", errorAt(call, "%s expects 2 arguments", call.Callee)
 		}
 		return "dynamic", nil
+	case "__jayess_timers_sleep":
+		if len(call.Arguments) != 1 && len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_timers_sleep expects 1 or 2 arguments")
+		}
+		return "dynamic", nil
+	case "__jayess_timers_set_timeout":
+		if len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_timers_set_timeout expects 2 arguments")
+		}
+		return "dynamic", nil
+	case "__jayess_timers_clear_timeout":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "__jayess_timers_clear_timeout expects 1 argument")
+		}
+		return "dynamic", nil
 	case "readLine", "readKey":
 		if len(call.Arguments) != 1 {
 			return "", errorAt(call, "%s expects 1 argument", call.Callee)
@@ -1016,6 +1172,73 @@ func validateCallExpression(call *ast.CallExpression, symbols map[string]symbol,
 			return "", errorAt(call, "sleep expects a number argument")
 		}
 		return "void", nil
+	case "compile", "compileFile":
+		if len(call.Arguments) < 1 || len(call.Arguments) > 2 {
+			return "", errorAt(call, "%s expects 1 or 2 arguments", call.Callee)
+		}
+		sourceKind, err := inferExpressionKind(call.Arguments[0], symbols, functions)
+		if err != nil {
+			return "", err
+		}
+		if sourceKind != "string" && sourceKind != "dynamic" {
+			if call.Callee == "compileFile" {
+				return "", errorAt(call, "compileFile expects a string input path")
+			}
+			return "", errorAt(call, "compile expects a string source argument")
+		}
+		if len(call.Arguments) == 2 {
+			outputKind, err := inferExpressionKind(call.Arguments[1], symbols, functions)
+			if err != nil {
+				return "", err
+			}
+			if outputKind != "string" && outputKind != "object" && outputKind != "dynamic" {
+				return "", errorAt(call, "%s expects a string output path or options object", call.Callee)
+			}
+		}
+		return "dynamic", nil
+	case "sleepAsync":
+		if len(call.Arguments) != 1 && len(call.Arguments) != 2 {
+			return "", errorAt(call, "sleepAsync expects 1 or 2 arguments")
+		}
+		delayKind, err := inferExpressionKind(call.Arguments[0], symbols, functions)
+		if err != nil {
+			return "", err
+		}
+		if delayKind != "number" && delayKind != "dynamic" {
+			return "", errorAt(call, "sleepAsync expects a number delay")
+		}
+		return "dynamic", nil
+	case "setTimeout":
+		if len(call.Arguments) != 2 {
+			return "", errorAt(call, "setTimeout expects 2 arguments")
+		}
+		callbackKind, err := inferExpressionKind(call.Arguments[0], symbols, functions)
+		if err != nil {
+			return "", err
+		}
+		if callbackKind != "function" && callbackKind != "dynamic" {
+			return "", errorAt(call, "setTimeout expects a function callback")
+		}
+		delayKind, err := inferExpressionKind(call.Arguments[1], symbols, functions)
+		if err != nil {
+			return "", err
+		}
+		if delayKind != "number" && delayKind != "dynamic" {
+			return "", errorAt(call, "setTimeout expects a number delay")
+		}
+		return "number", nil
+	case "clearTimeout":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "clearTimeout expects 1 argument")
+		}
+		idKind, err := inferExpressionKind(call.Arguments[0], symbols, functions)
+		if err != nil {
+			return "", err
+		}
+		if idKind != "number" && idKind != "dynamic" {
+			return "", errorAt(call, "clearTimeout expects a number timer id")
+		}
+		return "undefined", nil
 	case "__jayess_apply":
 		if len(call.Arguments) != 3 {
 			return "", errorAt(call, "__jayess_apply expects 3 arguments")
@@ -1207,6 +1430,38 @@ func validateCallExpression(call *ast.CallExpression, symbols map[string]symbol,
 			return "", errorAt(call, "__jayess_std_regexp_new expects at most 2 arguments")
 		}
 		return "dynamic", nil
+	case "__jayess_std_error_new":
+		if len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_std_error_new expects 2 arguments")
+		}
+		return "dynamic", nil
+	case "__jayess_std_aggregate_error_new":
+		if len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_std_aggregate_error_new expects 2 arguments")
+		}
+		return "dynamic", nil
+	case "__jayess_std_array_buffer_new", "__jayess_std_uint8_array_new", "__jayess_std_data_view_new", "__jayess_std_iterator_from", "__jayess_std_promise_resolve", "__jayess_std_promise_reject", "__jayess_std_promise_all", "__jayess_std_promise_race", "__jayess_std_promise_all_settled", "__jayess_std_promise_any", "__jayess_await":
+		if len(call.Arguments) != 1 {
+			return "", errorAt(call, "%s expects 1 argument", call.Callee)
+		}
+		return "dynamic", nil
+	case "__jayess_std_uint8_array_from_string":
+		if len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_std_uint8_array_from_string expects 2 arguments")
+		}
+		return "dynamic", nil
+	case "__jayess_std_uint8_array_concat":
+		return "dynamic", nil
+	case "__jayess_std_uint8_array_equals":
+		if len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_std_uint8_array_equals expects 2 arguments")
+		}
+		return "dynamic", nil
+	case "__jayess_std_uint8_array_compare":
+		if len(call.Arguments) != 2 {
+			return "", errorAt(call, "__jayess_std_uint8_array_compare expects 2 arguments")
+		}
+		return "number", nil
 	case "__jayess_std_date_now":
 		if len(call.Arguments) != 0 {
 			return "", errorAt(call, "__jayess_std_date_now expects 0 arguments")
@@ -1331,50 +1586,71 @@ func validateCallExpression(call *ast.CallExpression, symbols map[string]symbol,
 			}
 			return "", errorAt(call, "unknown function %s", call.Callee)
 		}
-		minArgs := fn.minArgs
-		if !fn.variadic && !hasSpreadArguments(call.Arguments) {
-			if fn.hasRest {
-				if len(call.Arguments) < minArgs {
-					return "", errorAt(call, "function %s expects at least %d arguments", call.Callee, minArgs)
-				}
-			} else if len(call.Arguments) < minArgs || len(call.Arguments) > fn.paramCount {
-				return "", errorAt(call, "function %s expects %d arguments", call.Callee, fn.paramCount)
+		return validateFunctionArguments(call.Callee, fn, call.Arguments, symbols, functions, call)
+	}
+}
+
+func validateFunctionArguments(name string, fn functionSignature, arguments []ast.Expression, symbols map[string]symbol, functions map[string]functionSignature, node any) (string, error) {
+	minArgs := fn.minArgs
+	if !fn.variadic && !hasSpreadArguments(arguments) {
+		if fn.hasRest {
+			if len(arguments) < minArgs {
+				return "", errorAt(node, "function %s expects at least %d arguments", name, minArgs)
 			}
+		} else if len(arguments) < minArgs || len(arguments) > fn.paramCount {
+			return "", errorAt(node, "function %s expects %d arguments", name, fn.paramCount)
 		}
-		for _, arg := range call.Arguments {
-			if spread, ok := arg.(*ast.SpreadExpression); ok {
-				kind, err := inferExpressionKind(spread.Value, symbols, functions)
-				if err != nil {
-					return "", err
-				}
-				if kind != "array" && kind != "args_array" && kind != "dynamic" {
-					return "", errorAt(spread, "spread arguments expect an array-like value")
-				}
-				continue
-			}
-			kind, err := inferExpressionKind(arg, symbols, functions)
+	}
+	for index, arg := range arguments {
+		if spread, ok := arg.(*ast.SpreadExpression); ok {
+			kind, err := inferExpressionKind(spread.Value, symbols, functions)
 			if err != nil {
 				return "", err
 			}
-			if !isRuntimeValueKind(kind) {
-				return "", errorAt(call, "function %s expects runtime-compatible arguments", call.Callee)
+			if kind != "array" && kind != "args_array" && kind != "dynamic" {
+				return "", errorAt(spread, "spread arguments expect an array-like value")
 			}
+			continue
 		}
-		if fn.isExtern {
-			return "dynamic", nil
+		kind, err := inferExpressionKind(arg, symbols, functions)
+		if err != nil {
+			return "", err
 		}
+		if !isRuntimeValueKind(kind) {
+			return "", errorAt(node, "function %s expects runtime-compatible arguments", name)
+		}
+		if index < len(fn.paramTypes) && fn.paramTypes[index] != "" && !isAssignableTo(fn.paramTypes[index], kind) {
+			return "", errorAt(arg, "argument %d for %s expects %s, got %s", index+1, name, fn.paramTypes[index], kind)
+		}
+	}
+	if fn.isExtern {
 		return "dynamic", nil
 	}
+	if fn.isAsync {
+		return "dynamic", nil
+	}
+	if fn.returnType != "" {
+		return fn.returnType, nil
+	}
+	return "dynamic", nil
 }
 
 func validateLoopStatement(stmt ast.Statement, symbols map[string]symbol, functions map[string]functionSignature) error {
 	switch stmt := stmt.(type) {
 	case *ast.VariableDecl:
+		if err := validateVariableAnnotation(stmt); err != nil {
+			return err
+		}
 		kind, err := inferExpressionKind(stmt.Value, symbols, functions)
 		if err != nil {
 			return err
 		}
-		if stmt.Kind == ast.DeclarationVar {
+		if expected := normalizeTypeAnnotation(stmt.TypeAnnotation); expected != "" {
+			if !isAssignableTo(expected, kind) {
+				return errorAt(stmt, "cannot initialize %s variable %s with %s", expected, stmt.Name, kind)
+			}
+			kind = expected
+		} else if stmt.Kind == ast.DeclarationVar {
 			kind = "dynamic"
 		}
 		symbols[stmt.Name] = symbol{kind: kind, mutable: stmt.Kind != ast.DeclarationConst}
@@ -1448,6 +1724,9 @@ func minRequiredParams(params []ast.Parameter) int {
 func validateParameterList(params []ast.Parameter) error {
 	seenDefault := false
 	for i, param := range params {
+		if param.TypeAnnotation != "" && !isSupportedTypeAnnotation(param.TypeAnnotation) {
+			return fmt.Errorf("unsupported type annotation %s", param.TypeAnnotation)
+		}
 		if param.Rest && i != len(params)-1 {
 			return fmt.Errorf("rest parameter must be last")
 		}
@@ -1461,6 +1740,71 @@ func validateParameterList(params []ast.Parameter) error {
 		}
 	}
 	return nil
+}
+
+func validateVariableAnnotation(decl *ast.VariableDecl) error {
+	if decl.TypeAnnotation == "" {
+		return nil
+	}
+	if !isSupportedTypeAnnotation(decl.TypeAnnotation) {
+		return errorAt(decl, "variable %s has unsupported type annotation %s", decl.Name, decl.TypeAnnotation)
+	}
+	if normalizeTypeAnnotation(decl.TypeAnnotation) == "void" {
+		return errorAt(decl, "variable %s cannot be annotated as void", decl.Name)
+	}
+	return nil
+}
+
+func parameterTypes(params []ast.Parameter) []string {
+	out := make([]string, len(params))
+	for i, param := range params {
+		out[i] = normalizeTypeAnnotation(param.TypeAnnotation)
+	}
+	return out
+}
+
+func normalizeTypeAnnotation(name string) string {
+	switch name {
+	case "", "any", "dynamic":
+		return ""
+	case "bool":
+		return "boolean"
+	default:
+		return name
+	}
+}
+
+func isAssignableTo(expected string, actual string) bool {
+	expected = normalizeTypeAnnotation(expected)
+	actual = normalizeTypeAnnotation(actual)
+	if expected == "" || actual == "dynamic" {
+		return true
+	}
+	if expected == "array" && actual == "args_array" {
+		return true
+	}
+	if expected == "void" {
+		return actual == "void" || actual == "undefined"
+	}
+	return expected == actual
+}
+
+func isSupportedTypeAnnotation(name string) bool {
+	switch name {
+	case "any", "dynamic", "number", "string", "boolean", "bool", "object", "array", "function", "void", "null", "undefined":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBuiltinConstructor(name string) bool {
+	switch name {
+	case "Map", "Set", "Date", "RegExp", "Error", "TypeError", "AggregateError", "ArrayBuffer", "Uint8Array", "DataView":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasSpreadArguments(arguments []ast.Expression) bool {
@@ -1575,6 +1919,8 @@ func (a *Analyzer) validateClassExpression(expr ast.Expression, ctx *classContex
 	switch expr := expr.(type) {
 	case *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.UndefinedLiteral, *ast.StringLiteral, *ast.Identifier, *ast.NewTargetExpression:
 		return nil
+	case *ast.AwaitExpression:
+		return a.validateClassExpression(expr.Value, ctx)
 	case *ast.ThisExpression:
 		return nil
 	case *ast.SuperExpression:
@@ -1677,6 +2023,14 @@ func (a *Analyzer) validateClassExpression(expr ast.Expression, ctx *classContex
 		ident, ok := expr.Callee.(*ast.Identifier)
 		if !ok {
 			return errorAt(expr, "dynamic constructors are not supported")
+		}
+		if isBuiltinConstructor(ident.Name) {
+			for _, arg := range expr.Arguments {
+				if err := a.validateClassExpression(arg, ctx); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
 		if _, ok := ctx.classes[ident.Name]; !ok {
 			return errorAt(expr, "unknown class %s", ident.Name)

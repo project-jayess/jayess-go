@@ -429,6 +429,146 @@ function main(args) {
 	}
 }
 
+func TestCompileSupportsErrorBinaryIteratorAwaitAndTypeAnnotations(t *testing.T) {
+	source := `
+function add(left: number, right: number): number {
+  return left + right;
+}
+
+function main(args: array): number {
+  var total: number = add(1, 2);
+  total = total + 1;
+  var err = new Error("boom");
+  var typed = new TypeError("bad");
+  console.log(err.name, err.message, err.toString(), typed.toString());
+
+  var buffer = new ArrayBuffer(4);
+  var bytes = new Uint8Array(buffer);
+  bytes[0] = 300;
+  bytes.fill(7);
+  console.log(buffer.byteLength, bytes.length, bytes[0]);
+
+  var iter = Iterator.from([1, 2]);
+  console.log(iter.next().value, iter.next().done);
+
+  var value = await Promise.resolve(total);
+  console.log(value);
+  var chained = Promise.resolve(2).then((x) => x + 3);
+  console.log(await chained);
+  try {
+    await Promise.reject(new Error("nope"));
+  } catch (caught) {
+    console.log(caught.message);
+  }
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, symbol := range []string{
+		"@jayess_std_error_new",
+		"@jayess_std_array_buffer_new",
+		"@jayess_std_uint8_array_new",
+		"@jayess_std_iterator_from",
+		"@jayess_std_promise_resolve",
+		"@jayess_std_promise_reject",
+		"@jayess_await",
+	} {
+		if !strings.Contains(irText, symbol) {
+			t.Fatalf("expected %s in LLVM IR, got:\n%s", symbol, irText)
+		}
+	}
+}
+
+func TestCompileEnforcesOptionalTypeAnnotations(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "variable initializer",
+			source: `
+function main(args) {
+  var count: number = "kimchi";
+  return 0;
+}
+`,
+			message: "cannot initialize number variable count with string",
+		},
+		{
+			name: "assignment",
+			source: `
+function main(args) {
+  var count: number = 1;
+  count = "kimchi";
+  return 0;
+}
+`,
+			message: "cannot assign string to number",
+		},
+		{
+			name: "call argument",
+			source: `
+function add(left: number, right: number): number {
+  return left + right;
+}
+
+function main(args) {
+  console.log(add("kimchi", 2));
+  return 0;
+}
+`,
+			message: "argument 1 for add expects number, got string",
+		},
+		{
+			name: "return",
+			source: `
+function label(): string {
+  return 10;
+}
+
+function main(args) {
+  console.log(label());
+  return 0;
+}
+`,
+			message: "function label must return string, got number",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
+func TestCompileKeepsTypeAnnotationsOptional(t *testing.T) {
+	source := `
+function main(args) {
+  var value = 1;
+  value = "kimchi";
+  console.log(value);
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
 func TestCompileWarnsWhenUsingDeprecatedPrint(t *testing.T) {
 	source := `
 function main(args) {
@@ -449,6 +589,127 @@ function main(args) {
 	}
 	if result.Warnings[0].Line != 3 || result.Warnings[0].Column != 3 {
 		t.Fatalf("expected warning source span 3:3, got %d:%d", result.Warnings[0].Line, result.Warnings[0].Column)
+	}
+}
+
+func TestCompileWarnsWhenUsingGlobalTimerAliases(t *testing.T) {
+	source := `
+function main(args) {
+  sleepAsync(1, "done");
+  var id = setTimeout(() => {
+    return 0;
+  }, 1);
+  clearTimeout(id);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if len(result.Warnings) != 3 {
+		t.Fatalf("expected 3 timer compatibility warnings, got %d: %#v", len(result.Warnings), result.Warnings)
+	}
+	expected := []struct {
+		name   string
+		line   int
+		column int
+		use    string
+	}{
+		{name: "sleepAsync", line: 3, column: 3, use: "timers.sleep"},
+		{name: "setTimeout", line: 4, column: 12, use: "timers.setTimeout"},
+		{name: "clearTimeout", line: 7, column: 3, use: "timers.clearTimeout"},
+	}
+	for i, want := range expected {
+		warning := result.Warnings[i]
+		if warning.Code != "JY001" || warning.Category != "deprecation" {
+			t.Fatalf("expected deprecation warning JY001, got %#v", warning)
+		}
+		if !strings.Contains(warning.Message, want.name) || !strings.Contains(warning.Message, want.use) {
+			t.Fatalf("expected warning to mention %q and %q, got %q", want.name, want.use, warning.Message)
+		}
+		if warning.Line != want.line || warning.Column != want.column {
+			t.Fatalf("expected %s warning span %d:%d, got %d:%d", want.name, want.line, want.column, warning.Line, warning.Column)
+		}
+	}
+}
+
+func TestCompileWarningPolicyNoneSuppressesWarnings(t *testing.T) {
+	source := `
+function main(args) {
+  print("hello");
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc", WarningPolicy: "none"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected warning policy none to suppress warnings, got %#v", result.Warnings)
+	}
+}
+
+func TestCompileWarningPolicyErrorFailsOnWarning(t *testing.T) {
+	source := `
+function main(args) {
+  print("hello");
+  return 0;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc", WarningPolicy: "error"})
+	if err == nil {
+		t.Fatalf("expected warning policy error to fail")
+	}
+	compileErr, ok := err.(*CompileError)
+	if !ok {
+		t.Fatalf("expected CompileError, got %T: %v", err, err)
+	}
+	if compileErr.Diagnostic.Severity != "error" || compileErr.Diagnostic.Code != "JY001" {
+		t.Fatalf("expected escalated JY001 error, got %#v", compileErr.Diagnostic)
+	}
+	if len(compileErr.Diagnostic.Notes) == 0 || !strings.Contains(compileErr.Diagnostic.Notes[0], "warnings are treated as errors") {
+		t.Fatalf("expected warning policy note, got %#v", compileErr.Diagnostic.Notes)
+	}
+}
+
+func TestCompileWarningPolicyErrorAllowsConfiguredCategory(t *testing.T) {
+	source := `
+function main(args) {
+  print("hello");
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{
+		TargetTriple:             "x86_64-pc-windows-msvc",
+		WarningPolicy:            "error",
+		AllowedWarningCategories: []string{"deprecation"},
+	})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("expected allowed deprecation warning to remain visible, got %#v", result.Warnings)
+	}
+	if result.Warnings[0].Category != "deprecation" {
+		t.Fatalf("expected deprecation warning, got %#v", result.Warnings[0])
+	}
+}
+
+func TestCompileRejectsUnknownWarningPolicy(t *testing.T) {
+	source := `
+function main(args) {
+  return 0;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc", WarningPolicy: "invalid"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported warning policy") {
+		t.Fatalf("expected unsupported warning policy error, got: %v", err)
 	}
 }
 
@@ -1861,6 +2122,34 @@ function main(args) {
 	}
 	if !strings.Contains(string(result.LLVMIR), "@jayess_template_string") {
 		t.Fatalf("expected template strings to lower through runtime template helper")
+	}
+}
+
+func TestCompileSupportsRuntimeCompileBuiltin(t *testing.T) {
+	source := `
+function main(args) {
+  var result = compile("function main() { return 0; }", "build/runtime-compiled");
+  console.log(result.ok, result.output, result.stdout, result.stderr, result.error);
+  var configured = compile("function main() { return 0; }", { output: "build/runtime-compiled-configured", emit: "exe", warnings: "default" });
+  console.log(configured.ok, configured.output, configured.status);
+  var invalid = compile("function main() { return 0; }", { emit: "bad" });
+  console.log(invalid.ok, invalid.error);
+  var fileResult = compileFile("src/main.js", { output: "build/runtime-compiled-file", emit: "exe" });
+  console.log(fileResult.ok, fileResult.stderr);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_std_compile") {
+		t.Fatalf("expected compile builtin to lower through runtime compile helper")
+	}
+	if !strings.Contains(irText, "@jayess_std_compile_file") {
+		t.Fatalf("expected compileFile builtin to lower through runtime compile file helper")
 	}
 }
 

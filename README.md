@@ -33,6 +33,7 @@ Documentation index: [docs/index.md](/C:/Users/ncksd/Documents/it/jayess/jayess-
 
 Console output is documented in [docs/console.md](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/console.md).
 `print(...)` still works, but it is deprecated in favor of `console.log(...)`.
+Async functions, Promise helpers, timers, and async file I/O are documented in [docs/async.md](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/async.md).
 
 Jayess variable declarations are:
 - `var` for mutable block-scoped bindings
@@ -173,6 +174,18 @@ To build a native executable once `clang` is installed and on `PATH`:
 
 ```bash
 go run ./cmd/jayess --target=host --emit=exe -o build/hello.exe examples/hello.js
+```
+
+Warnings are shown by default. Use `--warnings=none` to suppress them temporarily, or `--warnings=error` to fail the build when warnings are emitted:
+
+```bash
+go run ./cmd/jayess --warnings=error --target=host --emit=llvm -o build/hello.ll examples/hello.js
+```
+
+When treating warnings as errors, specific warning categories can be allowed during migrations:
+
+```bash
+go run ./cmd/jayess --warnings=error --allow-warning=deprecation --target=host --emit=llvm -o build/hello.ll examples/hello.js
 ```
 
 On Windows, the default is now native executable output, so this also works:

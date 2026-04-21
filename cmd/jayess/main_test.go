@@ -72,3 +72,34 @@ func TestFormatCompileErrorWithSnippet(t *testing.T) {
 		t.Fatalf("expected caret line, got: %s", located)
 	}
 }
+
+func TestPrintWarningsAcceptsEmptyAndNonEmptyLists(t *testing.T) {
+	warnings := []compiler.Diagnostic{{
+		Severity: "warning",
+		Category: "deprecation",
+		Code:     "JY001",
+		Message:  "deprecated",
+	}}
+
+	printWarnings(nil)
+	printWarnings(warnings)
+}
+
+func TestStringListFlagAcceptsRepeatedAndCommaSeparatedValues(t *testing.T) {
+	var values stringListFlag
+	if err := values.Set("deprecation, compatibility"); err != nil {
+		t.Fatalf("Set returned error: %v", err)
+	}
+	if err := values.Set("style"); err != nil {
+		t.Fatalf("Set returned error: %v", err)
+	}
+	if got := values.String(); got != "deprecation,compatibility,style" {
+		t.Fatalf("unexpected String output: %q", got)
+	}
+	want := []string{"deprecation", "compatibility", "style"}
+	for i := range want {
+		if values[i] != want[i] {
+			t.Fatalf("expected value %d to be %q, got %q", i, want[i], values[i])
+		}
+	}
+}

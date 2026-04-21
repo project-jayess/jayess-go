@@ -318,6 +318,8 @@ func rewriteFunction(fn *ast.FunctionDecl, globalBindings map[string]string, glo
 		Visibility: fn.Visibility,
 		Name:       fn.Name,
 		Params:     params,
+		ReturnType: fn.ReturnType,
+		IsAsync:    fn.IsAsync,
 		Body:       body,
 	}, nil
 }
@@ -325,7 +327,7 @@ func rewriteFunction(fn *ast.FunctionDecl, globalBindings map[string]string, glo
 func rewriteParameters(params []ast.Parameter, bindings map[string]string, callBindings map[string]callBinding, ctx *classRewriteContext, classes map[string]*loweredClassInfo) ([]ast.Parameter, error) {
 	out := make([]ast.Parameter, 0, len(params))
 	for _, param := range params {
-		rewritten := ast.Parameter{Name: param.Name, Rest: param.Rest}
+		rewritten := ast.Parameter{Name: param.Name, Pattern: param.Pattern, Rest: param.Rest, TypeAnnotation: param.TypeAnnotation}
 		if param.Default != nil {
 			value, err := rewriteExpression(param.Default, bindings, callBindings, ctx, classes)
 			if err != nil {
@@ -392,13 +394,13 @@ func rewriteStatement(stmt ast.Statement, bindings map[string]string, callBindin
 		if _, ok, err := inferCallBinding(stmt.Value, bindings, callBindings, ctx, classes); err != nil {
 			return nil, err
 		} else if ok {
-			return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, Value: &ast.UndefinedLiteral{}}, nil
+			return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, TypeAnnotation: stmt.TypeAnnotation, Value: &ast.UndefinedLiteral{}}, nil
 		}
 		value, err := rewriteExpression(stmt.Value, bindings, callBindings, ctx, classes)
 		if err != nil {
 			return nil, err
 		}
-		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, Value: value}, nil
+		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, TypeAnnotation: stmt.TypeAnnotation, Value: value}, nil
 	case *ast.AssignmentStatement:
 		target, err := rewriteExpression(stmt.Target, bindings, callBindings, ctx, classes)
 		if err != nil {
@@ -581,6 +583,12 @@ func rewriteExpression(expr ast.Expression, bindings map[string]string, callBind
 		return expr, nil
 	case *ast.NewTargetExpression:
 		return expr, nil
+	case *ast.AwaitExpression:
+		value, err := rewriteExpression(expr.Value, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.AwaitExpression{BaseNode: expr.BaseNode, Value: value}, nil
 	case *ast.BoundSuperExpression:
 		return expr, nil
 	case *ast.ObjectLiteral:
@@ -802,6 +810,64 @@ func rewriteNewExpression(expr *ast.NewExpression, bindings map[string]string, c
 			call.Arguments = append(call.Arguments, value)
 		}
 		return call, nil
+	case "Error", "TypeError":
+		call := &ast.CallExpression{Callee: "__jayess_std_error_new", Arguments: []ast.Expression{&ast.StringLiteral{Value: ident.Name}}}
+		if len(expr.Arguments) > 1 {
+			return nil, fmt.Errorf("%s constructor expects at most 1 argument", ident.Name)
+		}
+		if len(expr.Arguments) == 0 {
+			call.Arguments = append(call.Arguments, &ast.UndefinedLiteral{})
+			return call, nil
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		call.Arguments = append(call.Arguments, value)
+		return call, nil
+	case "AggregateError":
+		call := &ast.CallExpression{Callee: "__jayess_std_aggregate_error_new"}
+		if len(expr.Arguments) < 1 || len(expr.Arguments) > 2 {
+			return nil, fmt.Errorf("AggregateError constructor expects 1 or 2 arguments")
+		}
+		for _, arg := range expr.Arguments {
+			value, err := rewriteExpression(arg, bindings, callBindings, ctx, classes)
+			if err != nil {
+				return nil, err
+			}
+			call.Arguments = append(call.Arguments, value)
+		}
+		if len(call.Arguments) == 1 {
+			call.Arguments = append(call.Arguments, &ast.UndefinedLiteral{})
+		}
+		return call, nil
+	case "ArrayBuffer":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("ArrayBuffer constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_array_buffer_new", Arguments: []ast.Expression{value}}, nil
+	case "Uint8Array":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("Uint8Array constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_uint8_array_new", Arguments: []ast.Expression{value}}, nil
+	case "DataView":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("DataView constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_data_view_new", Arguments: []ast.Expression{value}}, nil
 	}
 	if _, ok := classes[ident.Name]; !ok {
 		return nil, fmt.Errorf("unknown class %s", ident.Name)
@@ -971,6 +1037,76 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 				case "of":
 					return &ast.CallExpression{Callee: "__jayess_array_of", Arguments: args}, nil
 				}
+			case "Uint8Array":
+				if member.Property == "fromString" {
+					if len(args) < 1 || len(args) > 2 {
+						return nil, fmt.Errorf("Uint8Array.fromString expects 1 or 2 arguments")
+					}
+					encoding := ast.Expression(&ast.UndefinedLiteral{})
+					if len(args) == 2 {
+						encoding = args[1]
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_uint8_array_from_string", Arguments: []ast.Expression{args[0], encoding}}, nil
+				}
+				if member.Property == "concat" {
+					return &ast.CallExpression{Callee: "__jayess_std_uint8_array_concat", Arguments: args}, nil
+				}
+				if member.Property == "equals" {
+					if len(args) != 2 {
+						return nil, fmt.Errorf("Uint8Array.equals expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_uint8_array_equals", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				}
+				if member.Property == "compare" {
+					if len(args) != 2 {
+						return nil, fmt.Errorf("Uint8Array.compare expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_uint8_array_compare", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				}
+			case "Iterator":
+				if member.Property == "from" {
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Iterator.from expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_iterator_from", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "Promise":
+				if member.Property == "resolve" {
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Promise.resolve expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_promise_resolve", Arguments: []ast.Expression{args[0]}}, nil
+				}
+				if member.Property == "reject" {
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Promise.reject expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_promise_reject", Arguments: []ast.Expression{args[0]}}, nil
+				}
+				if member.Property == "all" {
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Promise.all expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_promise_all", Arguments: []ast.Expression{args[0]}}, nil
+				}
+				if member.Property == "race" {
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Promise.race expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_promise_race", Arguments: []ast.Expression{args[0]}}, nil
+				}
+				if member.Property == "allSettled" {
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Promise.allSettled expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_promise_all_settled", Arguments: []ast.Expression{args[0]}}, nil
+				}
+				if member.Property == "any" {
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Promise.any expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_promise_any", Arguments: []ast.Expression{args[0]}}, nil
+				}
 			case "console":
 				switch member.Property {
 				case "log":
@@ -1007,6 +1143,11 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("process.arch expects no arguments")
 					}
 					return &ast.CallExpression{Callee: "__jayess_process_arch"}, nil
+				case "threadPoolSize":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("process.threadPoolSize expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_thread_pool_size"}, nil
 				case "exit":
 					if len(args) != 1 {
 						return nil, fmt.Errorf("process.exit expects exactly 1 argument")
@@ -1070,6 +1211,202 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 					}
 					return &ast.CallExpression{Callee: "__jayess_path_extname", Arguments: []ast.Expression{args[0]}}, nil
 				}
+			case "url":
+				switch member.Property {
+				case "parse":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("url.parse expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_url_parse", Arguments: []ast.Expression{args[0]}}, nil
+				case "format":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("url.format expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_url_format", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "querystring":
+				switch member.Property {
+				case "parse":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("querystring.parse expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_querystring_parse", Arguments: []ast.Expression{args[0]}}, nil
+				case "stringify":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("querystring.stringify expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_querystring_stringify", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "dns":
+				switch member.Property {
+				case "lookup":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("dns.lookup expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_dns_lookup", Arguments: []ast.Expression{args[0]}}, nil
+				case "lookupAll":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("dns.lookupAll expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_dns_lookup_all", Arguments: []ast.Expression{args[0]}}, nil
+				case "reverse":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("dns.reverse expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_dns_reverse", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "net":
+				switch member.Property {
+				case "isIP":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("net.isIP expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_net_is_ip", Arguments: []ast.Expression{args[0]}}, nil
+				case "connect":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("net.connect expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_net_connect", Arguments: []ast.Expression{args[0]}}, nil
+				case "listen":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("net.listen expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_net_listen", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "http":
+				switch member.Property {
+				case "parseRequest":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.parseRequest expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_parse_request", Arguments: []ast.Expression{args[0]}}, nil
+				case "formatRequest":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.formatRequest expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_format_request", Arguments: []ast.Expression{args[0]}}, nil
+				case "parseResponse":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.parseResponse expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_parse_response", Arguments: []ast.Expression{args[0]}}, nil
+				case "formatResponse":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.formatResponse expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_format_response", Arguments: []ast.Expression{args[0]}}, nil
+				case "request":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.request expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_request", Arguments: []ast.Expression{args[0]}}, nil
+				case "requestStream":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.requestStream expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_request_stream", Arguments: []ast.Expression{args[0]}}, nil
+				case "requestStreamAsync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.requestStreamAsync expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_request_stream_async", Arguments: []ast.Expression{args[0]}}, nil
+				case "requestAsync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.requestAsync expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_request_async", Arguments: []ast.Expression{args[0]}}, nil
+				case "get":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.get expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_get", Arguments: []ast.Expression{args[0]}}, nil
+				case "getStream":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.getStream expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_get_stream", Arguments: []ast.Expression{args[0]}}, nil
+				case "getStreamAsync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.getStreamAsync expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_get_stream_async", Arguments: []ast.Expression{args[0]}}, nil
+				case "getAsync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.getAsync expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_get_async", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "https":
+				switch member.Property {
+				case "isAvailable":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("https.isAvailable expects exactly 0 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_is_available"}, nil
+				case "backend":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("https.backend expects exactly 0 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_backend"}, nil
+				case "request":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("https.request expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_request", Arguments: []ast.Expression{args[0]}}, nil
+				case "requestStream":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("https.requestStream expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_request_stream", Arguments: []ast.Expression{args[0]}}, nil
+				case "requestStreamAsync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("https.requestStreamAsync expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_request_stream_async", Arguments: []ast.Expression{args[0]}}, nil
+				case "requestAsync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("https.requestAsync expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_request_async", Arguments: []ast.Expression{args[0]}}, nil
+				case "get":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("https.get expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_get", Arguments: []ast.Expression{args[0]}}, nil
+				case "getStream":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("https.getStream expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_get_stream", Arguments: []ast.Expression{args[0]}}, nil
+				case "getStreamAsync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("https.getStreamAsync expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_get_stream_async", Arguments: []ast.Expression{args[0]}}, nil
+				case "getAsync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("https.getAsync expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_get_async", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "tls":
+				switch member.Property {
+				case "isAvailable":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("tls.isAvailable expects exactly 0 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_tls_is_available"}, nil
+				case "backend":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("tls.backend expects exactly 0 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_tls_backend"}, nil
+				case "connect":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("tls.connect expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_tls_connect", Arguments: []ast.Expression{args[0]}}, nil
+				}
 			case "fs":
 				switch member.Property {
 				case "readFile":
@@ -1077,11 +1414,31 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("fs.readFile expects 1 or 2 arguments")
 					}
 					return &ast.CallExpression{Callee: "__jayess_fs_read_file", Arguments: args}, nil
+				case "readFileAsync":
+					if len(args) != 1 && len(args) != 2 {
+						return nil, fmt.Errorf("fs.readFileAsync expects 1 or 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_fs_read_file_async", Arguments: args}, nil
 				case "writeFile":
 					if len(args) != 2 {
 						return nil, fmt.Errorf("fs.writeFile expects exactly 2 arguments")
 					}
 					return &ast.CallExpression{Callee: "__jayess_fs_write_file", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "writeFileAsync":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("fs.writeFileAsync expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_fs_write_file_async", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "createReadStream":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("fs.createReadStream expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_fs_create_read_stream", Arguments: []ast.Expression{args[0]}}, nil
+				case "createWriteStream":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("fs.createWriteStream expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_fs_create_write_stream", Arguments: []ast.Expression{args[0]}}, nil
 				case "exists":
 					if len(args) != 1 {
 						return nil, fmt.Errorf("fs.exists expects exactly 1 argument")
@@ -1122,6 +1479,24 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("fs.rename expects exactly 2 arguments")
 					}
 					return &ast.CallExpression{Callee: "__jayess_fs_rename", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				}
+			case "timers":
+				switch member.Property {
+				case "sleep":
+					if len(args) != 1 && len(args) != 2 {
+						return nil, fmt.Errorf("timers.sleep expects 1 or 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_timers_sleep", Arguments: args}, nil
+				case "setTimeout":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("timers.setTimeout expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_timers_set_timeout", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "clearTimeout":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("timers.clearTimeout expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_timers_clear_timeout", Arguments: []ast.Expression{args[0]}}, nil
 				}
 			}
 		}
@@ -1240,6 +1615,17 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 			}
 			return &ast.CallExpression{Callee: "__jayess_array_find", Arguments: []ast.Expression{target, args[0]}}, nil
 		}
+	}
+
+	if !member.Private && member.Property == "concat" {
+		target, err := rewriteExpression(member.Target, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		values := make([]ast.Expression, 0, len(args)+1)
+		values = append(values, target)
+		values = append(values, args...)
+		return &ast.CallExpression{Callee: "__jayess_std_uint8_array_concat", Arguments: values}, nil
 	}
 
 	return &ast.InvokeExpression{Callee: callee, Arguments: args, Optional: member.Optional}, nil

@@ -9,10 +9,13 @@ This docs folder covers the language and runtime surface currently implemented i
 - [Language Overview](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/language.md)
 - [Classes](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/classes.md)
 - [Modules](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/modules.md)
+- [Async Runtime](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/async.md)
 - [Standard Library](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/stdlib.md)
+- [Timers](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/timers.md)
 - [File System](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/fs.md)
 - [Path](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/path.md)
 - [Process](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/process.md)
+- [Networking Foundation](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/networking.md)
 - [Native Interop](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/native-interop.md)
 - [Console](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/console.md)
 

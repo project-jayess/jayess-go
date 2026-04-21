@@ -1,44 +1,54 @@
-export class BaseCounter {
+export class BaseCounter
+{
   value = 1;
   #secret = 9;
 
-  constructor(step) {
+  constructor(step)
+  {
     this.step = step;
   }
 
-  readSecret() {
+  readSecret()
+  {
     return this.#secret;
   }
 }
 
-export class DeepCounter extends BaseCounter {
+export class DeepCounter extends BaseCounter
+{
   label = "deep";
   #code = 7;
   static family = "counter";
   static #hiddenFamily = "shadow";
 
-  static familyName() {
+  static familyName()
+  {
     return this.family;
   }
 
-  static #hiddenName() {
+  static #hiddenName()
+  {
     return this.#hiddenFamily;
   }
 
-  constructor(step, boost) {
+  constructor(step, boost)
+  {
     super(step);
     this.boost = boost;
   }
 
-  total() {
+  total()
+  {
     return super.value + this.boost + this.#code;
   }
 
-  reveal() {
+  reveal()
+  {
     return super.readSecret() + this.#code;
   }
 
-  static shadow() {
+  static shadow()
+  {
     return this.#hiddenName();
   }
 }

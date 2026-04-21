@@ -451,6 +451,10 @@ func lookupIdent(literal string) TokenType {
 		return TokenFinally
 	case "throw":
 		return TokenThrow
+	case "await":
+		return TokenAwait
+	case "async":
+		return TokenAsync
 	case "true":
 		return TokenTrue
 	case "false":

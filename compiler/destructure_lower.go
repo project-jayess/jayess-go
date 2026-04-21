@@ -88,7 +88,7 @@ func (l *destructureLowerer) lowerParameters(params []ast.Parameter) ([]ast.Para
 	out := make([]ast.Parameter, 0, len(params))
 	var prologue []ast.Statement
 	for _, param := range params {
-		rewritten := ast.Parameter{Rest: param.Rest}
+		rewritten := ast.Parameter{Rest: param.Rest, TypeAnnotation: param.TypeAnnotation}
 		if param.Default != nil {
 			value, err := l.lowerExpression(param.Default)
 			if err != nil {
@@ -135,7 +135,7 @@ func (l *destructureLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement
 		if err != nil {
 			return nil, err
 		}
-		return []ast.Statement{&ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, Value: value}}, nil
+		return []ast.Statement{&ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, TypeAnnotation: stmt.TypeAnnotation, Value: value}}, nil
 	case *ast.DestructuringDecl:
 		value, err := l.lowerExpression(stmt.Value)
 		if err != nil {
@@ -503,6 +503,8 @@ func (l *destructureLowerer) lowerExpression(expr ast.Expression) (ast.Expressio
 		}
 		rewritten := &ast.FunctionExpression{
 			Params:          params,
+			ReturnType:      expr.ReturnType,
+			IsAsync:         expr.IsAsync,
 			IsArrowFunction: expr.IsArrowFunction,
 		}
 		if expr.ExpressionBody != nil {

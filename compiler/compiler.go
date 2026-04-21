@@ -14,7 +14,9 @@ import (
 )
 
 type Options struct {
-	TargetTriple string
+	TargetTriple             string
+	WarningPolicy            string
+	AllowedWarningCategories []string
 }
 
 type Diagnostic struct {
@@ -96,6 +98,10 @@ func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.E
 		return nil, formatParseError(sourcePath, err)
 	}
 	warnings := collectWarnings(program, sourcePath)
+	warnings, err = applyWarningPolicy(warnings, opts.WarningPolicy, opts.AllowedWarningCategories)
+	if err != nil {
+		return nil, err
+	}
 	program.ExternFunctions = append(extraExterns, program.ExternFunctions...)
 
 	program, err = lowerDestructuring(program)
@@ -128,6 +134,16 @@ func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.E
 		return nil, formatAnalysisError(sourcePath, "semantic analysis failed", err)
 	}
 
+	program, err = lowerAsyncFunctions(program)
+	if err != nil {
+		return nil, fmt.Errorf("async lowering failed: %w", err)
+	}
+
+	program, err = lowerAsyncFunctionExpressions(program)
+	if err != nil {
+		return nil, fmt.Errorf("async function expression lowering failed: %w", err)
+	}
+
 	_ = lifetime.New().Analyze(program)
 
 	module, err := lowering.Lower(program)
@@ -142,6 +158,49 @@ func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.E
 	}
 
 	return &Result{LLVMIR: llvmIR, Warnings: warnings}, nil
+}
+
+func applyWarningPolicy(warnings []Diagnostic, policy string, allowedCategories []string) ([]Diagnostic, error) {
+	switch policy {
+	case "", "default":
+		return warnings, nil
+	case "none":
+		return nil, nil
+	case "error":
+		diagnostic, blockedCount, ok := firstBlockedWarning(warnings, allowedCategories)
+		if !ok {
+			return warnings, nil
+		}
+		diagnostic.Severity = "error"
+		diagnostic.Notes = append(append([]string{}, diagnostic.Notes...), "warnings are treated as errors")
+		if blockedCount > 1 {
+			diagnostic.Notes = append(diagnostic.Notes, fmt.Sprintf("%d additional blocked warning(s) not shown", blockedCount-1))
+		}
+		return nil, &CompileError{Diagnostic: diagnostic}
+	default:
+		return nil, fmt.Errorf("unsupported warning policy %q; expected default, none, or error", policy)
+	}
+}
+
+func firstBlockedWarning(warnings []Diagnostic, allowedCategories []string) (Diagnostic, int, bool) {
+	allowed := map[string]bool{}
+	for _, category := range allowedCategories {
+		if category != "" {
+			allowed[category] = true
+		}
+	}
+	var first Diagnostic
+	count := 0
+	for _, warning := range warnings {
+		if allowed[warning.Category] {
+			continue
+		}
+		if count == 0 {
+			first = warning
+		}
+		count++
+	}
+	return first, count, count > 0
 }
 
 func formatAnalysisError(sourcePath string, stage string, err error) error {
@@ -274,18 +333,7 @@ func expressionWarnings(expr ast.Expression, sourcePath string) []Diagnostic {
 		return nil
 	case *ast.CallExpression:
 		var warnings []Diagnostic
-		if expr.Callee == "print" {
-			pos := ast.PositionOf(expr)
-			warnings = append(warnings, Diagnostic{
-				Severity: "warning",
-				Category: "deprecation",
-				Code:     "JY001",
-				File:     sourcePath,
-				Line:     pos.Line,
-				Column:   pos.Column,
-				Message:  "'print' is deprecated; use console.log, console.warn, or console.error instead",
-			})
-		}
+		warnings = append(warnings, callDeprecationWarning(expr, sourcePath)...)
 		for _, arg := range expr.Arguments {
 			warnings = append(warnings, expressionWarnings(arg, sourcePath)...)
 		}
@@ -363,4 +411,30 @@ func expressionWarnings(expr ast.Expression, sourcePath string) []Diagnostic {
 		return warnings
 	}
 	return nil
+}
+
+func callDeprecationWarning(expr *ast.CallExpression, sourcePath string) []Diagnostic {
+	message := ""
+	switch expr.Callee {
+	case "print":
+		message = "'print' is deprecated; use console.log, console.warn, or console.error instead"
+	case "sleepAsync":
+		message = "'sleepAsync' is a compatibility alias; use timers.sleep instead"
+	case "setTimeout":
+		message = "'setTimeout' is a compatibility alias; use timers.setTimeout instead"
+	case "clearTimeout":
+		message = "'clearTimeout' is a compatibility alias; use timers.clearTimeout instead"
+	default:
+		return nil
+	}
+	pos := ast.PositionOf(expr)
+	return []Diagnostic{{
+		Severity: "warning",
+		Category: "deprecation",
+		Code:     "JY001",
+		File:     sourcePath,
+		Line:     pos.Line,
+		Column:   pos.Column,
+		Message:  message,
+	}}
 }

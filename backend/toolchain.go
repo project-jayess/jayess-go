@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"jayess-go/compiler"
 )
@@ -48,6 +49,11 @@ func (tc *Toolchain) BuildExecutable(result *compiler.Result, opts compiler.Opti
 
 	args := []string{"-target", opts.TargetTriple, "-I", runtimeIncludeDir, irPath, runtimePath}
 	args = append(args, result.NativeImports...)
+	if strings.Contains(opts.TargetTriple, "windows") {
+		args = append(args, "-lws2_32", "-lwinhttp", "-lsecur32", "-lcrypt32")
+	} else if strings.Contains(opts.TargetTriple, "linux") || strings.Contains(opts.TargetTriple, "darwin") {
+		args = append(args, "-lssl", "-lcrypto")
+	}
 	args = append(args, "-o", outputPath)
 	clangCmd := exec.Command(tc.ClangPath, args...)
 	if output, err := clangCmd.CombinedOutput(); err != nil {

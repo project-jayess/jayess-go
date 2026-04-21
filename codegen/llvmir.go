@@ -208,7 +208,10 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_process_argv()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_process_platform()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_process_arch()\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_process_thread_pool_size()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_process_exit(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_compile(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_compile_file(ptr, ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_path_join(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_path_normalize(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_path_resolve(ptr)\n")
@@ -221,8 +224,47 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_path_basename(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_path_dirname(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_path_extname(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_url_parse(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_url_format(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_querystring_parse(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_querystring_stringify(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_dns_lookup(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_dns_lookup_all(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_dns_reverse(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_net_is_ip(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_net_connect(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_net_listen(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_parse_request(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_format_request(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_parse_response(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_format_response(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_request(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_request_stream(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_request_stream_async(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_get(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_get_stream(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_get_stream_async(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_request_async(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_http_get_async(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_request(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_request_stream(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_request_stream_async(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_get(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_get_stream(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_get_stream_async(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_request_async(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_get_async(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_tls_is_available()\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_tls_backend()\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_tls_connect(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_is_available()\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_https_backend()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_read_file(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_read_file_async(ptr, ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_write_file(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_write_file_async(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_create_read_stream(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_create_write_stream(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_exists(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_read_dir(ptr, ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_stat(ptr)\n")
@@ -234,6 +276,9 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare ptr @jayess_read_line(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_read_key(ptr)\n")
 	fmt.Fprintf(&buf, "declare void @jayess_sleep_ms(i32)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_sleep_async(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_set_timeout(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_clear_timeout(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_make_args(i32, ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_args_get(ptr, i32)\n")
 	fmt.Fprintf(&buf, "declare i32 @jayess_args_length(ptr)\n")
@@ -263,6 +308,25 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_date_new(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_date_now()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_regexp_new(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_error_new(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_aggregate_error_new(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_array_buffer_new(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_uint8_array_new(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_data_view_new(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_uint8_array_from_string(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_uint8_array_concat(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_uint8_array_equals(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_uint8_array_compare(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_iterator_from(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_promise_resolve(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_promise_reject(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_promise_all(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_promise_race(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_promise_all_settled(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_promise_any(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_await(ptr)\n")
+	fmt.Fprintf(&buf, "declare void @jayess_run_microtasks()\n")
+	fmt.Fprintf(&buf, "declare void @jayess_runtime_shutdown()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_json_stringify(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_json_parse(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_iterable_values(ptr)\n")
@@ -323,6 +387,7 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare i1 @jayess_args_is_truthy(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_merge_bound_args(ptr, ptr)\n")
 	fmt.Fprintf(&buf, "declare void @jayess_throw(ptr)\n")
+	fmt.Fprintf(&buf, "declare void @jayess_throw_not_function()\n")
 	fmt.Fprintf(&buf, "declare i1 @jayess_has_exception()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_take_exception()\n")
 	fmt.Fprintf(&buf, "declare void @jayess_report_uncaught_exception()\n")
@@ -450,6 +515,8 @@ func (g *LLVMIRGenerator) emitEntryWrapper(buf *bytes.Buffer, fn ir.Function) er
 	} else {
 		buf.WriteString("  %result = call double @jayess_user_main()\n")
 	}
+	buf.WriteString("  call void @jayess_run_microtasks()\n")
+	buf.WriteString("  call void @jayess_runtime_shutdown()\n")
 	buf.WriteString("  %thrown = call i1 @jayess_has_exception()\n")
 	buf.WriteString("  br i1 %thrown, label %uncaught, label %exit.ok\n")
 	buf.WriteString("uncaught:\n")
@@ -1461,12 +1528,43 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		}
 		fmt.Fprintf(buf, "  call void @jayess_print_many(ptr %s)\n", argsBoxed)
 		return emittedValue{}, nil
+	case "compile", "compileFile":
+		source, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedSource, err := g.emitBoxedValue(buf, state, source)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		var boxedOutput string
+		if len(call.Arguments) > 1 {
+			output, err := g.emitExpression(buf, state, call.Arguments[1])
+			if err != nil {
+				return emittedValue{}, err
+			}
+			boxedOutput, err = g.emitBoxedValue(buf, state, output)
+			if err != nil {
+				return emittedValue{}, err
+			}
+		} else {
+			boxedOutput = state.nextTemp()
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", boxedOutput)
+		}
+		tmp := state.nextTemp()
+		runtimeName := "jayess_std_compile"
+		if call.Callee == "compileFile" {
+			runtimeName = "jayess_std_compile_file"
+		}
+		fmt.Fprintf(buf, "  %s = call ptr @%s(ptr %s, ptr %s)\n", tmp, runtimeName, boxedSource, boxedOutput)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_console_log", "__jayess_console_warn", "__jayess_console_error":
 		argsBoxed, err := g.emitBoxedArrayFromExpressions(buf, state, call.Arguments)
 		if err != nil {
 			return emittedValue{}, err
 		}
-		fmt.Fprintf(buf, "  call void @%s(ptr %s)\n", call.Callee, argsBoxed)
+		runtimeName := strings.TrimPrefix(call.Callee, "__jayess_")
+		fmt.Fprintf(buf, "  call void @jayess_%s(ptr %s)\n", runtimeName, argsBoxed)
 		return emittedValue{}, nil
 	case "__jayess_process_cwd":
 		tmp := state.nextTemp()
@@ -1491,11 +1589,15 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 	case "__jayess_process_platform":
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_process_platform()\n", tmp)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_process_arch":
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_process_arch()\n", tmp)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_process_thread_pool_size":
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_process_thread_pool_size()\n", tmp)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_process_exit":
 		codeValue, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -1515,7 +1617,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		}
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_path_join(ptr %s)\n", tmp, argsBoxed)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_path_normalize":
 		pathValue, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -1527,7 +1629,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		}
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_path_normalize(ptr %s)\n", tmp, boxedPath)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_path_resolve":
 		argsBoxed, err := g.emitBoxedArrayFromExpressions(buf, state, call.Arguments)
 		if err != nil {
@@ -1535,7 +1637,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		}
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_path_resolve(ptr %s)\n", tmp, argsBoxed)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_path_relative":
 		fromValue, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -1555,7 +1657,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		}
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_path_relative(ptr %s, ptr %s)\n", tmp, boxedFrom, boxedTo)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_path_parse":
 		pathValue, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -1591,15 +1693,43 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		}
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_path_format(ptr %s)\n", tmp, boxedParts)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_path_sep":
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_path_sep()\n", tmp)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_path_delimiter":
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_path_delimiter()\n", tmp)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_tls_is_available":
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_tls_is_available()\n", tmp)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_tls_backend":
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_tls_backend()\n", tmp)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_tls_connect":
+		argValue, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedArg, err := g.emitBoxedValue(buf, state, argValue)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_tls_connect(ptr %s)\n", tmp, boxedArg)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_https_is_available":
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_https_is_available()\n", tmp)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_https_backend":
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_https_backend()\n", tmp)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_path_basename", "__jayess_path_dirname", "__jayess_path_extname":
 		pathValue, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -1610,10 +1740,23 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			return emittedValue{}, err
 		}
 		tmp := state.nextTemp()
-		runtimeName := strings.TrimPrefix(call.Callee, "__")
-		fmt.Fprintf(buf, "  %s = call ptr @%s(ptr %s)\n", tmp, runtimeName, boxedPath)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
-	case "__jayess_fs_read_file":
+		runtimeName := strings.TrimPrefix(call.Callee, "__jayess_")
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_%s(ptr %s)\n", tmp, runtimeName, boxedPath)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_url_parse", "__jayess_url_format", "__jayess_querystring_parse", "__jayess_querystring_stringify", "__jayess_dns_lookup", "__jayess_dns_lookup_all", "__jayess_dns_reverse", "__jayess_net_is_ip", "__jayess_net_connect", "__jayess_net_listen", "__jayess_http_parse_request", "__jayess_http_format_request", "__jayess_http_parse_response", "__jayess_http_format_response", "__jayess_http_request", "__jayess_http_request_stream", "__jayess_http_request_stream_async", "__jayess_http_get", "__jayess_http_get_stream", "__jayess_http_get_stream_async", "__jayess_http_request_async", "__jayess_http_get_async", "__jayess_https_request", "__jayess_https_request_stream", "__jayess_https_request_stream_async", "__jayess_https_get", "__jayess_https_get_stream", "__jayess_https_get_stream_async", "__jayess_https_request_async", "__jayess_https_get_async":
+		argValue, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedArg, err := g.emitBoxedValue(buf, state, argValue)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		runtimeName := strings.TrimPrefix(call.Callee, "__jayess_")
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_%s(ptr %s)\n", tmp, runtimeName, boxedArg)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_fs_read_file", "__jayess_fs_read_file_async":
 		pathValue, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
 			return emittedValue{}, err
@@ -1639,9 +1782,13 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			}
 		}
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_fs_read_file(ptr %s, ptr %s)\n", tmp, boxedPath, encodingRef)
+		runtimeName := "jayess_std_fs_read_file"
+		if call.Callee == "__jayess_fs_read_file_async" {
+			runtimeName = "jayess_std_fs_read_file_async"
+		}
+		fmt.Fprintf(buf, "  %s = call ptr @%s(ptr %s, ptr %s)\n", tmp, runtimeName, boxedPath, encodingRef)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
-	case "__jayess_fs_write_file":
+	case "__jayess_fs_write_file", "__jayess_fs_write_file_async":
 		pathValue, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
 			return emittedValue{}, err
@@ -1659,7 +1806,27 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			return emittedValue{}, err
 		}
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_fs_write_file(ptr %s, ptr %s)\n", tmp, boxedPath, boxedContent)
+		runtimeName := "jayess_std_fs_write_file"
+		if call.Callee == "__jayess_fs_write_file_async" {
+			runtimeName = "jayess_std_fs_write_file_async"
+		}
+		fmt.Fprintf(buf, "  %s = call ptr @%s(ptr %s, ptr %s)\n", tmp, runtimeName, boxedPath, boxedContent)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_fs_create_read_stream", "__jayess_fs_create_write_stream":
+		pathValue, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedPath, err := g.emitBoxedValue(buf, state, pathValue)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		runtimeName := "jayess_std_fs_create_read_stream"
+		if call.Callee == "__jayess_fs_create_write_stream" {
+			runtimeName = "jayess_std_fs_create_write_stream"
+		}
+		fmt.Fprintf(buf, "  %s = call ptr @%s(ptr %s)\n", tmp, runtimeName, boxedPath)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_fs_exists":
 		pathValue, err := g.emitExpression(buf, state, call.Arguments[0])
@@ -1779,8 +1946,8 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			return emittedValue{}, err
 		}
 		tmp := state.nextTemp()
-		runtimeName := strings.TrimPrefix(call.Callee, "__")
-		fmt.Fprintf(buf, "  %s = call ptr @%s(ptr %s, ptr %s)\n", tmp, runtimeName, boxedFrom, boxedTo)
+		runtimeName := strings.TrimPrefix(call.Callee, "__jayess_")
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_%s(ptr %s, ptr %s)\n", tmp, runtimeName, boxedFrom, boxedTo)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "readLine":
 		prompt, err := g.emitExpression(buf, state, call.Arguments[0])
@@ -1811,6 +1978,64 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		fmt.Fprintf(buf, "  %s = fptosi double %s to i32\n", tmp, numberRef)
 		fmt.Fprintf(buf, "  call void @jayess_sleep_ms(i32 %s)\n", tmp)
 		return emittedValue{}, nil
+	case "sleepAsync", "__jayess_timers_sleep":
+		delay, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedDelay, err := g.emitBoxedValue(buf, state, delay)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		valueRef := ""
+		if len(call.Arguments) > 1 {
+			value, err := g.emitExpression(buf, state, call.Arguments[1])
+			if err != nil {
+				return emittedValue{}, err
+			}
+			valueRef, err = g.emitBoxedValue(buf, state, value)
+			if err != nil {
+				return emittedValue{}, err
+			}
+		} else {
+			valueRef = state.nextTemp()
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", valueRef)
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_sleep_async(ptr %s, ptr %s)\n", tmp, boxedDelay, valueRef)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "setTimeout", "__jayess_timers_set_timeout":
+		callback, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		delay, err := g.emitExpression(buf, state, call.Arguments[1])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedCallback, err := g.emitBoxedValue(buf, state, callback)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedDelay, err := g.emitBoxedValue(buf, state, delay)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_set_timeout(ptr %s, ptr %s)\n", tmp, boxedCallback, boxedDelay)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "clearTimeout", "__jayess_timers_clear_timeout":
+		id, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedID, err := g.emitBoxedValue(buf, state, id)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_clear_timeout(ptr %s)\n", tmp, boxedID)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_apply":
 		return g.emitApply(buf, state, call)
 	case "__jayess_bind":
@@ -1912,10 +2137,6 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		if err != nil {
 			return emittedValue{}, err
 		}
-		end, err := g.emitExpression(buf, state, call.Arguments[2])
-		if err != nil {
-			return emittedValue{}, err
-		}
 		startRef, err := g.emitNumberOperand(buf, state, start)
 		if err != nil {
 			return emittedValue{}, err
@@ -1924,7 +2145,11 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		fmt.Fprintf(buf, "  %s = fptosi double %s to i32\n", startInt, startRef)
 		endInt := "0"
 		hasEnd := "false"
-		if end.kind != ir.ValueUndefined {
+		if _, omittedEnd := call.Arguments[2].(*ir.UndefinedLiteral); !omittedEnd {
+			end, err := g.emitExpression(buf, state, call.Arguments[2])
+			if err != nil {
+				return emittedValue{}, err
+			}
 			endRef, err := g.emitNumberOperand(buf, state, end)
 			if err != nil {
 				return emittedValue{}, err
@@ -2119,6 +2344,79 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_regexp_new(ptr %s, ptr %s)\n", tmp, patternRef, flagsRef)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_std_error_new":
+		name, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		message, err := g.emitExpression(buf, state, call.Arguments[1])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedName, err := g.emitBoxedValue(buf, state, name)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedMessage, err := g.emitBoxedValue(buf, state, message)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_error_new(ptr %s, ptr %s)\n", tmp, boxedName, boxedMessage)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_std_aggregate_error_new":
+		errorsValue, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		message, err := g.emitExpression(buf, state, call.Arguments[1])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedErrors, err := g.emitBoxedValue(buf, state, errorsValue)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedMessage, err := g.emitBoxedValue(buf, state, message)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_aggregate_error_new(ptr %s, ptr %s)\n", tmp, boxedErrors, boxedMessage)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_std_array_buffer_new", "__jayess_std_uint8_array_new", "__jayess_std_data_view_new", "__jayess_std_iterator_from", "__jayess_std_promise_resolve", "__jayess_std_promise_reject", "__jayess_std_promise_all", "__jayess_std_promise_race", "__jayess_std_promise_all_settled", "__jayess_std_promise_any", "__jayess_await":
+		value, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxed, err := g.emitBoxedValue(buf, state, value)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		runtimeName := strings.TrimPrefix(call.Callee, "__")
+		fmt.Fprintf(buf, "  %s = call ptr @%s(ptr %s)\n", tmp, runtimeName, boxed)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_std_uint8_array_from_string":
+		value, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		encoding, err := g.emitExpression(buf, state, call.Arguments[1])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedValue, err := g.emitBoxedValue(buf, state, value)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedEncoding, err := g.emitBoxedValue(buf, state, encoding)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_uint8_array_from_string(ptr %s, ptr %s)\n", tmp, boxedValue, boxedEncoding)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_std_json_stringify":
 		value, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -2165,7 +2463,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			return emittedValue{}, err
 		}
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call double @%s(double %s)\n", tmp, call.Callee, number)
+		fmt.Fprintf(buf, "  %s = call double @%s(double %s)\n", tmp, strings.TrimPrefix(call.Callee, "__"), number)
 		return emittedValue{kind: ir.ValueNumber, ref: tmp}, nil
 	case "__jayess_math_min", "__jayess_math_max", "__jayess_math_pow":
 		left, err := g.emitExpression(buf, state, call.Arguments[0])
@@ -2185,7 +2483,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			return emittedValue{}, err
 		}
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call double @%s(double %s, double %s)\n", tmp, call.Callee, leftRef, rightRef)
+		fmt.Fprintf(buf, "  %s = call double @%s(double %s, double %s)\n", tmp, strings.TrimPrefix(call.Callee, "__"), leftRef, rightRef)
 		return emittedValue{kind: ir.ValueNumber, ref: tmp}, nil
 	case "__jayess_math_random":
 		tmp := state.nextTemp()
@@ -2247,6 +2545,56 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_array_of(ptr %s)\n", tmp, argsBoxed)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_std_uint8_array_concat":
+		argsBoxed, err := g.emitBoxedArrayFromExpressions(buf, state, call.Arguments)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_uint8_array_concat(ptr %s)\n", tmp, argsBoxed)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_std_uint8_array_equals":
+		left, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		right, err := g.emitExpression(buf, state, call.Arguments[1])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedLeft, err := g.emitBoxedValue(buf, state, left)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedRight, err := g.emitBoxedValue(buf, state, right)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_uint8_array_equals(ptr %s, ptr %s)\n", tmp, boxedLeft, boxedRight)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_std_uint8_array_compare":
+		left, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		right, err := g.emitExpression(buf, state, call.Arguments[1])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedLeft, err := g.emitBoxedValue(buf, state, left)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedRight, err := g.emitBoxedValue(buf, state, right)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedResult := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_uint8_array_compare(ptr %s, ptr %s)\n", boxedResult, boxedLeft, boxedRight)
+		numberResult := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call double @jayess_value_to_number(ptr %s)\n", numberResult, boxedResult)
+		return emittedValue{kind: ir.ValueNumber, ref: numberResult}, nil
 	case "__jayess_array_for_each":
 		target, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -3120,6 +3468,7 @@ func (g *LLVMIRGenerator) emitIndirectCallIntoResult(buf *bytes.Buffer, state *f
 	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
 	fmt.Fprintf(buf, "%s:\n", failLabel)
 	failResult := state.nextTemp()
+	fmt.Fprintf(buf, "  call void @jayess_throw_not_function()\n")
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", failResult)
 	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", failResult, resultPtr)
 	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
@@ -3372,6 +3721,16 @@ func collectStringsFromStatement(stmt ir.Statement, seen map[string]bool, out *[
 			collectStringsFromStatement(stmt.Update, seen, out)
 		}
 		for _, child := range stmt.Body {
+			collectStringsFromStatement(child, seen, out)
+		}
+	case *ir.TryStatement:
+		for _, child := range stmt.TryBody {
+			collectStringsFromStatement(child, seen, out)
+		}
+		for _, child := range stmt.CatchBody {
+			collectStringsFromStatement(child, seen, out)
+		}
+		for _, child := range stmt.FinallyBody {
 			collectStringsFromStatement(child, seen, out)
 		}
 	}

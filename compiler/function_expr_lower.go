@@ -28,24 +28,42 @@ type superCaptureContext struct {
 func lowerFunctionExpressions(program *ast.Program) (*ast.Program, error) {
 	l := &functionExprLowerer{
 		globals: map[string]bool{
-			"print":    true,
-			"readLine": true,
-			"readKey":  true,
-			"sleep":    true,
-			"Map":      true,
-			"Set":      true,
-			"Date":     true,
-			"JSON":     true,
-			"Math":     true,
-			"Object":   true,
-			"RegExp":   true,
-			"Number":   true,
-			"String":   true,
-			"Array":    true,
-			"console":  true,
-			"process":  true,
-			"path":     true,
-			"fs":       true,
+			"print":          true,
+			"readLine":       true,
+			"readKey":        true,
+			"compile":        true,
+			"compileFile":    true,
+			"sleep":          true,
+			"sleepAsync":     true,
+			"setTimeout":     true,
+			"clearTimeout":   true,
+			"Map":            true,
+			"Set":            true,
+			"Date":           true,
+			"JSON":           true,
+			"Math":           true,
+			"Object":         true,
+			"RegExp":         true,
+			"Number":         true,
+			"String":         true,
+			"Array":          true,
+			"ArrayBuffer":    true,
+			"Uint8Array":     true,
+			"DataView":       true,
+			"Error":          true,
+			"TypeError":      true,
+			"AggregateError": true,
+			"Iterator":       true,
+			"Promise":        true,
+			"console":        true,
+			"process":        true,
+			"path":           true,
+			"url":            true,
+			"querystring":    true,
+			"dns":            true,
+			"net":            true,
+			"fs":             true,
+			"timers":         true,
 		},
 	}
 
@@ -128,7 +146,7 @@ func lowerFunctionExpressions(program *ast.Program) (*ast.Program, error) {
 func (l *functionExprLowerer) rewriteParameters(params []ast.Parameter, scope map[string]bool, superCtx *superCaptureContext) ([]ast.Parameter, error) {
 	out := make([]ast.Parameter, 0, len(params))
 	for _, param := range params {
-		rewritten := ast.Parameter{Name: param.Name, Rest: param.Rest}
+		rewritten := ast.Parameter{Name: param.Name, Pattern: param.Pattern, Rest: param.Rest, TypeAnnotation: param.TypeAnnotation}
 		if param.Default != nil {
 			value, err := l.rewriteExpression(param.Default, scope, superCtx)
 			if err != nil {
@@ -191,7 +209,7 @@ func (l *functionExprLowerer) rewriteStatement(stmt ast.Statement, scope map[str
 		if err != nil {
 			return nil, err
 		}
-		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, Value: value}, nil
+		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, TypeAnnotation: stmt.TypeAnnotation, Value: value}, nil
 	case *ast.AssignmentStatement:
 		target, err := l.rewriteExpression(stmt.Target, scope, superCtx)
 		if err != nil {
@@ -354,6 +372,12 @@ func (l *functionExprLowerer) rewriteExpression(expr ast.Expression, scope map[s
 		return expr, nil
 	case *ast.ThisExpression, *ast.SuperExpression, *ast.NewTargetExpression:
 		return expr, nil
+	case *ast.AwaitExpression:
+		value, err := l.rewriteExpression(expr.Value, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.AwaitExpression{BaseNode: expr.BaseNode, Value: value}, nil
 	case *ast.ObjectLiteral:
 		out := &ast.ObjectLiteral{}
 		for _, property := range expr.Properties {
@@ -581,6 +605,8 @@ func (l *functionExprLowerer) hoistFunctionExpression(expr *ast.FunctionExpressi
 		Name:       name,
 		Params:     params,
 		Body:       body,
+		ReturnType: expr.ReturnType,
+		IsAsync:    expr.IsAsync,
 	})
 
 	if len(captures.names) == 0 && !captures.hasThis && !captures.hasSuper {
@@ -679,6 +705,8 @@ func collectCapturesFromExpression(expr ast.Expression, localScope map[string]bo
 		}
 	case *ast.SpreadExpression:
 		collectCapturesFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.AwaitExpression:
+		collectCapturesFromExpression(expr.Value, localScope, outerScope, captures)
 	case *ast.FunctionExpression:
 		nestedLocal := cloneDefined(localScope)
 		for _, param := range expr.Params {
@@ -776,7 +804,7 @@ func (l *functionExprLowerer) rewriteCapturedStatement(stmt ast.Statement, scope
 		if err != nil {
 			return nil, err
 		}
-		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, Value: value}, nil
+		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, TypeAnnotation: stmt.TypeAnnotation, Value: value}, nil
 	case *ast.AssignmentStatement:
 		target, err := l.rewriteCapturedExpression(stmt.Target, scope, captures, allowLexicalThis, superCtx)
 		if err != nil {
@@ -1014,6 +1042,12 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 		return &ast.TypeofExpression{Value: value}, nil
 	case *ast.NewTargetExpression:
 		return expr, nil
+	case *ast.AwaitExpression:
+		value, err := l.rewriteCapturedExpression(expr.Value, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.AwaitExpression{BaseNode: expr.BaseNode, Value: value}, nil
 	case *ast.InstanceofExpression:
 		left, err := l.rewriteCapturedExpression(expr.Left, scope, captures, allowLexicalThis, superCtx)
 		if err != nil {
