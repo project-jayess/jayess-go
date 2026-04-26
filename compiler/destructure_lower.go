@@ -13,6 +13,7 @@ type destructureLowerer struct {
 func lowerDestructuring(program *ast.Program) (*ast.Program, error) {
 	l := &destructureLowerer{}
 	out := &ast.Program{
+		TypeAliases:     append([]*ast.TypeAliasDecl{}, program.TypeAliases...),
 		Globals:         append([]*ast.VariableDecl{}, program.Globals...),
 		ExternFunctions: append([]*ast.ExternFunctionDecl{}, program.ExternFunctions...),
 	}
@@ -185,6 +186,9 @@ func (l *destructureLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement
 		}
 		return append(out, bindings...), nil
 	case *ast.ReturnStatement:
+		if stmt.Value == nil {
+			return []ast.Statement{&ast.ReturnStatement{}}, nil
+		}
 		value, err := l.lowerExpression(stmt.Value)
 		if err != nil {
 			return nil, err
@@ -232,6 +236,22 @@ func (l *destructureLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement
 			return nil, err
 		}
 		return []ast.Statement{&ast.WhileStatement{Condition: condition, Body: body}}, nil
+	case *ast.DoWhileStatement:
+		body, err := l.lowerStatements(stmt.Body)
+		if err != nil {
+			return nil, err
+		}
+		condition, err := l.lowerExpression(stmt.Condition)
+		if err != nil {
+			return nil, err
+		}
+		return []ast.Statement{&ast.DoWhileStatement{Body: body, Condition: condition}}, nil
+	case *ast.BlockStatement:
+		body, err := l.lowerStatements(stmt.Body)
+		if err != nil {
+			return nil, err
+		}
+		return []ast.Statement{&ast.BlockStatement{Body: body}}, nil
 	case *ast.ForStatement:
 		var init ast.Statement
 		if stmt.Init != nil {
@@ -315,6 +335,15 @@ func (l *destructureLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement
 		}
 		out.Default = defaultBody
 		return []ast.Statement{out}, nil
+	case *ast.LabeledStatement:
+		lowered, err := l.lowerStatement(stmt.Statement)
+		if err != nil {
+			return nil, err
+		}
+		if len(lowered) != 1 {
+			return nil, fmt.Errorf("labeled statements cannot lower to multiple statements")
+		}
+		return []ast.Statement{&ast.LabeledStatement{Label: stmt.Label, Statement: lowered[0]}}, nil
 	case *ast.TryStatement:
 		tryBody, err := l.lowerStatements(stmt.TryBody)
 		if err != nil {
@@ -351,7 +380,15 @@ func (l *destructureLowerer) lowerExpression(expr ast.Expression) (ast.Expressio
 			if err != nil {
 				return nil, err
 			}
-			out.Properties = append(out.Properties, ast.ObjectProperty{Key: property.Key, KeyExpr: keyExpr, Value: value, Computed: property.Computed})
+			out.Properties = append(out.Properties, ast.ObjectProperty{
+				Key:      property.Key,
+				KeyExpr:  keyExpr,
+				Value:    value,
+				Computed: property.Computed,
+				Spread:   property.Spread,
+				Getter:   property.Getter,
+				Setter:   property.Setter,
+			})
 		}
 		return out, nil
 	case *ast.ArrayLiteral:
@@ -396,6 +433,12 @@ func (l *destructureLowerer) lowerExpression(expr ast.Expression) (ast.Expressio
 			return nil, err
 		}
 		return &ast.TypeofExpression{Value: value}, nil
+	case *ast.TypeCheckExpression:
+		value, err := l.lowerExpression(expr.Value)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.TypeCheckExpression{Value: value, TypeAnnotation: expr.TypeAnnotation}, nil
 	case *ast.InstanceofExpression:
 		left, err := l.lowerExpression(expr.Left)
 		if err != nil {
@@ -436,6 +479,30 @@ func (l *destructureLowerer) lowerExpression(expr ast.Expression) (ast.Expressio
 			return nil, err
 		}
 		return &ast.NullishCoalesceExpression{Left: left, Right: right}, nil
+	case *ast.CommaExpression:
+		left, err := l.lowerExpression(expr.Left)
+		if err != nil {
+			return nil, err
+		}
+		right, err := l.lowerExpression(expr.Right)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CommaExpression{Left: left, Right: right}, nil
+	case *ast.ConditionalExpression:
+		condition, err := l.lowerExpression(expr.Condition)
+		if err != nil {
+			return nil, err
+		}
+		consequent, err := l.lowerExpression(expr.Consequent)
+		if err != nil {
+			return nil, err
+		}
+		alternative, err := l.lowerExpression(expr.Alternative)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.ConditionalExpression{Condition: condition, Consequent: consequent, Alternative: alternative}, nil
 	case *ast.UnaryExpression:
 		right, err := l.lowerExpression(expr.Right)
 		if err != nil {
@@ -502,9 +569,11 @@ func (l *destructureLowerer) lowerExpression(expr ast.Expression) (ast.Expressio
 			return nil, err
 		}
 		rewritten := &ast.FunctionExpression{
+			BaseNode:        expr.BaseNode,
 			Params:          params,
 			ReturnType:      expr.ReturnType,
 			IsAsync:         expr.IsAsync,
+			IsGenerator:     expr.IsGenerator,
 			IsArrowFunction: expr.IsArrowFunction,
 		}
 		if expr.ExpressionBody != nil {

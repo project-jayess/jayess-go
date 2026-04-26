@@ -145,6 +145,16 @@ Supported:
 - `stream.closed` is `true` after the stream is closed explicitly or by `end()`
 - `stream.errored` is `true` after an open/read/write/flush error
 - `stream.error` contains the last stream error object, or `null`
+- `fs.symlink(target, path)` creates a symbolic link and returns a boxed boolean-like result
+- `fs.watch(path)` creates an async-oriented watcher for a file or directory path
+- `fs.watchSync(path)` creates the same watcher type for explicit synchronous polling usage
+- `watcher.poll()` returns `null` if nothing changed, or a change object and emits `"change"` if metadata changed
+- `watcher.pollAsync(timeoutMs)` returns a promise-like value that resolves with the next change object, or `null` when the timeout expires
+- `watcher.on("change", callback)` and `watcher.once("change", callback)` observe detected changes
+- `watcher.on("close", callback)` and `watcher.once("close", callback)` observe watcher shutdown
+- `watcher.close()` and `watcher.destroy()` stop the watcher
+- `watcher.listenerCount(event)` and `watcher.eventNames()` expose active watcher listeners
+- watcher objects expose `path`, `exists`, `isDir`, `isFile`, `size`, `mtimeMs`, `closed`, `errored`, and `error`
 
 Current boundary:
 
@@ -152,6 +162,7 @@ Current boundary:
 - `on("data", ...)` and `pipe(...)` drain synchronously in the current runtime.
 - Multiple listeners per event are supported, and listeners run in registration order.
 - Backpressure, `drain`, async event scheduling, and general EventEmitter semantics are not implemented yet.
+- `fs.watch(path)` and `fs.watchSync(path)` are polling-based: changes are detected when `poll()` or `pollAsync(...)` checks the path, and they currently compare existence, type, size, and modification time.
 
 ## Existence and Metadata
 

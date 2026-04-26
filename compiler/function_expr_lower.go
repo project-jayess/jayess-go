@@ -10,6 +10,7 @@ type functionExprLowerer struct {
 	counter   int
 	generated []*ast.FunctionDecl
 	globals   map[string]bool
+	cellStack []map[string]string
 }
 
 type captureSet struct {
@@ -95,11 +96,14 @@ func lowerFunctionExpressions(program *ast.Program) (*ast.Program, error) {
 		fn.Params = params
 		scope := l.functionScope(fn.Params, fn.Body)
 		scope["this"] = true
+		cellBindings := l.analyzeCellBindings(fn.Params, fn.Body)
+		l.pushCellBindings(cellBindings)
 		body, err := l.rewriteStatements(fn.Body, scope, nil)
+		l.popCellBindings()
 		if err != nil {
 			return nil, err
 		}
-		fn.Body = ensureFunctionReturns(body)
+		fn.Body = ensureFunctionReturns(prependCellPrologue(fn.Params, cellBindings, body))
 	}
 	for _, classDecl := range program.Classes {
 		for _, member := range classDecl.Members {
@@ -126,15 +130,18 @@ func lowerFunctionExpressions(program *ast.Program) (*ast.Program, error) {
 				scope := l.functionScope(member.Params, member.Body)
 				scope["this"] = true
 				scope["super"] = true
+				cellBindings := l.analyzeCellBindings(member.Params, member.Body)
+				l.pushCellBindings(cellBindings)
 				body, err := l.rewriteStatements(member.Body, scope, &superCaptureContext{
 					ownerClass: classDecl.Name,
 					baseClass:  classDecl.SuperClass,
 					isStatic:   member.Static,
 				})
+				l.popCellBindings()
 				if err != nil {
 					return nil, err
 				}
-				member.Body = ensureFunctionReturns(body)
+				member.Body = ensureFunctionReturns(prependCellPrologue(member.Params, cellBindings, body))
 			}
 		}
 	}
@@ -171,6 +178,79 @@ func (l *functionExprLowerer) functionScope(params []ast.Parameter, body []ast.S
 	return scope
 }
 
+func (l *functionExprLowerer) pushCellBindings(bindings map[string]string) {
+	l.cellStack = append(l.cellStack, bindings)
+}
+
+func (l *functionExprLowerer) popCellBindings() {
+	if len(l.cellStack) == 0 {
+		return
+	}
+	l.cellStack = l.cellStack[:len(l.cellStack)-1]
+}
+
+func (l *functionExprLowerer) currentCellBindings() map[string]string {
+	if len(l.cellStack) == 0 {
+		return nil
+	}
+	return l.cellStack[len(l.cellStack)-1]
+}
+
+func (l *functionExprLowerer) analyzeCellBindings(params []ast.Parameter, body []ast.Statement) map[string]string {
+	scope := functionLocalNames(params, body)
+	captures := captureSet{nameLookup: map[string]bool{}}
+	collectCapturedLocalsFromStatements(body, scope, scope, &captures)
+	if len(captures.names) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(captures.names))
+	for _, name := range captures.names {
+		out[name] = "__jayess_cell_" + name
+	}
+	return out
+}
+
+func functionLocalNames(params []ast.Parameter, body []ast.Statement) map[string]bool {
+	scope := make(map[string]bool, len(params)+8)
+	for _, param := range params {
+		scope[param.Name] = true
+	}
+	collectDeclaredNames(body, scope)
+	return scope
+}
+
+func prependCellPrologue(params []ast.Parameter, cellBindings map[string]string, body []ast.Statement) []ast.Statement {
+	if len(cellBindings) == 0 {
+		return body
+	}
+	prefix := make([]ast.Statement, 0, len(params))
+	for _, param := range params {
+		if cellName := cellBindings[param.Name]; cellName != "" {
+			prefix = append(prefix, &ast.VariableDecl{
+				Visibility: ast.VisibilityPublic,
+				Kind:       ast.DeclarationVar,
+				Name:       cellName,
+				Value:      makeCellValue(&ast.Identifier{Name: param.Name}),
+			})
+		}
+	}
+	if len(prefix) == 0 {
+		return body
+	}
+	return append(prefix, body...)
+}
+
+func makeCellValue(value ast.Expression) ast.Expression {
+	if value == nil {
+		value = &ast.UndefinedLiteral{}
+	}
+	return &ast.ObjectLiteral{Properties: []ast.ObjectProperty{{Key: "value", Value: value}}}
+}
+
+func cellValueMember(target ast.Expression) ast.Expression {
+	return &ast.MemberExpression{Target: target, Property: "value"}
+}
+
 func collectDeclaredNames(statements []ast.Statement, scope map[string]bool) {
 	for _, stmt := range statements {
 		switch stmt := stmt.(type) {
@@ -181,11 +261,26 @@ func collectDeclaredNames(statements []ast.Statement, scope map[string]bool) {
 			collectDeclaredNames(stmt.Alternative, scope)
 		case *ast.WhileStatement:
 			collectDeclaredNames(stmt.Body, scope)
+		case *ast.DoWhileStatement:
+			collectDeclaredNames(stmt.Body, scope)
 		case *ast.ForStatement:
 			if decl, ok := stmt.Init.(*ast.VariableDecl); ok {
 				scope[decl.Name] = true
 			}
 			collectDeclaredNames(stmt.Body, scope)
+		case *ast.ForOfStatement:
+			collectDeclaredNames(stmt.Body, scope)
+		case *ast.ForInStatement:
+			collectDeclaredNames(stmt.Body, scope)
+		case *ast.BlockStatement:
+			collectDeclaredNames(stmt.Body, scope)
+		case *ast.SwitchStatement:
+			for _, switchCase := range stmt.Cases {
+				collectDeclaredNames(switchCase.Consequent, scope)
+			}
+			collectDeclaredNames(stmt.Default, scope)
+		case *ast.LabeledStatement:
+			collectDeclaredNames([]ast.Statement{stmt.Statement}, scope)
 		}
 	}
 }
@@ -209,6 +304,9 @@ func (l *functionExprLowerer) rewriteStatement(stmt ast.Statement, scope map[str
 		if err != nil {
 			return nil, err
 		}
+		if cellName := l.currentCellBindings()[stmt.Name]; cellName != "" {
+			return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: cellName, TypeAnnotation: stmt.TypeAnnotation, Value: makeCellValue(value)}, nil
+		}
 		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, TypeAnnotation: stmt.TypeAnnotation, Value: value}, nil
 	case *ast.AssignmentStatement:
 		target, err := l.rewriteExpression(stmt.Target, scope, superCtx)
@@ -221,6 +319,9 @@ func (l *functionExprLowerer) rewriteStatement(stmt ast.Statement, scope map[str
 		}
 		return &ast.AssignmentStatement{Target: target, Value: value}, nil
 	case *ast.ReturnStatement:
+		if stmt.Value == nil {
+			return &ast.ReturnStatement{}, nil
+		}
 		value, err := l.rewriteExpression(stmt.Value, scope, superCtx)
 		if err != nil {
 			return nil, err
@@ -282,6 +383,22 @@ func (l *functionExprLowerer) rewriteStatement(stmt ast.Statement, scope map[str
 			return nil, err
 		}
 		return &ast.WhileStatement{Condition: condition, Body: body}, nil
+	case *ast.DoWhileStatement:
+		body, err := l.rewriteStatements(stmt.Body, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		condition, err := l.rewriteExpression(stmt.Condition, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.DoWhileStatement{Body: body, Condition: condition}, nil
+	case *ast.BlockStatement:
+		body, err := l.rewriteStatements(stmt.Body, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.BlockStatement{Body: body}, nil
 	case *ast.ForStatement:
 		var init ast.Statement
 		var condition ast.Expression
@@ -357,8 +474,16 @@ func (l *functionExprLowerer) rewriteStatement(stmt ast.Statement, scope map[str
 		}
 		out.Default = defaultBody
 		return out, nil
-	case *ast.BreakStatement, *ast.ContinueStatement:
-		return stmt, nil
+	case *ast.LabeledStatement:
+		rewritten, err := l.rewriteStatement(stmt.Statement, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.LabeledStatement{Label: stmt.Label, Statement: rewritten}, nil
+	case *ast.BreakStatement:
+		return &ast.BreakStatement{Label: stmt.Label}, nil
+	case *ast.ContinueStatement:
+		return &ast.ContinueStatement{Label: stmt.Label}, nil
 	default:
 		return nil, fmt.Errorf("unsupported statement in function expression lowering")
 	}
@@ -366,9 +491,12 @@ func (l *functionExprLowerer) rewriteStatement(stmt ast.Statement, scope map[str
 
 func (l *functionExprLowerer) rewriteExpression(expr ast.Expression, scope map[string]bool, superCtx *superCaptureContext) (ast.Expression, error) {
 	switch expr := expr.(type) {
-	case *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.UndefinedLiteral, *ast.StringLiteral:
+	case *ast.NumberLiteral, *ast.BigIntLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.UndefinedLiteral, *ast.StringLiteral:
 		return expr, nil
 	case *ast.Identifier:
+		if cellName := l.currentCellBindings()[expr.Name]; cellName != "" {
+			return cellValueMember(&ast.Identifier{BaseNode: expr.BaseNode, Name: cellName}), nil
+		}
 		return expr, nil
 	case *ast.ThisExpression, *ast.SuperExpression, *ast.NewTargetExpression:
 		return expr, nil
@@ -378,6 +506,12 @@ func (l *functionExprLowerer) rewriteExpression(expr ast.Expression, scope map[s
 			return nil, err
 		}
 		return &ast.AwaitExpression{BaseNode: expr.BaseNode, Value: value}, nil
+	case *ast.YieldExpression:
+		value, err := l.rewriteExpression(expr.Value, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.YieldExpression{BaseNode: expr.BaseNode, Value: value}, nil
 	case *ast.ObjectLiteral:
 		out := &ast.ObjectLiteral{}
 		for _, property := range expr.Properties {
@@ -393,7 +527,15 @@ func (l *functionExprLowerer) rewriteExpression(expr ast.Expression, scope map[s
 			if err != nil {
 				return nil, err
 			}
-			out.Properties = append(out.Properties, ast.ObjectProperty{Key: property.Key, KeyExpr: keyExpr, Value: value, Computed: property.Computed})
+			out.Properties = append(out.Properties, ast.ObjectProperty{
+				Key:      property.Key,
+				KeyExpr:  keyExpr,
+				Value:    value,
+				Computed: property.Computed,
+				Spread:   property.Spread,
+				Getter:   property.Getter,
+				Setter:   property.Setter,
+			})
 		}
 		return out, nil
 	case *ast.ArrayLiteral:
@@ -429,7 +571,7 @@ func (l *functionExprLowerer) rewriteExpression(expr ast.Expression, scope map[s
 		if err != nil {
 			return nil, err
 		}
-		return &ast.ClosureExpression{FunctionName: expr.FunctionName, Environment: env}, nil
+		return &ast.ClosureExpression{BaseNode: expr.BaseNode, FunctionName: expr.FunctionName, Environment: env}, nil
 	case *ast.BinaryExpression:
 		left, err := l.rewriteExpression(expr.Left, scope, superCtx)
 		if err != nil {
@@ -450,12 +592,42 @@ func (l *functionExprLowerer) rewriteExpression(expr ast.Expression, scope map[s
 			return nil, err
 		}
 		return &ast.NullishCoalesceExpression{Left: left, Right: right}, nil
+	case *ast.CommaExpression:
+		left, err := l.rewriteExpression(expr.Left, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		right, err := l.rewriteExpression(expr.Right, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CommaExpression{Left: left, Right: right}, nil
+	case *ast.ConditionalExpression:
+		condition, err := l.rewriteExpression(expr.Condition, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		consequent, err := l.rewriteExpression(expr.Consequent, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		alternative, err := l.rewriteExpression(expr.Alternative, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.ConditionalExpression{Condition: condition, Consequent: consequent, Alternative: alternative}, nil
 	case *ast.TypeofExpression:
 		value, err := l.rewriteExpression(expr.Value, scope, superCtx)
 		if err != nil {
 			return nil, err
 		}
 		return &ast.TypeofExpression{Value: value}, nil
+	case *ast.TypeCheckExpression:
+		value, err := l.rewriteExpression(expr.Value, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.TypeCheckExpression{Value: value, TypeAnnotation: expr.TypeAnnotation}, nil
 	case *ast.InstanceofExpression:
 		left, err := l.rewriteExpression(expr.Left, scope, superCtx)
 		if err != nil {
@@ -546,6 +718,12 @@ func (l *functionExprLowerer) rewriteExpression(expr ast.Expression, scope map[s
 			out.Arguments = append(out.Arguments, value)
 		}
 		return out, nil
+	case *ast.CastExpression:
+		value, err := l.rewriteExpression(expr.Value, scope, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CastExpression{BaseNode: expr.BaseNode, Value: value, TypeAnnotation: expr.TypeAnnotation}, nil
 	default:
 		return nil, fmt.Errorf("unsupported expression in function expression lowering")
 	}
@@ -579,18 +757,25 @@ func (l *functionExprLowerer) hoistFunctionExpression(expr *ast.FunctionExpressi
 	}
 
 	var body []ast.Statement
+	localCellBindings := l.analyzeCellBindings(expr.Params, expr.Body)
+	l.pushCellBindings(localCellBindings)
 	if expr.ExpressionBody != nil {
 		value, err := l.rewriteCapturedExpression(expr.ExpressionBody, rewriterScope, captures, expr.IsArrowFunction, superCtx)
+		l.popCellBindings()
 		if err != nil {
 			return nil, err
 		}
 		body = []ast.Statement{&ast.ReturnStatement{Value: value}}
 	} else {
 		rewritten, err := l.rewriteCapturedStatements(expr.Body, rewriterScope, captures, expr.IsArrowFunction, superCtx)
+		l.popCellBindings()
 		if err != nil {
 			return nil, err
 		}
-		body = ensureFunctionReturns(rewritten)
+		body = ensureFunctionReturns(prependCellPrologue(expr.Params, localCellBindings, rewritten))
+	}
+	if expr.ExpressionBody != nil {
+		body = prependCellPrologue(expr.Params, localCellBindings, body)
 	}
 
 	params, err := l.rewriteParameters(expr.Params, outerScope, superCtx)
@@ -601,18 +786,20 @@ func (l *functionExprLowerer) hoistFunctionExpression(expr *ast.FunctionExpressi
 		params = append([]ast.Parameter{{Name: "__env"}}, params...)
 	}
 	l.generated = append(l.generated, &ast.FunctionDecl{
-		Visibility: ast.VisibilityPublic,
-		Name:       name,
-		Params:     params,
-		Body:       body,
-		ReturnType: expr.ReturnType,
-		IsAsync:    expr.IsAsync,
+		BaseNode:    expr.BaseNode,
+		Visibility:  ast.VisibilityPublic,
+		Name:        name,
+		Params:      params,
+		Body:        body,
+		ReturnType:  expr.ReturnType,
+		IsAsync:     expr.IsAsync,
+		IsGenerator: expr.IsGenerator,
 	})
 
 	if len(captures.names) == 0 && !captures.hasThis && !captures.hasSuper {
-		return &ast.Identifier{Name: name}, nil
+		return &ast.Identifier{BaseNode: expr.BaseNode, Name: name}, nil
 	}
-	return &ast.ClosureExpression{FunctionName: name, Environment: buildClosureEnvironment(captures, superCtx)}, nil
+	return &ast.ClosureExpression{BaseNode: expr.BaseNode, FunctionName: name, Environment: buildClosureEnvironment(captures, superCtx, l.currentCellBindings())}, nil
 }
 
 func analyzeCaptures(expr *ast.FunctionExpression, localScope map[string]bool, outerScope map[string]bool) captureSet {
@@ -639,6 +826,8 @@ func collectCapturesFromStatements(statements []ast.Statement, localScope map[st
 			collectCapturesFromExpression(stmt.Expression, localScope, outerScope, captures)
 		case *ast.DeleteStatement:
 			collectCapturesFromExpression(stmt.Target, localScope, outerScope, captures)
+		case *ast.ThrowStatement:
+			collectCapturesFromExpression(stmt.Value, localScope, outerScope, captures)
 		case *ast.IfStatement:
 			collectCapturesFromExpression(stmt.Condition, localScope, outerScope, captures)
 			collectCapturesFromStatements(stmt.Consequence, localScope, outerScope, captures)
@@ -646,6 +835,9 @@ func collectCapturesFromStatements(statements []ast.Statement, localScope map[st
 		case *ast.WhileStatement:
 			collectCapturesFromExpression(stmt.Condition, localScope, outerScope, captures)
 			collectCapturesFromStatements(stmt.Body, localScope, outerScope, captures)
+		case *ast.DoWhileStatement:
+			collectCapturesFromStatements(stmt.Body, localScope, outerScope, captures)
+			collectCapturesFromExpression(stmt.Condition, localScope, outerScope, captures)
 		case *ast.ForStatement:
 			if stmt.Init != nil {
 				collectCapturesFromStatements([]ast.Statement{stmt.Init}, localScope, outerScope, captures)
@@ -670,6 +862,66 @@ func collectCapturesFromStatements(statements []ast.Statement, localScope map[st
 				collectCapturesFromStatements(switchCase.Consequent, localScope, outerScope, captures)
 			}
 			collectCapturesFromStatements(stmt.Default, localScope, outerScope, captures)
+		case *ast.BlockStatement:
+			collectCapturesFromStatements(stmt.Body, localScope, outerScope, captures)
+		case *ast.LabeledStatement:
+			collectCapturesFromStatements([]ast.Statement{stmt.Statement}, localScope, outerScope, captures)
+		}
+	}
+}
+
+func collectCapturedLocalsFromStatements(statements []ast.Statement, localScope map[string]bool, outerScope map[string]bool, captures *captureSet) {
+	for _, stmt := range statements {
+		switch stmt := stmt.(type) {
+		case *ast.VariableDecl:
+			collectCapturedLocalsFromExpression(stmt.Value, localScope, outerScope, captures)
+		case *ast.AssignmentStatement:
+			collectCapturedLocalsFromExpression(stmt.Target, localScope, outerScope, captures)
+			collectCapturedLocalsFromExpression(stmt.Value, localScope, outerScope, captures)
+		case *ast.ReturnStatement:
+			collectCapturedLocalsFromExpression(stmt.Value, localScope, outerScope, captures)
+		case *ast.ExpressionStatement:
+			collectCapturedLocalsFromExpression(stmt.Expression, localScope, outerScope, captures)
+		case *ast.DeleteStatement:
+			collectCapturedLocalsFromExpression(stmt.Target, localScope, outerScope, captures)
+		case *ast.ThrowStatement:
+			collectCapturedLocalsFromExpression(stmt.Value, localScope, outerScope, captures)
+		case *ast.IfStatement:
+			collectCapturedLocalsFromExpression(stmt.Condition, localScope, outerScope, captures)
+			collectCapturedLocalsFromStatements(stmt.Consequence, localScope, outerScope, captures)
+			collectCapturedLocalsFromStatements(stmt.Alternative, localScope, outerScope, captures)
+		case *ast.WhileStatement:
+			collectCapturedLocalsFromExpression(stmt.Condition, localScope, outerScope, captures)
+			collectCapturedLocalsFromStatements(stmt.Body, localScope, outerScope, captures)
+		case *ast.DoWhileStatement:
+			collectCapturedLocalsFromStatements(stmt.Body, localScope, outerScope, captures)
+			collectCapturedLocalsFromExpression(stmt.Condition, localScope, outerScope, captures)
+		case *ast.ForStatement:
+			if stmt.Init != nil {
+				collectCapturedLocalsFromStatements([]ast.Statement{stmt.Init}, localScope, outerScope, captures)
+			}
+			collectCapturedLocalsFromExpression(stmt.Condition, localScope, outerScope, captures)
+			if stmt.Update != nil {
+				collectCapturedLocalsFromStatements([]ast.Statement{stmt.Update}, localScope, outerScope, captures)
+			}
+			collectCapturedLocalsFromStatements(stmt.Body, localScope, outerScope, captures)
+		case *ast.ForOfStatement:
+			collectCapturedLocalsFromExpression(stmt.Iterable, localScope, outerScope, captures)
+			collectCapturedLocalsFromStatements(stmt.Body, localScope, outerScope, captures)
+		case *ast.ForInStatement:
+			collectCapturedLocalsFromExpression(stmt.Iterable, localScope, outerScope, captures)
+			collectCapturedLocalsFromStatements(stmt.Body, localScope, outerScope, captures)
+		case *ast.SwitchStatement:
+			collectCapturedLocalsFromExpression(stmt.Discriminant, localScope, outerScope, captures)
+			for _, switchCase := range stmt.Cases {
+				collectCapturedLocalsFromExpression(switchCase.Test, localScope, outerScope, captures)
+				collectCapturedLocalsFromStatements(switchCase.Consequent, localScope, outerScope, captures)
+			}
+			collectCapturedLocalsFromStatements(stmt.Default, localScope, outerScope, captures)
+		case *ast.BlockStatement:
+			collectCapturedLocalsFromStatements(stmt.Body, localScope, outerScope, captures)
+		case *ast.LabeledStatement:
+			collectCapturedLocalsFromStatements([]ast.Statement{stmt.Statement}, localScope, outerScope, captures)
 		}
 	}
 }
@@ -707,6 +959,8 @@ func collectCapturesFromExpression(expr ast.Expression, localScope map[string]bo
 		collectCapturesFromExpression(expr.Value, localScope, outerScope, captures)
 	case *ast.AwaitExpression:
 		collectCapturesFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.YieldExpression:
+		collectCapturesFromExpression(expr.Value, localScope, outerScope, captures)
 	case *ast.FunctionExpression:
 		nestedLocal := cloneDefined(localScope)
 		for _, param := range expr.Params {
@@ -726,6 +980,8 @@ func collectCapturesFromExpression(expr ast.Expression, localScope map[string]bo
 		collectCapturesFromExpression(expr.Right, localScope, outerScope, captures)
 	case *ast.TypeofExpression:
 		collectCapturesFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.TypeCheckExpression:
+		collectCapturesFromExpression(expr.Value, localScope, outerScope, captures)
 	case *ast.InstanceofExpression:
 		collectCapturesFromExpression(expr.Left, localScope, outerScope, captures)
 		collectCapturesFromExpression(expr.Right, localScope, outerScope, captures)
@@ -735,6 +991,10 @@ func collectCapturesFromExpression(expr ast.Expression, localScope map[string]bo
 	case *ast.LogicalExpression:
 		collectCapturesFromExpression(expr.Left, localScope, outerScope, captures)
 		collectCapturesFromExpression(expr.Right, localScope, outerScope, captures)
+	case *ast.ConditionalExpression:
+		collectCapturesFromExpression(expr.Condition, localScope, outerScope, captures)
+		collectCapturesFromExpression(expr.Consequent, localScope, outerScope, captures)
+		collectCapturesFromExpression(expr.Alternative, localScope, outerScope, captures)
 	case *ast.UnaryExpression:
 		collectCapturesFromExpression(expr.Right, localScope, outerScope, captures)
 	case *ast.IndexExpression:
@@ -759,6 +1019,91 @@ func collectCapturesFromExpression(expr ast.Expression, localScope map[string]bo
 	}
 }
 
+func collectCapturedLocalsFromExpression(expr ast.Expression, localScope map[string]bool, outerScope map[string]bool, captures *captureSet) {
+	switch expr := expr.(type) {
+	case nil:
+		return
+	case *ast.ObjectLiteral:
+		for _, property := range expr.Properties {
+			if property.Computed {
+				collectCapturedLocalsFromExpression(property.KeyExpr, localScope, outerScope, captures)
+			}
+			collectCapturedLocalsFromExpression(property.Value, localScope, outerScope, captures)
+		}
+	case *ast.ArrayLiteral:
+		for _, element := range expr.Elements {
+			collectCapturedLocalsFromExpression(element, localScope, outerScope, captures)
+		}
+	case *ast.TemplateLiteral:
+		for _, value := range expr.Values {
+			collectCapturedLocalsFromExpression(value, localScope, outerScope, captures)
+		}
+	case *ast.SpreadExpression:
+		collectCapturedLocalsFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.AwaitExpression:
+		collectCapturedLocalsFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.YieldExpression:
+		collectCapturedLocalsFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.FunctionExpression:
+		nestedLocal := functionLocalNames(expr.Params, expr.Body)
+		if !expr.IsArrowFunction {
+			nestedLocal["this"] = true
+		}
+		nestedCaptures := analyzeCaptures(expr, nestedLocal, outerScope)
+		for _, name := range nestedCaptures.names {
+			if localScope[name] {
+				addCaptureName(captures, name)
+			}
+		}
+		return
+	case *ast.ClosureExpression:
+		collectCapturedLocalsFromExpression(expr.Environment, localScope, outerScope, captures)
+	case *ast.CastExpression:
+		collectCapturedLocalsFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.BinaryExpression:
+		collectCapturedLocalsFromExpression(expr.Left, localScope, outerScope, captures)
+		collectCapturedLocalsFromExpression(expr.Right, localScope, outerScope, captures)
+	case *ast.TypeofExpression:
+		collectCapturedLocalsFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.TypeCheckExpression:
+		collectCapturedLocalsFromExpression(expr.Value, localScope, outerScope, captures)
+	case *ast.InstanceofExpression:
+		collectCapturedLocalsFromExpression(expr.Left, localScope, outerScope, captures)
+		collectCapturedLocalsFromExpression(expr.Right, localScope, outerScope, captures)
+	case *ast.ComparisonExpression:
+		collectCapturedLocalsFromExpression(expr.Left, localScope, outerScope, captures)
+		collectCapturedLocalsFromExpression(expr.Right, localScope, outerScope, captures)
+	case *ast.LogicalExpression:
+		collectCapturedLocalsFromExpression(expr.Left, localScope, outerScope, captures)
+		collectCapturedLocalsFromExpression(expr.Right, localScope, outerScope, captures)
+	case *ast.ConditionalExpression:
+		collectCapturedLocalsFromExpression(expr.Condition, localScope, outerScope, captures)
+		collectCapturedLocalsFromExpression(expr.Consequent, localScope, outerScope, captures)
+		collectCapturedLocalsFromExpression(expr.Alternative, localScope, outerScope, captures)
+	case *ast.UnaryExpression:
+		collectCapturedLocalsFromExpression(expr.Right, localScope, outerScope, captures)
+	case *ast.IndexExpression:
+		collectCapturedLocalsFromExpression(expr.Target, localScope, outerScope, captures)
+		collectCapturedLocalsFromExpression(expr.Index, localScope, outerScope, captures)
+	case *ast.MemberExpression:
+		collectCapturedLocalsFromExpression(expr.Target, localScope, outerScope, captures)
+	case *ast.CallExpression:
+		for _, arg := range expr.Arguments {
+			collectCapturedLocalsFromExpression(arg, localScope, outerScope, captures)
+		}
+	case *ast.InvokeExpression:
+		collectCapturedLocalsFromExpression(expr.Callee, localScope, outerScope, captures)
+		for _, arg := range expr.Arguments {
+			collectCapturedLocalsFromExpression(arg, localScope, outerScope, captures)
+		}
+	case *ast.NewExpression:
+		collectCapturedLocalsFromExpression(expr.Callee, localScope, outerScope, captures)
+		for _, arg := range expr.Arguments {
+			collectCapturedLocalsFromExpression(arg, localScope, outerScope, captures)
+		}
+	}
+}
+
 func addCaptureName(captures *captureSet, name string) {
 	if captures.nameLookup[name] {
 		return
@@ -767,10 +1112,14 @@ func addCaptureName(captures *captureSet, name string) {
 	captures.names = append(captures.names, name)
 }
 
-func buildClosureEnvironment(captures captureSet, superCtx *superCaptureContext) ast.Expression {
+func buildClosureEnvironment(captures captureSet, superCtx *superCaptureContext, cellBindings map[string]string) ast.Expression {
 	properties := make([]ast.ObjectProperty, 0, len(captures.names)+3)
 	for _, name := range captures.names {
-		properties = append(properties, ast.ObjectProperty{Key: name, Value: &ast.Identifier{Name: name}})
+		binding := name
+		if cellBindings != nil && cellBindings[name] != "" {
+			binding = cellBindings[name]
+		}
+		properties = append(properties, ast.ObjectProperty{Key: name, Value: &ast.Identifier{Name: binding}})
 	}
 	if captures.hasThis {
 		properties = append(properties, ast.ObjectProperty{Key: "__this", Value: &ast.ThisExpression{}})
@@ -803,6 +1152,9 @@ func (l *functionExprLowerer) rewriteCapturedStatement(stmt ast.Statement, scope
 		value, err := l.rewriteCapturedExpression(stmt.Value, scope, captures, allowLexicalThis, superCtx)
 		if err != nil {
 			return nil, err
+		}
+		if cellName := l.currentCellBindings()[stmt.Name]; cellName != "" {
+			return &ast.VariableDecl{BaseNode: stmt.BaseNode, Visibility: stmt.Visibility, Kind: stmt.Kind, Name: cellName, TypeAnnotation: stmt.TypeAnnotation, Value: makeCellValue(value)}, nil
 		}
 		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, TypeAnnotation: stmt.TypeAnnotation, Value: value}, nil
 	case *ast.AssignmentStatement:
@@ -857,6 +1209,22 @@ func (l *functionExprLowerer) rewriteCapturedStatement(stmt ast.Statement, scope
 			return nil, err
 		}
 		return &ast.WhileStatement{Condition: condition, Body: body}, nil
+	case *ast.DoWhileStatement:
+		body, err := l.rewriteCapturedStatements(stmt.Body, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		condition, err := l.rewriteCapturedExpression(stmt.Condition, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.DoWhileStatement{Body: body, Condition: condition}, nil
+	case *ast.BlockStatement:
+		body, err := l.rewriteCapturedStatements(stmt.Body, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.BlockStatement{Body: body}, nil
 	case *ast.ForStatement:
 		var init ast.Statement
 		var condition ast.Expression
@@ -928,8 +1296,16 @@ func (l *functionExprLowerer) rewriteCapturedStatement(stmt ast.Statement, scope
 		}
 		out.Default = defaultBody
 		return out, nil
-	case *ast.BreakStatement, *ast.ContinueStatement:
-		return stmt, nil
+	case *ast.LabeledStatement:
+		rewritten, err := l.rewriteCapturedStatement(stmt.Statement, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.LabeledStatement{Label: stmt.Label, Statement: rewritten}, nil
+	case *ast.BreakStatement:
+		return &ast.BreakStatement{Label: stmt.Label}, nil
+	case *ast.ContinueStatement:
+		return &ast.ContinueStatement{Label: stmt.Label}, nil
 	default:
 		return nil, fmt.Errorf("unsupported statement in closure rewriting")
 	}
@@ -939,7 +1315,7 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 	switch expr := expr.(type) {
 	case *ast.Identifier:
 		if captures.nameLookup[expr.Name] {
-			return &ast.MemberExpression{Target: &ast.Identifier{Name: "__env"}, Property: expr.Name}, nil
+			return cellValueMember(&ast.MemberExpression{Target: &ast.Identifier{Name: "__env"}, Property: expr.Name}), nil
 		}
 		return l.rewriteExpression(expr, scope, superCtx)
 	case *ast.ThisExpression:
@@ -967,11 +1343,11 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 			return nil, err
 		}
 		if closure, ok := hoisted.(*ast.ClosureExpression); ok {
-			env, err := l.rewriteCapturedExpression(closure.Environment, scope, captures, allowLexicalThis, superCtx)
+			env, err := l.rewriteNestedClosureEnvironment(closure.Environment, scope, captures, allowLexicalThis, superCtx)
 			if err != nil {
 				return nil, err
 			}
-			return &ast.ClosureExpression{FunctionName: closure.FunctionName, Environment: env}, nil
+			return &ast.ClosureExpression{BaseNode: closure.BaseNode, FunctionName: closure.FunctionName, Environment: env}, nil
 		}
 		return hoisted, nil
 	case *ast.ClosureExpression:
@@ -979,7 +1355,13 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 		if err != nil {
 			return nil, err
 		}
-		return &ast.ClosureExpression{FunctionName: expr.FunctionName, Environment: env}, nil
+		return &ast.ClosureExpression{BaseNode: expr.BaseNode, FunctionName: expr.FunctionName, Environment: env}, nil
+	case *ast.CastExpression:
+		value, err := l.rewriteCapturedExpression(expr.Value, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CastExpression{BaseNode: expr.BaseNode, Value: value, TypeAnnotation: expr.TypeAnnotation}, nil
 	case *ast.ObjectLiteral:
 		out := &ast.ObjectLiteral{}
 		for _, property := range expr.Properties {
@@ -995,7 +1377,15 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 			if err != nil {
 				return nil, err
 			}
-			out.Properties = append(out.Properties, ast.ObjectProperty{Key: property.Key, KeyExpr: keyExpr, Value: value, Computed: property.Computed})
+			out.Properties = append(out.Properties, ast.ObjectProperty{
+				Key:      property.Key,
+				KeyExpr:  keyExpr,
+				Value:    value,
+				Computed: property.Computed,
+				Spread:   property.Spread,
+				Getter:   property.Getter,
+				Setter:   property.Setter,
+			})
 		}
 		return out, nil
 	case *ast.ArrayLiteral:
@@ -1040,6 +1430,12 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 			return nil, err
 		}
 		return &ast.TypeofExpression{Value: value}, nil
+	case *ast.TypeCheckExpression:
+		value, err := l.rewriteCapturedExpression(expr.Value, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.TypeCheckExpression{Value: value, TypeAnnotation: expr.TypeAnnotation}, nil
 	case *ast.NewTargetExpression:
 		return expr, nil
 	case *ast.AwaitExpression:
@@ -1048,6 +1444,12 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 			return nil, err
 		}
 		return &ast.AwaitExpression{BaseNode: expr.BaseNode, Value: value}, nil
+	case *ast.YieldExpression:
+		value, err := l.rewriteCapturedExpression(expr.Value, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.YieldExpression{BaseNode: expr.BaseNode, Value: value}, nil
 	case *ast.InstanceofExpression:
 		left, err := l.rewriteCapturedExpression(expr.Left, scope, captures, allowLexicalThis, superCtx)
 		if err != nil {
@@ -1078,6 +1480,30 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 			return nil, err
 		}
 		return &ast.LogicalExpression{Operator: expr.Operator, Left: left, Right: right}, nil
+	case *ast.CommaExpression:
+		left, err := l.rewriteCapturedExpression(expr.Left, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		right, err := l.rewriteCapturedExpression(expr.Right, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CommaExpression{Left: left, Right: right}, nil
+	case *ast.ConditionalExpression:
+		condition, err := l.rewriteCapturedExpression(expr.Condition, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		consequent, err := l.rewriteCapturedExpression(expr.Consequent, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		alternative, err := l.rewriteCapturedExpression(expr.Alternative, scope, captures, allowLexicalThis, superCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.ConditionalExpression{Condition: condition, Consequent: consequent, Alternative: alternative}, nil
 	case *ast.UnaryExpression:
 		right, err := l.rewriteCapturedExpression(expr.Right, scope, captures, allowLexicalThis, superCtx)
 		if err != nil {
@@ -1143,11 +1569,44 @@ func (l *functionExprLowerer) rewriteCapturedExpression(expr ast.Expression, sco
 	}
 }
 
+func (l *functionExprLowerer) rewriteNestedClosureEnvironment(env ast.Expression, scope map[string]bool, captures captureSet, allowLexicalThis bool, superCtx *superCaptureContext) (ast.Expression, error) {
+	objectEnv, ok := env.(*ast.ObjectLiteral)
+	if !ok {
+		return l.rewriteCapturedExpression(env, scope, captures, allowLexicalThis, superCtx)
+	}
+
+	out := &ast.ObjectLiteral{}
+	for _, property := range objectEnv.Properties {
+		rewritten := property
+		if captures.nameLookup[property.Key] {
+			rewritten.Value = &ast.MemberExpression{Target: &ast.Identifier{Name: "__env"}, Property: property.Key}
+		} else {
+			value, err := l.rewriteCapturedExpression(property.Value, scope, captures, allowLexicalThis, superCtx)
+			if err != nil {
+				return nil, err
+			}
+			rewritten.Value = value
+		}
+		if property.Computed {
+			keyExpr, err := l.rewriteCapturedExpression(property.KeyExpr, scope, captures, allowLexicalThis, superCtx)
+			if err != nil {
+				return nil, err
+			}
+			rewritten.KeyExpr = keyExpr
+		}
+		out.Properties = append(out.Properties, rewritten)
+	}
+	return out, nil
+}
+
 func ensureFunctionReturns(body []ast.Statement) []ast.Statement {
 	if len(body) == 0 {
 		return []ast.Statement{&ast.ReturnStatement{Value: &ast.UndefinedLiteral{}}}
 	}
 	if _, ok := body[len(body)-1].(*ast.ReturnStatement); ok {
+		return body
+	}
+	if _, ok := body[len(body)-1].(*ast.ThrowStatement); ok {
 		return body
 	}
 	out := append([]ast.Statement{}, body...)

@@ -3,6 +3,7 @@ package compiler
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"jayess-go/ast"
 	"jayess-go/codegen"
@@ -17,6 +18,11 @@ type Options struct {
 	TargetTriple             string
 	WarningPolicy            string
 	AllowedWarningCategories []string
+	OptimizationLevel        string
+	TargetCPU                string
+	TargetFeatures           []string
+	RelocationModel          string
+	CodeModel                string
 }
 
 type Diagnostic struct {
@@ -50,9 +56,12 @@ func (e *CompileError) Error() string {
 }
 
 type Result struct {
-	LLVMIR        []byte
-	NativeImports []string
-	Warnings      []Diagnostic
+	LLVMIR             []byte
+	NativeImports      []string
+	NativeIncludeDirs  []string
+	NativeCompileFlags []string
+	NativeLinkFlags    []string
+	Warnings           []Diagnostic
 }
 
 func Compile(source string, opts Options) (*Result, error) {
@@ -60,7 +69,7 @@ func Compile(source string, opts Options) (*Result, error) {
 }
 
 func CompilePath(inputPath string, opts Options) (*Result, error) {
-	bundle, err := loadSourceTree(inputPath)
+	bundle, err := loadSourceTree(inputPath, opts.TargetTriple)
 	if err != nil {
 		return nil, formatLoaderError(err)
 	}
@@ -69,6 +78,9 @@ func CompilePath(inputPath string, opts Options) (*Result, error) {
 		return nil, err
 	}
 	result.NativeImports = append(result.NativeImports, bundle.NativeImports...)
+	result.NativeIncludeDirs = append(result.NativeIncludeDirs, bundle.NativeIncludeDirs...)
+	result.NativeCompileFlags = append(result.NativeCompileFlags, bundle.NativeCompileFlags...)
+	result.NativeLinkFlags = append(result.NativeLinkFlags, bundle.NativeLinkFlags...)
 	return result, nil
 }
 
@@ -90,6 +102,7 @@ func formatLoaderError(err error) error {
 }
 
 func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.ExternFunctionDecl, opts Options) (*Result, error) {
+	source = strings.ReplaceAll(source, "fs.watch(", "fs.watchSync(")
 	l := lexer.New(source)
 	p := parser.New(l)
 
@@ -97,11 +110,10 @@ func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.E
 	if err != nil {
 		return nil, formatParseError(sourcePath, err)
 	}
-	warnings := collectWarnings(program, sourcePath)
-	warnings, err = applyWarningPolicy(warnings, opts.WarningPolicy, opts.AllowedWarningCategories)
-	if err != nil {
-		return nil, err
+	if err := resolveTypeAliases(program); err != nil {
+		return nil, fmt.Errorf("type alias resolution failed: %w", err)
 	}
+	warnings := collectWarnings(program, sourcePath)
 	program.ExternFunctions = append(extraExterns, program.ExternFunctions...)
 
 	program, err = lowerDestructuring(program)
@@ -119,6 +131,11 @@ func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.E
 		return nil, fmt.Errorf("function expression lowering failed: %w", err)
 	}
 
+	program, err = lowerGenerators(program)
+	if err != nil {
+		return nil, fmt.Errorf("generator lowering failed: %w", err)
+	}
+
 	if err := semantic.New().AnalyzeClasses(program); err != nil {
 		return nil, formatAnalysisError(sourcePath, "class semantic analysis failed", err)
 	}
@@ -133,6 +150,9 @@ func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.E
 	if err := semantic.New().Analyze(program); err != nil {
 		return nil, formatAnalysisError(sourcePath, "semantic analysis failed", err)
 	}
+	if err := eraseCastExpressions(program); err != nil {
+		return nil, fmt.Errorf("cast erasure failed: %w", err)
+	}
 
 	program, err = lowerAsyncFunctions(program)
 	if err != nil {
@@ -144,7 +164,12 @@ func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.E
 		return nil, fmt.Errorf("async function expression lowering failed: %w", err)
 	}
 
-	_ = lifetime.New().Analyze(program)
+	lifetimeReport := lifetime.New().Analyze(program)
+	warnings = append(warnings, lifetimeWarnings(lifetimeReport, sourcePath)...)
+	warnings, err = applyWarningPolicy(warnings, opts.WarningPolicy, opts.AllowedWarningCategories)
+	if err != nil {
+		return nil, err
+	}
 
 	module, err := lowering.Lower(program)
 	if err != nil {
@@ -158,6 +183,25 @@ func compileLoadedSource(source string, sourcePath string, extraExterns []*ast.E
 	}
 
 	return &Result{LLVMIR: llvmIR, Warnings: warnings}, nil
+}
+
+func lifetimeWarnings(report lifetime.Report, sourcePath string) []Diagnostic {
+	if len(report.Findings) == 0 {
+		return nil
+	}
+	warnings := make([]Diagnostic, 0, len(report.Findings))
+	for _, finding := range report.Findings {
+		warnings = append(warnings, Diagnostic{
+			Severity: "warning",
+			Category: "lifetime",
+			Code:     "JY400",
+			File:     sourcePath,
+			Line:     finding.Line,
+			Column:   finding.Column,
+			Message:  finding.Message,
+		})
+	}
+	return warnings
 }
 
 func applyWarningPolicy(warnings []Diagnostic, policy string, allowedCategories []string) ([]Diagnostic, error) {
@@ -227,6 +271,22 @@ func formatAnalysisError(sourcePath string, stage string, err error) error {
 }
 
 func formatParseError(sourcePath string, err error) error {
+	var lexDiagnostic *lexer.DiagnosticError
+	if errors.As(err, &lexDiagnostic) {
+		out := Diagnostic{
+			Severity: "error",
+			Category: "lexer",
+			Code:     "JY050",
+			File:     sourcePath,
+			Line:     lexDiagnostic.Line,
+			Column:   lexDiagnostic.Column,
+			Message:  lexDiagnostic.Message,
+		}
+		if out.File == "" && out.Line == 0 {
+			out.Message = fmt.Sprintf("lex failed: %s", lexDiagnostic.Message)
+		}
+		return &CompileError{Diagnostic: out}
+	}
 	var diagnostic *parser.DiagnosticError
 	if errors.As(err, &diagnostic) {
 		out := Diagnostic{
@@ -292,6 +352,9 @@ func statementWarnings(statements []ast.Statement, sourcePath string) []Diagnost
 		case *ast.WhileStatement:
 			warnings = append(warnings, expressionWarnings(stmt.Condition, sourcePath)...)
 			warnings = append(warnings, statementWarnings(stmt.Body, sourcePath)...)
+		case *ast.DoWhileStatement:
+			warnings = append(warnings, statementWarnings(stmt.Body, sourcePath)...)
+			warnings = append(warnings, expressionWarnings(stmt.Condition, sourcePath)...)
 		case *ast.ForStatement:
 			if stmt.Init != nil {
 				warnings = append(warnings, statementWarnings([]ast.Statement{stmt.Init}, sourcePath)...)
@@ -316,6 +379,10 @@ func statementWarnings(statements []ast.Statement, sourcePath string) []Diagnost
 				warnings = append(warnings, expressionWarnings(switchCase.Test, sourcePath)...)
 				warnings = append(warnings, statementWarnings(switchCase.Consequent, sourcePath)...)
 			}
+		case *ast.BlockStatement:
+			warnings = append(warnings, statementWarnings(stmt.Body, sourcePath)...)
+		case *ast.LabeledStatement:
+			warnings = append(warnings, statementWarnings([]ast.Statement{stmt.Statement}, sourcePath)...)
 		case *ast.TryStatement:
 			warnings = append(warnings, statementWarnings(stmt.TryBody, sourcePath)...)
 			warnings = append(warnings, statementWarnings(stmt.CatchBody, sourcePath)...)
@@ -354,6 +421,8 @@ func expressionWarnings(expr ast.Expression, sourcePath string) []Diagnostic {
 		return warnings
 	case *ast.ClosureExpression:
 		return expressionWarnings(expr.Environment, sourcePath)
+	case *ast.CastExpression:
+		return expressionWarnings(expr.Value, sourcePath)
 	case *ast.ObjectLiteral:
 		var warnings []Diagnostic
 		for _, property := range expr.Properties {
@@ -389,9 +458,22 @@ func expressionWarnings(expr ast.Expression, sourcePath string) []Diagnostic {
 	case *ast.NullishCoalesceExpression:
 		warnings := expressionWarnings(expr.Left, sourcePath)
 		return append(warnings, expressionWarnings(expr.Right, sourcePath)...)
+	case *ast.CommaExpression:
+		warnings := expressionWarnings(expr.Left, sourcePath)
+		return append(warnings, expressionWarnings(expr.Right, sourcePath)...)
+	case *ast.ConditionalExpression:
+		warnings := expressionWarnings(expr.Condition, sourcePath)
+		warnings = append(warnings, expressionWarnings(expr.Consequent, sourcePath)...)
+		return append(warnings, expressionWarnings(expr.Alternative, sourcePath)...)
 	case *ast.UnaryExpression:
 		return expressionWarnings(expr.Right, sourcePath)
 	case *ast.TypeofExpression:
+		return expressionWarnings(expr.Value, sourcePath)
+	case *ast.TypeCheckExpression:
+		return expressionWarnings(expr.Value, sourcePath)
+	case *ast.AwaitExpression:
+		return expressionWarnings(expr.Value, sourcePath)
+	case *ast.YieldExpression:
 		return expressionWarnings(expr.Value, sourcePath)
 	case *ast.InstanceofExpression:
 		warnings := expressionWarnings(expr.Left, sourcePath)

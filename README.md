@@ -30,6 +30,7 @@ function main(args) {
 ```
 
 Documentation index: [docs/index.md](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/index.md)
+LLVM/backend details are documented in [docs/llvm-backend.md](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/llvm-backend.md).
 
 Console output is documented in [docs/console.md](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/console.md).
 `print(...)` still works, but it is deprecated in favor of `console.log(...)`.
@@ -64,13 +65,119 @@ Current class scope is intentionally small:
 - `super.method()` in instance/static methods
 - `super.property` access for inherited properties
 
-Native wrapper interop is available in a first pass:
-- `import { jayess_add } from "./native/math.c";`
-- `import { jayess_add as add } from "./native/math.c";`
-- `import "./native/math.c";` for side-effect-only linking
-- imported native wrapper calls receive boxed Jayess runtime values and return boxed Jayess runtime values
-- wrappers should include [jayess_runtime.h](/C:/Users/ncksd/Documents/it/jayess/jayess-go/runtime/jayess_runtime.h)
+Manual native binding interop is available:
+- `import { add } from "./native/math.bind.js";`
+- `*.bind.js` binding files declare native sources, include dirs, flags, and exported symbols
+- `*.bind.js` can also apply per-platform source/include/flag overrides through `platforms.linux`, `platforms.darwin`, and `platforms.windows`
+- imported native binding calls receive boxed Jayess runtime values and return boxed Jayess runtime values
+- binding implementations should include [jayess_runtime.h](/C:/Users/ncksd/Documents/it/jayess/jayess-go/runtime/jayess_runtime.h)
 - C++ wrappers should export C ABI entrypoints with `extern "C"`
+- bindings can use public runtime helpers for objects/arrays, byte buffers, and opaque native handles
+
+The repo now also ships a native package example surface through `node_modules`:
+- `import { parseRequest, formatResponse } from "@jayess/httpserver";`
+- `parseRequest(...)` is backed by PicoHTTPParser through a Jayess native wrapper module
+- `formatResponse(...)` currently forwards to the built-in HTTP response formatter
+
+Manual bindings are declared in `*.bind.js`:
+
+```js
+const f = () => {};
+export const add = f;
+
+export default {
+  sources: ["./math.c", "./helper.c"],
+  includeDirs: ["./include"],
+  cflags: ["-DMY_BINDING=1"],
+  ldflags: [],
+  exports: {
+    add: { symbol: "mylib_add", type: "function" }
+  }
+};
+```
+
+Platform-specific native flags can be expressed directly in the same binding:
+
+```js
+export default {
+  sources: ["./webview.cpp"],
+  ldflags: [],
+  platforms: {
+    linux: { ldflags: ["-lgtk-3", "-lwebkit2gtk-4.1"] },
+    darwin: { ldflags: ["-framework", "Cocoa", "-framework", "WebKit"] },
+    windows: { ldflags: ["-lole32", "-lcomctl32"] }
+  },
+  exports: {
+    createWindowNative: { symbol: "jayess_webview_create_window", type: "function" }
+  }
+};
+```
+
+The named placeholder export keeps editors/formatters/linting happy for imports like:
+
+```js
+import { add } from "./math.bind.js";
+```
+
+while the compiler still treats `export default` as the source of truth for the native binding metadata.
+`*.bind.js` files are native binding modules, not normal Jayess source modules,
+so Jayess only supports named imports from them. Bare, default, and namespace
+imports are rejected.
+
+Bindings can also expose imported module values with `type: "value"`. Those are
+initialized by calling a zero-argument native getter during module startup.
+
+Useful binding-side runtime helpers now include:
+- `jayess_value_as_object(...)` / `jayess_value_as_array(...)`
+- `jayess_expect_object(...)` / `jayess_expect_array(...)` / `jayess_expect_string(...)`
+- `jayess_value_from_bytes_copy(...)` / `jayess_value_to_bytes_copy(...)`
+- `jayess_value_to_string_copy(...)`
+- `jayess_expect_bytes_copy(...)`
+- `jayess_string_free(...)`
+- `jayess_bytes_free(...)`
+- `jayess_value_from_native_handle(...)` / `jayess_value_as_native_handle(...)`
+- `jayess_value_from_managed_native_handle(...)` / `jayess_value_close_native_handle(...)`
+- `jayess_expect_native_handle(...)`
+- `jayess_throw_error(...)` / `jayess_throw_type_error(...)` / `jayess_throw_named_error(...)`
+
+Recommended binding authoring surface:
+- include `jayess_runtime.h`
+- write plain C ABI entrypoints like `jayess_value *mylib_add(jayess_value *a, jayess_value *b)`
+- use the low-level `jayess_value_*`, `jayess_object_*`, `jayess_array_*`, `jayess_expect_*`, and `jayess_throw_*` helpers directly
+
+Ownership rules for wrapper authors:
+- `jayess_value_from_*` returns boxed Jayess values owned by the Jayess runtime
+- `jayess_value_as_string(...)` is a borrowed view for immediate use only; do not store it in long-lived native state
+- `jayess_value_to_string_copy(...)` returns a fresh heap copy for long-lived wrapper state; free it with `jayess_string_free(...)`
+- `jayess_value_to_bytes_copy(...)` returns a fresh heap copy; free it with `jayess_bytes_free(...)` when done
+- `jayess_value_from_native_handle(...)` is for unmanaged opaque handles
+- `jayess_value_from_managed_native_handle(...)` is for explicitly closable resources; use `jayess_value_close_native_handle(...)` to run the registered finalizer once
+- managed native handles become invalid after close, and repeated close calls are safe
+- wrapper authors should keep borrowed Jayess pointers only for the duration of the current native call; store copied strings/bytes or managed handles instead
+
+CLI commands currently available:
+- `jayess <input.js>` or `jayess compile <input.js>`
+- `jayess run <input.js> [args...]`
+- `jayess test [path|file.test.js]`
+- `jayess init [directory]`
+
+Useful compiler/backend flags:
+- `--emit=llvm|bc|obj|lib|shared|exe`
+- `--opt=O0|O1|O2|O3|Oz`
+- `--cpu=<name>`
+- `--feature=<flag>` (repeatable or comma-separated, such as `+sse2` or `-avx`)
+- `--reloc=pic|pie|static`
+- `--code-model=small|medium|large|kernel`
+
+Examples:
+- `jayess --emit=bc --target=linux-x64 main.js`
+- `jayess --emit=obj --target=linux-x64 main.js`
+- `jayess --emit=lib --target=linux-x64 main.js`
+- `jayess --emit=shared --target=linux-x64 main.js`
+- `jayess --emit=exe --opt=O2 --cpu=native main.js`
+- `jayess --emit=obj --feature=+sse2 --feature=-avx --reloc=pic --code-model=small main.js`
+
+`jayess test` discovers `*.test.js` files, compiles each test for the host target, runs the resulting native executable, and treats exit code `0` as pass.
 
 Local relative imports are also supported in MVP form:
 
@@ -131,19 +238,38 @@ Current export support is limited to:
 - `export * from "./more.js";`
 - `export * as math from "./more.js";`
 
-Native wrapper example:
+Native binding import example:
 
 ```javascript
-import { jayess_add, jayess_greet } from "./native/math.c";
+import { add, greet } from "./native/math.bind.js";
 
 function main(args) {
-  console.log(jayess_add(3, 4));
-  console.log(jayess_greet("Kimchi"));
+  console.log(add(3, 4));
+  console.log(greet("Kimchi"));
   return 0;
 }
 ```
 
-Example C wrapper:
+Example `math.bind.js`:
+
+```javascript
+const f = () => {};
+export const add = f;
+export const greet = f;
+
+export default {
+  sources: ["./math.c"],
+  includeDirs: ["./include"],
+  cflags: [],
+  ldflags: [],
+  exports: {
+    add: { symbol: "jayess_add", type: "function" },
+    greet: { symbol: "jayess_greet", type: "function" }
+  }
+};
+```
+
+Example C binding implementation:
 
 ```c
 #include "jayess_runtime.h"
@@ -165,15 +291,20 @@ go build -o build\windows\jayess.exe .\cmd\jayess
 
 ```bash
 go run ./cmd/jayess --target=host --emit=llvm -o build/hello.ll examples/hello.js
+go run ./cmd/jayess --target=host --emit=obj -o build/hello.o examples/hello.js
+go run ./cmd/jayess --target=host --emit=lib -o build/libhello.a examples/hello.js
+go run ./cmd/jayess --target=host --emit=shared -o build/libhello.so examples/hello.js
 go run ./cmd/jayess --target=host --emit=llvm -o build/import.ll examples/import.js
 ```
 
 This emits LLVM IR text to `build/hello.ll`.
+Use `--opt=O0`, `O1`, `O2`, `O3`, or `Oz` to control clang optimization for object and executable builds. `O0` is the default.
 
 To build a native executable once `clang` is installed and on `PATH`:
 
 ```bash
 go run ./cmd/jayess --target=host --emit=exe -o build/hello.exe examples/hello.js
+go run ./cmd/jayess --target=host --emit=exe --opt=O2 -o build/hello-opt.exe examples/hello.js
 ```
 
 Warnings are shown by default. Use `--warnings=none` to suppress them temporarily, or `--warnings=error` to fail the build when warnings are emitted:
@@ -202,9 +333,3 @@ The current executable path is:
 2. Jayess LLVM IR text
 3. `clang`
 4. native executable
-
-## Next steps
-
-- replace the text emitter with LLVM bindings or a thin C bridge
-- expand the parser toward Jayess's JavaScript-like syntax
-- implement package resolution and runtime support

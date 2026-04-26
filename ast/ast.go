@@ -65,10 +65,16 @@ type UnaryOperator string
 type AssignmentOperator string
 
 const (
-	OperatorAdd BinaryOperator = "+"
-	OperatorSub BinaryOperator = "-"
-	OperatorMul BinaryOperator = "*"
-	OperatorDiv BinaryOperator = "/"
+	OperatorAdd    BinaryOperator = "+"
+	OperatorSub    BinaryOperator = "-"
+	OperatorMul    BinaryOperator = "*"
+	OperatorDiv    BinaryOperator = "/"
+	OperatorBitAnd BinaryOperator = "&"
+	OperatorBitOr  BinaryOperator = "|"
+	OperatorBitXor BinaryOperator = "^"
+	OperatorShl    BinaryOperator = "<<"
+	OperatorShr    BinaryOperator = ">>"
+	OperatorUShr   BinaryOperator = ">>>"
 )
 
 const (
@@ -88,7 +94,8 @@ const (
 )
 
 const (
-	OperatorNot UnaryOperator = "!"
+	OperatorNot    UnaryOperator = "!"
+	OperatorBitNot UnaryOperator = "~"
 )
 
 const (
@@ -104,6 +111,7 @@ const (
 
 type Program struct {
 	BaseNode
+	TypeAliases     []*TypeAliasDecl
 	Globals         []*VariableDecl
 	ExternFunctions []*ExternFunctionDecl
 	Functions       []*FunctionDecl
@@ -111,6 +119,20 @@ type Program struct {
 }
 
 func (*Program) node() {}
+
+type TypeParameter struct {
+	Name       string
+	Constraint string
+}
+
+type TypeAliasDecl struct {
+	BaseNode
+	Name       string
+	TypeParams []TypeParameter
+	Target     string
+}
+
+func (*TypeAliasDecl) node() {}
 
 type Parameter struct {
 	Name           string
@@ -127,12 +149,13 @@ type ClassMember interface {
 
 type FunctionDecl struct {
 	BaseNode
-	Visibility Visibility
-	Name       string
-	Params     []Parameter
-	ReturnType string
-	IsAsync    bool
-	Body       []Statement
+	Visibility  Visibility
+	Name        string
+	Params      []Parameter
+	ReturnType  string
+	IsAsync     bool
+	IsGenerator bool
+	Body        []Statement
 }
 
 func (*FunctionDecl) node() {}
@@ -142,6 +165,7 @@ type FunctionExpression struct {
 	Params          []Parameter
 	ReturnType      string
 	IsAsync         bool
+	IsGenerator     bool
 	Body            []Statement
 	ExpressionBody  Expression
 	IsArrowFunction bool
@@ -158,6 +182,15 @@ type ClosureExpression struct {
 
 func (*ClosureExpression) node()           {}
 func (*ClosureExpression) expressionNode() {}
+
+type CastExpression struct {
+	BaseNode
+	Value          Expression
+	TypeAnnotation string
+}
+
+func (*CastExpression) node()           {}
+func (*CastExpression) expressionNode() {}
 
 type ExternFunctionDecl struct {
 	BaseNode
@@ -180,6 +213,7 @@ func (*ClassDecl) node() {}
 
 type ClassFieldDecl struct {
 	BaseNode
+	TypeAnnotation string
 	Name        string
 	Private     bool
 	Static      bool
@@ -195,6 +229,8 @@ type ClassMethodDecl struct {
 	Private       bool
 	Static        bool
 	IsConstructor bool
+	IsGetter      bool
+	IsSetter      bool
 	Params        []Parameter
 	Body          []Statement
 }
@@ -271,6 +307,15 @@ type WhileStatement struct {
 func (*WhileStatement) node()          {}
 func (*WhileStatement) statementNode() {}
 
+type DoWhileStatement struct {
+	BaseNode
+	Body      []Statement
+	Condition Expression
+}
+
+func (*DoWhileStatement) node()          {}
+func (*DoWhileStatement) statementNode() {}
+
 type ForStatement struct {
 	BaseNode
 	Init      Statement
@@ -319,12 +364,35 @@ type SwitchStatement struct {
 func (*SwitchStatement) node()          {}
 func (*SwitchStatement) statementNode() {}
 
-type BreakStatement struct{ BaseNode }
+type BlockStatement struct {
+	BaseNode
+	Body []Statement
+}
+
+func (*BlockStatement) node()          {}
+func (*BlockStatement) statementNode() {}
+
+type LabeledStatement struct {
+	BaseNode
+	Label     string
+	Statement Statement
+}
+
+func (*LabeledStatement) node()          {}
+func (*LabeledStatement) statementNode() {}
+
+type BreakStatement struct {
+	BaseNode
+	Label string
+}
 
 func (*BreakStatement) node()          {}
 func (*BreakStatement) statementNode() {}
 
-type ContinueStatement struct{ BaseNode }
+type ContinueStatement struct {
+	BaseNode
+	Label string
+}
 
 func (*ContinueStatement) node()          {}
 func (*ContinueStatement) statementNode() {}
@@ -372,6 +440,14 @@ type NumberLiteral struct {
 func (*NumberLiteral) node()           {}
 func (*NumberLiteral) expressionNode() {}
 
+type BigIntLiteral struct {
+	BaseNode
+	Value string
+}
+
+func (*BigIntLiteral) node()           {}
+func (*BigIntLiteral) expressionNode() {}
+
 type BooleanLiteral struct {
 	BaseNode
 	Value bool
@@ -403,6 +479,9 @@ type ObjectProperty struct {
 	KeyExpr  Expression
 	Value    Expression
 	Computed bool
+	Spread   bool
+	Getter   bool
+	Setter   bool
 }
 
 type ObjectLiteral struct {
@@ -545,6 +624,14 @@ type AwaitExpression struct {
 func (*AwaitExpression) node()           {}
 func (*AwaitExpression) expressionNode() {}
 
+type YieldExpression struct {
+	BaseNode
+	Value Expression
+}
+
+func (*YieldExpression) node()           {}
+func (*YieldExpression) expressionNode() {}
+
 type BinaryExpression struct {
 	BaseNode
 	Operator BinaryOperator
@@ -584,6 +671,25 @@ type NullishCoalesceExpression struct {
 func (*NullishCoalesceExpression) node()           {}
 func (*NullishCoalesceExpression) expressionNode() {}
 
+type CommaExpression struct {
+	BaseNode
+	Left  Expression
+	Right Expression
+}
+
+func (*CommaExpression) node()           {}
+func (*CommaExpression) expressionNode() {}
+
+type ConditionalExpression struct {
+	BaseNode
+	Condition   Expression
+	Consequent  Expression
+	Alternative Expression
+}
+
+func (*ConditionalExpression) node()           {}
+func (*ConditionalExpression) expressionNode() {}
+
 type UnaryExpression struct {
 	BaseNode
 	Operator UnaryOperator
@@ -600,6 +706,15 @@ type TypeofExpression struct {
 
 func (*TypeofExpression) node()           {}
 func (*TypeofExpression) expressionNode() {}
+
+type TypeCheckExpression struct {
+	BaseNode
+	Value          Expression
+	TypeAnnotation string
+}
+
+func (*TypeCheckExpression) node()           {}
+func (*TypeCheckExpression) expressionNode() {}
 
 type InstanceofExpression struct {
 	BaseNode

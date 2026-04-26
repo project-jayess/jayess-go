@@ -1,0 +1,84 @@
+[submodule "refs/SDL"]
+	path = refs/SDL
+	url = git@github.com:libsdl-org/SDL.git
+	branch = main
+[submodule "refs/SDL_mixer"]
+	path = refs/SDL_mixer
+	url = git@github.com:libsdl-org/SDL_mixer.git
+	branch = main
+[submodule "refs/brotli"]
+	path = refs/brotli
+	url = git@github.com:google/brotli.git
+	branch = master
+[submodule "refs/cubeb"]
+	path = refs/cubeb
+	url = git@github.com:mozilla/cubeb.git
+	branch = master
+[submodule "refs/curl"]
+	path = refs/curl
+	url = git@github.com:curl/curl.git
+	branch = master
+[submodule "refs/glfw"]
+	path = refs/glfw
+	url = git@github.com:glfw/glfw.git
+	branch = master
+[submodule "refs/gtk"]
+	path = refs/gtk
+	url = git@github.com:GNOME/gtk.git
+	branch = main
+[submodule "refs/libavif"]
+	path = refs/libavif
+	url = git@github.com:AOMediaCodec/libavif.git
+	branch = main
+[submodule "refs/libuv"]
+	path = refs/libuv
+	url = git@github.com:libuv/libuv.git
+	branch = v1.x
+[submodule "refs/libvpx"]
+	path = refs/libvpx
+	url = git@github.com:webmproject/libvpx.git
+	branch = main
+[submodule "refs/libwebm"]
+	path = refs/libwebm
+	url = git@github.com:webmproject/libwebm.git
+	branch = main
+[submodule "refs/libwebp"]
+	path = refs/libwebp
+	url = git@github.com:webmproject/libwebp.git
+	branch = main
+[submodule "refs/llvm-project"]
+	path = refs/llvm-project
+	url = git@github.com:llvm/llvm-project.git
+	branch = main
+[submodule "refs/mongoose"]
+	path = refs/mongoose
+	url = git@github.com:cesanta/mongoose.git
+	branch = master
+[submodule "refs/nghttp2"]
+	path = refs/nghttp2
+	url = git@github.com:nghttp2/nghttp2.git
+	branch = master
+[submodule "refs/openssl"]
+	path = refs/openssl
+	url = git@github.com:openssl/openssl.git
+	branch = master
+[submodule "refs/picohttpparser"]
+	path = refs/picohttpparser
+	url = git@github.com:h2o/picohttpparser.git
+	branch = master
+[submodule "refs/raylib"]
+	path = refs/raylib
+	url = git@github.com:raysan5/raylib.git
+	branch = master
+[submodule "refs/sqlite"]
+	path = refs/sqlite
+	url = git@github.com:sqlite/sqlite.git
+	branch = master
+[submodule "refs/webview"]
+	path = refs/webview
+	url = git@github.com:webview/webview.git
+	branch = master
+[submodule "refs/zlib"]
+	path = refs/zlib
+	url = git@github.com:madler/zlib.git
+	branch = develop

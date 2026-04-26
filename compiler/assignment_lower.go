@@ -11,6 +11,7 @@ type assignmentLowerer struct{}
 func lowerAssignments(program *ast.Program) (*ast.Program, error) {
 	l := &assignmentLowerer{}
 	out := &ast.Program{
+		TypeAliases:     append([]*ast.TypeAliasDecl{}, program.TypeAliases...),
 		Globals:         append([]*ast.VariableDecl{}, program.Globals...),
 		ExternFunctions: append([]*ast.ExternFunctionDecl{}, program.ExternFunctions...),
 	}
@@ -124,6 +125,12 @@ func (l *assignmentLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement,
 			return nil, err
 		}
 		return []ast.Statement{&ast.ForInStatement{Kind: stmt.Kind, Name: stmt.Name, Iterable: stmt.Iterable, Body: body}}, nil
+	case *ast.BlockStatement:
+		body, err := l.lowerStatements(stmt.Body)
+		if err != nil {
+			return nil, err
+		}
+		return []ast.Statement{&ast.BlockStatement{Body: body}}, nil
 	case *ast.SwitchStatement:
 		out := &ast.SwitchStatement{Discriminant: stmt.Discriminant}
 		for _, switchCase := range stmt.Cases {
@@ -139,6 +146,15 @@ func (l *assignmentLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement,
 		}
 		out.Default = defaultBody
 		return []ast.Statement{out}, nil
+	case *ast.LabeledStatement:
+		lowered, err := l.lowerStatement(stmt.Statement)
+		if err != nil {
+			return nil, err
+		}
+		if len(lowered) != 1 {
+			return nil, fmt.Errorf("labeled statements cannot lower to multiple statements")
+		}
+		return []ast.Statement{&ast.LabeledStatement{Label: stmt.Label, Statement: lowered[0]}}, nil
 	case *ast.TryStatement:
 		tryBody, err := l.lowerStatements(stmt.TryBody)
 		if err != nil {
@@ -249,7 +265,7 @@ func cloneAssignmentTarget(expr ast.Expression) ast.Expression {
 			return nil
 		}
 		return &ast.IndexExpression{Target: target, Index: index, Optional: expr.Optional}
-	case *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.UndefinedLiteral, *ast.ThisExpression, *ast.SuperExpression, *ast.NewTargetExpression, *ast.BoundSuperExpression:
+	case *ast.NumberLiteral, *ast.BigIntLiteral, *ast.StringLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.UndefinedLiteral, *ast.ThisExpression, *ast.SuperExpression, *ast.NewTargetExpression, *ast.BoundSuperExpression:
 		return expr
 	default:
 		return expr

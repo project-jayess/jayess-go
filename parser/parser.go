@@ -60,6 +60,36 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	program := &ast.Program{BaseNode: p.currentBase()}
 	for p.current.Type != lexer.TokenEOF {
 		switch p.current.Type {
+		case lexer.TokenIdent:
+			if p.current.Literal == "type" {
+				alias, err := p.parseTypeAlias()
+				if err != nil {
+					return nil, err
+				}
+				program.TypeAliases = append(program.TypeAliases, alias)
+				p.nextToken()
+				continue
+			}
+			if p.current.Literal == "enum" {
+				alias, global, err := p.parseEnum()
+				if err != nil {
+					return nil, err
+				}
+				program.TypeAliases = append(program.TypeAliases, alias)
+				program.Globals = append(program.Globals, global)
+				p.nextToken()
+				continue
+			}
+			if p.current.Literal == "interface" {
+				alias, err := p.parseInterfaceAlias()
+				if err != nil {
+					return nil, err
+				}
+				program.TypeAliases = append(program.TypeAliases, alias)
+				p.nextToken()
+				continue
+			}
+			return nil, p.errorAtCurrent("unexpected top-level token %q", p.current.Literal)
 		case lexer.TokenPrivate, lexer.TokenPublic:
 			return nil, p.errorAtCurrent("top-level private/public are not supported; module visibility is controlled by export")
 		case lexer.TokenLet:
@@ -78,7 +108,7 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 			}
 			decl, ok := stmt.(*ast.VariableDecl)
 			if !ok {
-				return nil, fmt.Errorf("top-level destructuring is not supported yet")
+				return nil, p.errorAtCurrent("top-level destructuring is not supported yet")
 			}
 			program.Globals = append(program.Globals, decl)
 			p.nextToken()
@@ -107,6 +137,161 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	return program, nil
 }
 
+func (p *Parser) parseTypeAlias() (*ast.TypeAliasDecl, error) {
+	start := p.currentBase()
+	if p.current.Type != lexer.TokenIdent || p.current.Literal != "type" {
+		return nil, p.errorAtCurrent("expected type alias declaration")
+	}
+	if err := p.expectPeek(lexer.TokenIdent); err != nil {
+		return nil, err
+	}
+	name := p.current.Literal
+	typeParams, err := p.parseOptionalTypeParameters()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectPeek(lexer.TokenAssign); err != nil {
+		return nil, err
+	}
+	p.nextToken()
+	target, err := p.parseTypeExpression(func(token lexer.TokenType) bool {
+		return token == lexer.TokenSemicolon
+	})
+	if err != nil {
+		return nil, err
+	}
+	if p.current.Type != lexer.TokenSemicolon {
+		if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+			return nil, err
+		}
+	}
+	return &ast.TypeAliasDecl{BaseNode: start, Name: name, TypeParams: typeParams, Target: target}, nil
+}
+
+func (p *Parser) parseInterfaceAlias() (*ast.TypeAliasDecl, error) {
+	start := p.currentBase()
+	if p.current.Type != lexer.TokenIdent || p.current.Literal != "interface" {
+		return nil, p.errorAtCurrent("expected interface declaration")
+	}
+	if err := p.expectPeek(lexer.TokenIdent); err != nil {
+		return nil, err
+	}
+	name := p.current.Literal
+	typeParams, err := p.parseOptionalTypeParameters()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectPeek(lexer.TokenLBrace); err != nil {
+		return nil, err
+	}
+	p.nextToken()
+	target := "{}"
+	if p.current.Type != lexer.TokenRBrace {
+		body, err := p.parseTypeExpression(func(token lexer.TokenType) bool {
+			return token == lexer.TokenRBrace
+		})
+		if err != nil {
+			return nil, err
+		}
+		target = "{" + body + "}"
+		if err := p.expectPeek(lexer.TokenRBrace); err != nil {
+			return nil, err
+		}
+	}
+	if p.current.Type != lexer.TokenRBrace {
+		return nil, p.errorAtCurrent("expected '}' to close interface %s", name)
+	}
+	return &ast.TypeAliasDecl{BaseNode: start, Name: name, TypeParams: typeParams, Target: target}, nil
+}
+
+func (p *Parser) parseEnum() (*ast.TypeAliasDecl, *ast.VariableDecl, error) {
+	start := p.currentBase()
+	if p.current.Type != lexer.TokenIdent || p.current.Literal != "enum" {
+		return nil, nil, p.errorAtCurrent("expected enum declaration")
+	}
+	if err := p.expectPeek(lexer.TokenIdent); err != nil {
+		return nil, nil, err
+	}
+	name := p.current.Literal
+	if err := p.expectPeek(lexer.TokenLBrace); err != nil {
+		return nil, nil, err
+	}
+	p.nextToken()
+	properties := []ast.ObjectProperty{}
+	members := []string{}
+	nextNumber := 0
+	canAutoNumber := true
+	for p.current.Type != lexer.TokenRBrace && p.current.Type != lexer.TokenEOF {
+		if p.current.Type != lexer.TokenIdent {
+			return nil, nil, p.errorAtCurrent("expected enum member name")
+		}
+		memberName := p.current.Literal
+		var value ast.Expression
+		var memberType string
+		if p.peek.Type == lexer.TokenAssign {
+			p.nextToken()
+			p.nextToken()
+			switch p.current.Type {
+			case lexer.TokenNumber:
+				number, err := strconv.ParseFloat(p.current.Literal, 64)
+				if err != nil {
+					return nil, nil, p.errorAtCurrent("invalid enum numeric literal %q", p.current.Literal)
+				}
+				value = &ast.NumberLiteral{BaseNode: p.currentBase(), Value: number}
+				memberType = strconv.FormatFloat(number, 'f', -1, 64)
+				nextNumber = int(number) + 1
+				canAutoNumber = true
+			case lexer.TokenString:
+				value = &ast.StringLiteral{BaseNode: p.currentBase(), Value: p.current.Literal}
+				memberType = strconv.Quote(p.current.Literal)
+				canAutoNumber = false
+			default:
+				return nil, nil, p.errorAtCurrent("enum member %s must be initialized with a number or string literal", memberName)
+			}
+		} else {
+			if !canAutoNumber {
+				return nil, nil, p.errorAtCurrent("enum member %s requires an explicit initializer after a non-numeric member", memberName)
+			}
+			value = &ast.NumberLiteral{BaseNode: start, Value: float64(nextNumber)}
+			memberType = strconv.Itoa(nextNumber)
+			nextNumber++
+		}
+		properties = append(properties, ast.ObjectProperty{Key: memberName, Value: value})
+		members = append(members, memberType)
+		if p.peek.Type == lexer.TokenComma {
+			p.nextToken()
+			p.nextToken()
+			continue
+		}
+		if p.peek.Type == lexer.TokenRBrace {
+			p.nextToken()
+			break
+		}
+		return nil, nil, p.errorAtPeek("expected ',' or '}' after enum member")
+	}
+	if p.current.Type != lexer.TokenRBrace {
+		return nil, nil, p.errorAtCurrent("expected '}' to close enum %s", name)
+	}
+	target := "never"
+	if len(members) > 0 {
+		target = strings.Join(members, "|")
+	}
+	alias := &ast.TypeAliasDecl{BaseNode: start, Name: name, Target: target}
+	objectTypeParts := make([]string, len(properties))
+	for i, property := range properties {
+		objectTypeParts[i] = property.Key + ":" + members[i]
+	}
+	global := &ast.VariableDecl{
+		BaseNode:       start,
+		Visibility:     ast.VisibilityPublic,
+		Kind:           ast.DeclarationConst,
+		Name:           name,
+		TypeAnnotation: "{" + strings.Join(objectTypeParts, ",") + "}",
+		Value:          &ast.ObjectLiteral{BaseNode: start, Properties: properties},
+	}
+	return alias, global, nil
+}
+
 func (p *Parser) parseExternFunction() (*ast.ExternFunctionDecl, error) {
 	start := p.currentBase()
 	if err := p.expectCurrent(lexer.TokenExtern); err != nil {
@@ -128,7 +313,7 @@ func (p *Parser) parseExternFunction() (*ast.ExternFunctionDecl, error) {
 	}
 	for _, param := range params {
 		if param.Pattern != nil {
-			return nil, fmt.Errorf("extern functions do not support destructured parameters")
+			return nil, p.errorAtCurrent("extern functions do not support destructured parameters")
 		}
 	}
 	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
@@ -140,6 +325,7 @@ func (p *Parser) parseExternFunction() (*ast.ExternFunctionDecl, error) {
 func (p *Parser) parseFunction() (*ast.FunctionDecl, error) {
 	start := p.currentBase()
 	isAsync := false
+	isGenerator := false
 	if p.current.Type == lexer.TokenAsync {
 		isAsync = true
 		if err := p.expectPeek(lexer.TokenFunction); err != nil {
@@ -147,10 +333,14 @@ func (p *Parser) parseFunction() (*ast.FunctionDecl, error) {
 		}
 	}
 	if p.current.Type == lexer.TokenPrivate || p.current.Type == lexer.TokenPublic {
-		return nil, fmt.Errorf("top-level private/public are not supported; module visibility is controlled by export")
+		return nil, p.errorAtCurrent("top-level private/public are not supported; module visibility is controlled by export")
 	}
 	if err := p.expectCurrent(lexer.TokenFunction); err != nil {
 		return nil, err
+	}
+	if p.peek.Type == lexer.TokenStar {
+		p.nextToken()
+		isGenerator = true
 	}
 	if err := p.expectPeek(lexer.TokenIdent); err != nil {
 		return nil, err
@@ -174,7 +364,7 @@ func (p *Parser) parseFunction() (*ast.FunctionDecl, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FunctionDecl{BaseNode: start, Visibility: ast.VisibilityPublic, Name: name, Params: params, ReturnType: returnType, IsAsync: isAsync, Body: body}, nil
+	return &ast.FunctionDecl{BaseNode: start, Visibility: ast.VisibilityPublic, Name: name, Params: params, ReturnType: returnType, IsAsync: isAsync, IsGenerator: isGenerator, Body: body}, nil
 }
 
 func (p *Parser) parseClass() (*ast.ClassDecl, error) {
@@ -208,7 +398,7 @@ func (p *Parser) parseClass() (*ast.ClassDecl, error) {
 		}
 	}
 	if p.current.Type != lexer.TokenRBrace {
-		return nil, fmt.Errorf("expected '}' to close class %s", classDecl.Name)
+		return nil, p.errorAtCurrent("expected '}' to close class %s", classDecl.Name)
 	}
 	p.nextToken()
 	return classDecl, nil
@@ -231,10 +421,21 @@ func (p *Parser) parseClassMember() (ast.ClassMember, error) {
 		}
 	case lexer.TokenIdent:
 	default:
-		return nil, fmt.Errorf("unexpected class member token %q", p.current.Literal)
+		return nil, p.errorAtCurrent("unexpected class member token %q", p.current.Literal)
 	}
 
 	name := p.current.Literal
+	isGetter := false
+	isSetter := false
+	if !private && p.current.Type == lexer.TokenIdent && (p.current.Literal == "get" || p.current.Literal == "set") && p.peek.Type == lexer.TokenIdent {
+		kind := p.current.Literal
+		p.nextToken()
+		name = p.current.Literal
+		if p.peek.Type == lexer.TokenLParen {
+			isGetter = kind == "get"
+			isSetter = kind == "set"
+		}
+	}
 	if p.peek.Type == lexer.TokenLParen {
 		p.nextToken()
 		params, err := p.parseParameters()
@@ -257,9 +458,16 @@ func (p *Parser) parseClassMember() (ast.ClassMember, error) {
 			Private:       private,
 			Static:        static,
 			IsConstructor: !private && !static && name == "constructor",
+			IsGetter:      isGetter,
+			IsSetter:      isSetter,
 			Params:        params,
 			Body:          body,
 		}, nil
+	}
+
+	annotation, err := p.parseTypeAnnotation()
+	if err != nil {
+		return nil, err
 	}
 
 	var initializer ast.Expression
@@ -275,7 +483,7 @@ func (p *Parser) parseClassMember() (ast.ClassMember, error) {
 	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
 		return nil, err
 	}
-	return &ast.ClassFieldDecl{BaseNode: start, Name: name, Private: private, Static: static, Initializer: initializer}, nil
+	return &ast.ClassFieldDecl{BaseNode: start, Name: name, TypeAnnotation: annotation, Private: private, Static: static, Initializer: initializer}, nil
 }
 
 func (p *Parser) parseParameters() ([]ast.Parameter, error) {
@@ -303,7 +511,7 @@ func (p *Parser) parseParameters() ([]ast.Parameter, error) {
 			}
 		case lexer.TokenLBrace, lexer.TokenLBracket:
 			if rest {
-				return nil, fmt.Errorf("rest parameter must be an identifier")
+				return nil, p.errorAtCurrent("rest parameter must be an identifier")
 			}
 			pattern, err := p.parsePattern()
 			if err != nil {
@@ -311,15 +519,15 @@ func (p *Parser) parseParameters() ([]ast.Parameter, error) {
 			}
 			param.Pattern = pattern
 		default:
-			return nil, fmt.Errorf("expected parameter name or pattern at %d:%d", p.current.Line, p.current.Column)
+			return nil, p.errorAtCurrent("expected parameter name or pattern")
 		}
 		if p.peek.Type == lexer.TokenAssign {
 			if rest {
-				return nil, fmt.Errorf("rest parameter cannot have a default value")
+				return nil, p.errorAtCurrent("rest parameter cannot have a default value")
 			}
 			p.nextToken()
 			p.nextToken()
-			value, err := p.parseExpression()
+			value, err := p.parseExpressionNoComma()
 			if err != nil {
 				return nil, err
 			}
@@ -327,7 +535,7 @@ func (p *Parser) parseParameters() ([]ast.Parameter, error) {
 		}
 		params = append(params, param)
 		if rest && p.peek.Type == lexer.TokenComma {
-			return nil, fmt.Errorf("rest parameter must be last")
+			return nil, p.errorAtPeek("rest parameter must be last")
 		}
 		if p.peek.Type != lexer.TokenComma {
 			break
@@ -336,29 +544,82 @@ func (p *Parser) parseParameters() ([]ast.Parameter, error) {
 		p.nextToken()
 	}
 	if p.peek.Type != lexer.TokenRParen {
-		return nil, fmt.Errorf("expected ')' after parameters at %d:%d", p.peek.Line, p.peek.Column)
+		return nil, p.errorAtPeek("expected ')' after parameters")
 	}
 	p.nextToken()
 	return params, nil
 }
 
+func (p *Parser) parseOptionalTypeParameters() ([]ast.TypeParameter, error) {
+	if p.peek.Type != lexer.TokenLt {
+		return nil, nil
+	}
+	p.nextToken()
+	p.nextToken()
+	params := []ast.TypeParameter{}
+	for {
+		if p.current.Type != lexer.TokenIdent {
+			return nil, p.errorAtCurrent("expected type parameter name")
+		}
+		param := ast.TypeParameter{Name: p.current.Literal}
+		if p.peek.Type == lexer.TokenExtends {
+			p.nextToken()
+			p.nextToken()
+			constraint, err := p.parseTypeExpression(func(token lexer.TokenType) bool {
+				return token == lexer.TokenComma || token == lexer.TokenGt
+			})
+			if err != nil {
+				return nil, err
+			}
+			param.Constraint = constraint
+		}
+		params = append(params, param)
+		if p.peek.Type == lexer.TokenComma {
+			p.nextToken()
+			p.nextToken()
+			continue
+		}
+		if p.peek.Type != lexer.TokenGt {
+			return nil, p.errorAtPeek("expected ',' or '>' after type parameter")
+		}
+		p.nextToken()
+		break
+	}
+	return params, nil
+}
+
 func (p *Parser) parseTypeAnnotation() (string, error) {
+	return p.parseTypeAnnotationWithStop(func(token lexer.TokenType) bool {
+		switch token {
+		case lexer.TokenComma, lexer.TokenRParen, lexer.TokenAssign, lexer.TokenSemicolon, lexer.TokenLBrace:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func (p *Parser) parseTypeAnnotationWithStop(stop func(lexer.TokenType) bool) (string, error) {
 	if p.peek.Type != lexer.TokenColon {
 		return "", nil
 	}
 	p.nextToken()
 	p.nextToken()
-	if !tokenCanBeTypeName(p.current.Type) {
-		return "", fmt.Errorf("expected type annotation name at %d:%d", p.current.Line, p.current.Column)
-	}
-	return p.current.Literal, nil
+	return p.parseTypeExpression(stop)
 }
 
 func (p *Parser) parseOptionalReturnType() (string, error) {
 	if p.peek.Type != lexer.TokenColon {
 		return "", nil
 	}
-	return p.parseTypeAnnotation()
+	return p.parseTypeAnnotationWithStop(func(token lexer.TokenType) bool {
+		switch token {
+		case lexer.TokenLBrace, lexer.TokenArrow:
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 func (p *Parser) parseBlock() ([]ast.Statement, error) {
@@ -370,14 +631,12 @@ func (p *Parser) parseBlock() ([]ast.Statement, error) {
 			return nil, err
 		}
 		statements = append(statements, stmt)
-		switch stmt.(type) {
-		case *ast.IfStatement, *ast.WhileStatement, *ast.ForStatement, *ast.ForOfStatement, *ast.ForInStatement, *ast.SwitchStatement, *ast.TryStatement:
-		default:
+		if !statementConsumesFollowingToken(stmt) {
 			p.nextToken()
 		}
 	}
 	if p.current.Type != lexer.TokenRBrace {
-		return nil, fmt.Errorf("expected '}' to close block, got %q", p.current.Literal)
+		return nil, p.errorAtCurrent("expected '}' to close block, got %q", p.current.Literal)
 	}
 	p.nextToken()
 	return statements, nil
@@ -392,14 +651,12 @@ func (p *Parser) parseBlockExpression() ([]ast.Statement, error) {
 			return nil, err
 		}
 		statements = append(statements, stmt)
-		switch stmt.(type) {
-		case *ast.IfStatement, *ast.WhileStatement, *ast.ForStatement, *ast.ForOfStatement, *ast.ForInStatement, *ast.SwitchStatement, *ast.TryStatement:
-		default:
+		if !statementConsumesFollowingToken(stmt) {
 			p.nextToken()
 		}
 	}
 	if p.current.Type != lexer.TokenRBrace {
-		return nil, fmt.Errorf("expected '}' to close block, got %q", p.current.Literal)
+		return nil, p.errorAtCurrent("expected '}' to close block, got %q", p.current.Literal)
 	}
 	return statements, nil
 }
@@ -407,15 +664,19 @@ func (p *Parser) parseBlockExpression() ([]ast.Statement, error) {
 func (p *Parser) parseStatement() (ast.Statement, error) {
 	switch p.current.Type {
 	case lexer.TokenPrivate, lexer.TokenPublic:
-		return nil, fmt.Errorf("private/public are not supported here; use #private for class members")
+		return nil, p.errorAtCurrent("private/public are not supported here; use #private for class members")
 	case lexer.TokenLet:
-		return nil, fmt.Errorf("let is not supported; use var or const")
+		return nil, p.errorAtCurrent("let is not supported; use var or const")
 	case lexer.TokenVar, lexer.TokenConst:
 		return p.parseVariableDeclaration()
 	case lexer.TokenReturn:
 		return p.parseReturn()
 	case lexer.TokenIf:
 		return p.parseIf()
+	case lexer.TokenDo:
+		return p.parseDoWhile()
+	case lexer.TokenLBrace:
+		return p.parseBlockStatement()
 	case lexer.TokenWhile:
 		return p.parseWhile()
 	case lexer.TokenFor:
@@ -432,15 +693,31 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		return p.parseThrow()
 	case lexer.TokenTry:
 		return p.parseTry()
+	case lexer.TokenIdent:
+		if p.peek.Type == lexer.TokenColon {
+			return p.parseLabeledStatement()
+		}
+		return p.parseExpressionOrAssignmentStatement()
 	default:
 		return p.parseExpressionOrAssignmentStatement()
+	}
+}
+
+func statementConsumesFollowingToken(stmt ast.Statement) bool {
+	switch stmt := stmt.(type) {
+	case *ast.IfStatement, *ast.WhileStatement, *ast.ForStatement, *ast.ForOfStatement, *ast.ForInStatement, *ast.SwitchStatement, *ast.TryStatement, *ast.BlockStatement:
+		return true
+	case *ast.LabeledStatement:
+		return statementConsumesFollowingToken(stmt.Statement)
+	default:
+		return false
 	}
 }
 
 func (p *Parser) parseVariableDeclaration() (ast.Statement, error) {
 	start := p.currentBase()
 	if p.current.Type == lexer.TokenPrivate || p.current.Type == lexer.TokenPublic {
-		return nil, fmt.Errorf("private/public variable declarations are not supported; module visibility is controlled by export")
+		return nil, p.errorAtCurrent("private/public variable declarations are not supported; module visibility is controlled by export")
 	}
 	var kind ast.DeclarationKind
 	switch p.current.Type {
@@ -449,13 +726,13 @@ func (p *Parser) parseVariableDeclaration() (ast.Statement, error) {
 	case lexer.TokenConst:
 		kind = ast.DeclarationConst
 	default:
-		return nil, fmt.Errorf("expected var or const")
+		return nil, p.errorAtCurrent("expected var or const")
 	}
 	switch p.peek.Type {
 	case lexer.TokenIdent:
 		p.nextToken()
 		name := p.current.Literal
-		annotation, err := p.parseOptionalReturnType()
+		annotation, err := p.parseTypeAnnotation()
 		if err != nil {
 			return nil, err
 		}
@@ -467,7 +744,7 @@ func (p *Parser) parseVariableDeclaration() (ast.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+		if err := p.consumeStatementTerminator(); err != nil {
 			return nil, err
 		}
 		return &ast.VariableDecl{BaseNode: start, Visibility: ast.VisibilityPublic, Kind: kind, Name: name, TypeAnnotation: annotation, Value: value}, nil
@@ -485,12 +762,12 @@ func (p *Parser) parseVariableDeclaration() (ast.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+		if err := p.consumeStatementTerminator(); err != nil {
 			return nil, err
 		}
 		return &ast.DestructuringDecl{BaseNode: start, Visibility: ast.VisibilityPublic, Kind: kind, Pattern: pattern, Value: value}, nil
 	default:
-		return nil, fmt.Errorf("expected variable name or destructuring pattern")
+		return nil, p.errorAtPeek("expected variable name or destructuring pattern")
 	}
 }
 
@@ -506,7 +783,7 @@ func (p *Parser) parseAssignment(target ast.Expression) (ast.Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+	if err := p.consumeStatementTerminator(); err != nil {
 		return nil, err
 	}
 	return &ast.AssignmentStatement{BaseNode: start, Target: target, Operator: operator, Value: value}, nil
@@ -514,12 +791,19 @@ func (p *Parser) parseAssignment(target ast.Expression) (ast.Statement, error) {
 
 func (p *Parser) parseReturn() (ast.Statement, error) {
 	start := p.currentBase()
+	if p.peek.Type == lexer.TokenSemicolon {
+		p.nextToken()
+		return &ast.ReturnStatement{BaseNode: start}, nil
+	}
+	if p.peek.Type == lexer.TokenRBrace || p.peek.Type == lexer.TokenEOF || p.lineBreakBeforePeek() {
+		return &ast.ReturnStatement{BaseNode: start}, nil
+	}
 	p.nextToken()
 	value, err := p.parseExpression()
 	if err != nil {
 		return nil, err
 	}
-	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+	if err := p.consumeStatementTerminator(); err != nil {
 		return nil, err
 	}
 	return &ast.ReturnStatement{BaseNode: start, Value: value}, nil
@@ -527,7 +811,15 @@ func (p *Parser) parseReturn() (ast.Statement, error) {
 
 func (p *Parser) parseBreak() (ast.Statement, error) {
 	start := p.currentBase()
-	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+	if p.peek.Type == lexer.TokenIdent && !p.lineBreakBeforePeek() {
+		p.nextToken()
+		label := p.current.Literal
+		if err := p.consumeKeywordTerminator(); err != nil {
+			return nil, err
+		}
+		return &ast.BreakStatement{BaseNode: start, Label: label}, nil
+	}
+	if err := p.consumeKeywordTerminator(); err != nil {
 		return nil, err
 	}
 	return &ast.BreakStatement{BaseNode: start}, nil
@@ -535,10 +827,41 @@ func (p *Parser) parseBreak() (ast.Statement, error) {
 
 func (p *Parser) parseContinue() (ast.Statement, error) {
 	start := p.currentBase()
-	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+	if p.peek.Type == lexer.TokenIdent && !p.lineBreakBeforePeek() {
+		p.nextToken()
+		label := p.current.Literal
+		if err := p.consumeKeywordTerminator(); err != nil {
+			return nil, err
+		}
+		return &ast.ContinueStatement{BaseNode: start, Label: label}, nil
+	}
+	if err := p.consumeKeywordTerminator(); err != nil {
 		return nil, err
 	}
 	return &ast.ContinueStatement{BaseNode: start}, nil
+}
+
+func (p *Parser) parseBlockStatement() (ast.Statement, error) {
+	start := p.currentBase()
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.BlockStatement{BaseNode: start, Body: body}, nil
+}
+
+func (p *Parser) parseLabeledStatement() (ast.Statement, error) {
+	start := p.currentBase()
+	label := p.current.Literal
+	if err := p.expectPeek(lexer.TokenColon); err != nil {
+		return nil, err
+	}
+	p.nextToken()
+	stmt, err := p.parseStatement()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.LabeledStatement{BaseNode: start, Label: label, Statement: stmt}, nil
 }
 
 func (p *Parser) parseDelete() (ast.Statement, error) {
@@ -548,7 +871,7 @@ func (p *Parser) parseDelete() (ast.Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+	if err := p.consumeStatementTerminator(); err != nil {
 		return nil, err
 	}
 	return &ast.DeleteStatement{BaseNode: start, Target: target}, nil
@@ -556,12 +879,15 @@ func (p *Parser) parseDelete() (ast.Statement, error) {
 
 func (p *Parser) parseThrow() (ast.Statement, error) {
 	start := p.currentBase()
+	if p.peek.Type == lexer.TokenSemicolon || p.peek.Type == lexer.TokenRBrace || p.peek.Type == lexer.TokenEOF || p.lineBreakBeforePeek() {
+		return nil, p.errorAtPeek("line break or statement end is not allowed after throw")
+	}
 	p.nextToken()
 	value, err := p.parseExpression()
 	if err != nil {
 		return nil, err
 	}
-	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+	if err := p.consumeStatementTerminator(); err != nil {
 		return nil, err
 	}
 	return &ast.ThrowStatement{BaseNode: start, Value: value}, nil
@@ -570,7 +896,7 @@ func (p *Parser) parseThrow() (ast.Statement, error) {
 func (p *Parser) parseTry() (ast.Statement, error) {
 	start := p.currentBase()
 	if p.peek.Type != lexer.TokenLBrace {
-		return nil, fmt.Errorf("expected '{' after try")
+		return nil, p.errorAtPeek("expected '{' after try")
 	}
 	p.nextToken()
 	tryBody, err := p.parseBlock()
@@ -587,12 +913,12 @@ func (p *Parser) parseTry() (ast.Statement, error) {
 			}
 			stmt.CatchName = p.current.Literal
 			if p.peek.Type != lexer.TokenRParen {
-				return nil, fmt.Errorf("expected ')' after catch binding")
+				return nil, p.errorAtPeek("expected ')' after catch binding")
 			}
 			p.nextToken()
 		}
 		if p.peek.Type != lexer.TokenLBrace {
-			return nil, fmt.Errorf("expected '{' after catch")
+			return nil, p.errorAtPeek("expected '{' after catch")
 		}
 		p.nextToken()
 		stmt.CatchBody, err = p.parseBlock()
@@ -602,7 +928,7 @@ func (p *Parser) parseTry() (ast.Statement, error) {
 	}
 	if p.current.Type == lexer.TokenFinally {
 		if p.peek.Type != lexer.TokenLBrace {
-			return nil, fmt.Errorf("expected '{' after finally")
+			return nil, p.errorAtPeek("expected '{' after finally")
 		}
 		p.nextToken()
 		stmt.FinallyBody, err = p.parseBlock()
@@ -611,7 +937,7 @@ func (p *Parser) parseTry() (ast.Statement, error) {
 		}
 	}
 	if len(stmt.CatchBody) == 0 && len(stmt.FinallyBody) == 0 {
-		return nil, fmt.Errorf("try must include catch, finally, or both")
+		return nil, p.errorAtCurrent("try must include catch, finally, or both")
 	}
 	return stmt, nil
 }
@@ -627,11 +953,11 @@ func (p *Parser) parseIf() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.peek.Type != lexer.TokenRParen {
-		return nil, fmt.Errorf("expected ')' after if condition")
+		return nil, p.errorAtPeek("expected ')' after if condition")
 	}
 	p.nextToken()
 	if p.peek.Type != lexer.TokenLBrace {
-		return nil, fmt.Errorf("expected '{' after if condition")
+		return nil, p.errorAtPeek("expected '{' after if condition")
 	}
 	p.nextToken()
 	consequence, err := p.parseBlock()
@@ -650,7 +976,7 @@ func (p *Parser) parseIf() (ast.Statement, error) {
 			alternative = []ast.Statement{elseIf}
 		} else {
 			if p.peek.Type != lexer.TokenLBrace {
-				return nil, fmt.Errorf("expected '{' after else")
+				return nil, p.errorAtPeek("expected '{' after else")
 			}
 			p.nextToken()
 			alternative, err = p.parseBlock()
@@ -673,11 +999,11 @@ func (p *Parser) parseWhile() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.peek.Type != lexer.TokenRParen {
-		return nil, fmt.Errorf("expected ')' after while condition")
+		return nil, p.errorAtPeek("expected ')' after while condition")
 	}
 	p.nextToken()
 	if p.peek.Type != lexer.TokenLBrace {
-		return nil, fmt.Errorf("expected '{' after while condition")
+		return nil, p.errorAtPeek("expected '{' after while condition")
 	}
 	p.nextToken()
 	body, err := p.parseBlock()
@@ -685,6 +1011,38 @@ func (p *Parser) parseWhile() (ast.Statement, error) {
 		return nil, err
 	}
 	return &ast.WhileStatement{BaseNode: start, Condition: condition, Body: body}, nil
+}
+
+func (p *Parser) parseDoWhile() (ast.Statement, error) {
+	start := p.currentBase()
+	if p.peek.Type != lexer.TokenLBrace {
+		return nil, p.errorAtPeek("expected '{' after do")
+	}
+	p.nextToken()
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	if p.current.Type != lexer.TokenWhile {
+		return nil, p.errorAtCurrent("expected while after do block")
+	}
+	if p.peek.Type != lexer.TokenLParen {
+		return nil, p.errorAtPeek("expected '(' after do while")
+	}
+	p.nextToken()
+	p.nextToken()
+	condition, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	if p.peek.Type != lexer.TokenRParen {
+		return nil, p.errorAtPeek("expected ')' after do while condition")
+	}
+	p.nextToken()
+	if err := p.consumeStatementTerminator(); err != nil {
+		return nil, err
+	}
+	return &ast.DoWhileStatement{BaseNode: start, Body: body, Condition: condition}, nil
 }
 
 func (p *Parser) parseFor() (ast.Statement, error) {
@@ -701,7 +1059,7 @@ func (p *Parser) parseFor() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.current.Type != lexer.TokenSemicolon {
-		return nil, fmt.Errorf("expected ';' after for initializer")
+		return nil, p.errorAtCurrent("expected ';' after for initializer")
 	}
 
 	condition, err := p.parseForCondition()
@@ -709,7 +1067,7 @@ func (p *Parser) parseFor() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.current.Type != lexer.TokenSemicolon {
-		return nil, fmt.Errorf("expected ';' after for condition")
+		return nil, p.errorAtCurrent("expected ';' after for condition")
 	}
 
 	update, err := p.parseForUpdate()
@@ -717,10 +1075,10 @@ func (p *Parser) parseFor() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.current.Type != lexer.TokenRParen {
-		return nil, fmt.Errorf("expected ')' after for update")
+		return nil, p.errorAtCurrent("expected ')' after for update")
 	}
 	if p.peek.Type != lexer.TokenLBrace {
-		return nil, fmt.Errorf("expected '{' after for clause")
+		return nil, p.errorAtPeek("expected '{' after for clause")
 	}
 	p.nextToken()
 	body, err := p.parseBlock()
@@ -734,10 +1092,10 @@ func (p *Parser) parseForEach() (ast.Statement, error) {
 	start := p.currentBase()
 	p.nextToken()
 	if p.current.Type == lexer.TokenLet {
-		return nil, fmt.Errorf("let is not supported; use var or const")
+		return nil, p.errorAtCurrent("let is not supported; use var or const")
 	}
 	if p.current.Type != lexer.TokenVar && p.current.Type != lexer.TokenConst {
-		return nil, fmt.Errorf("for...of and for...in require var or const")
+		return nil, p.errorAtCurrent("for...of and for...in require var or const")
 	}
 	kind := ast.DeclarationVar
 	if p.current.Type == lexer.TokenConst {
@@ -750,7 +1108,7 @@ func (p *Parser) parseForEach() (ast.Statement, error) {
 	p.nextToken()
 	mode := p.current.Type
 	if mode != lexer.TokenOf && mode != lexer.TokenIn {
-		return nil, fmt.Errorf("expected of or in in for-each loop")
+		return nil, p.errorAtCurrent("expected of or in in for-each loop")
 	}
 	p.nextToken()
 	iterable, err := p.parseExpression()
@@ -758,11 +1116,11 @@ func (p *Parser) parseForEach() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.peek.Type != lexer.TokenRParen {
-		return nil, fmt.Errorf("expected ')' after for-each iterable")
+		return nil, p.errorAtPeek("expected ')' after for-each iterable")
 	}
 	p.nextToken()
 	if p.peek.Type != lexer.TokenLBrace {
-		return nil, fmt.Errorf("expected '{' after for-each clause")
+		return nil, p.errorAtPeek("expected '{' after for-each clause")
 	}
 	p.nextToken()
 	body, err := p.parseBlock()
@@ -786,11 +1144,11 @@ func (p *Parser) parseSwitch() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.peek.Type != lexer.TokenRParen {
-		return nil, fmt.Errorf("expected ')' after switch discriminant")
+		return nil, p.errorAtPeek("expected ')' after switch discriminant")
 	}
 	p.nextToken()
 	if p.peek.Type != lexer.TokenLBrace {
-		return nil, fmt.Errorf("expected '{' after switch")
+		return nil, p.errorAtPeek("expected '{' after switch")
 	}
 	p.nextToken()
 	p.nextToken()
@@ -805,7 +1163,7 @@ func (p *Parser) parseSwitch() (ast.Statement, error) {
 				return nil, err
 			}
 			if p.peek.Type != lexer.TokenColon {
-				return nil, fmt.Errorf("expected ':' after switch case")
+				return nil, p.errorAtPeek("expected ':' after switch case")
 			}
 			p.nextToken()
 			p.nextToken()
@@ -816,7 +1174,7 @@ func (p *Parser) parseSwitch() (ast.Statement, error) {
 			stmt.Cases = append(stmt.Cases, ast.SwitchCase{Test: test, Consequent: consequent})
 		case lexer.TokenDefault:
 			if p.peek.Type != lexer.TokenColon {
-				return nil, fmt.Errorf("expected ':' after switch default")
+				return nil, p.errorAtPeek("expected ':' after switch default")
 			}
 			p.nextToken()
 			p.nextToken()
@@ -826,11 +1184,11 @@ func (p *Parser) parseSwitch() (ast.Statement, error) {
 			}
 			stmt.Default = consequent
 		default:
-			return nil, fmt.Errorf("unexpected token %q in switch", p.current.Literal)
+			return nil, p.errorAtCurrent("unexpected token %q in switch", p.current.Literal)
 		}
 	}
 	if p.current.Type != lexer.TokenRBrace {
-		return nil, fmt.Errorf("expected '}' to close switch")
+		return nil, p.errorAtCurrent("expected '}' to close switch")
 	}
 	p.nextToken()
 	return stmt, nil
@@ -844,9 +1202,7 @@ func (p *Parser) parseSwitchConsequent() ([]ast.Statement, error) {
 			return nil, err
 		}
 		statements = append(statements, stmt)
-		switch stmt.(type) {
-		case *ast.IfStatement, *ast.WhileStatement, *ast.ForStatement, *ast.ForOfStatement, *ast.ForInStatement, *ast.SwitchStatement, *ast.TryStatement:
-		default:
+		if !statementConsumesFollowingToken(stmt) {
 			p.nextToken()
 		}
 	}
@@ -861,7 +1217,7 @@ func (p *Parser) parseExpressionOrAssignmentStatement() (ast.Statement, error) {
 				return nil, err
 			}
 			if p.peek.Type != lexer.TokenAssign {
-				return nil, fmt.Errorf("expected '=' after destructuring pattern")
+				return nil, p.errorAtPeek("expected '=' after destructuring pattern")
 			}
 			p.nextToken()
 			p.nextToken()
@@ -869,7 +1225,7 @@ func (p *Parser) parseExpressionOrAssignmentStatement() (ast.Statement, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+			if err := p.consumeStatementTerminator(); err != nil {
 				return nil, err
 			}
 			return &ast.DestructuringAssignment{BaseNode: p.currentBase(), Pattern: pattern, Value: value}, nil
@@ -882,7 +1238,7 @@ func (p *Parser) parseExpressionOrAssignmentStatement() (ast.Statement, error) {
 	if isAssignmentToken(p.peek.Type) {
 		return p.parseAssignment(expr)
 	}
-	if err := p.expectPeek(lexer.TokenSemicolon); err != nil {
+	if err := p.consumeStatementTerminator(); err != nil {
 		return nil, err
 	}
 	return &ast.ExpressionStatement{BaseNode: p.currentBase(), Expression: expr}, nil
@@ -897,7 +1253,7 @@ func (p *Parser) parsePattern() (ast.Pattern, error) {
 	case lexer.TokenLBracket:
 		return p.parseArrayPattern()
 	default:
-		return nil, fmt.Errorf("expected binding pattern at %d:%d", p.current.Line, p.current.Column)
+		return nil, p.errorAtCurrent("expected binding pattern")
 	}
 }
 
@@ -911,16 +1267,16 @@ func (p *Parser) parseObjectPattern() (ast.Pattern, error) {
 		if p.current.Type == lexer.TokenEllipsis {
 			p.nextToken()
 			if p.current.Type != lexer.TokenIdent {
-				return nil, fmt.Errorf("object rest element must be an identifier")
+				return nil, p.errorAtCurrent("object rest element must be an identifier")
 			}
 			pattern.Rest = p.current.Literal
 			if p.peek.Type != lexer.TokenRBrace {
-				return nil, fmt.Errorf("object rest element must be last")
+				return nil, p.errorAtPeek("object rest element must be last")
 			}
 			break
 		}
 		if p.current.Type != lexer.TokenIdent {
-			return nil, fmt.Errorf("expected object pattern key at %d:%d", p.current.Line, p.current.Column)
+			return nil, p.errorAtCurrent("expected object pattern key")
 		}
 		key := p.current.Literal
 		var valuePattern ast.Pattern
@@ -939,7 +1295,7 @@ func (p *Parser) parseObjectPattern() (ast.Pattern, error) {
 		if p.peek.Type == lexer.TokenAssign {
 			p.nextToken()
 			p.nextToken()
-			value, err := p.parseExpression()
+			value, err := p.parseExpressionNoComma()
 			if err != nil {
 				return nil, err
 			}
@@ -953,7 +1309,7 @@ func (p *Parser) parseObjectPattern() (ast.Pattern, error) {
 		p.nextToken()
 	}
 	if p.peek.Type != lexer.TokenRBrace {
-		return nil, fmt.Errorf("expected '}' after object pattern at %d:%d", p.peek.Line, p.peek.Column)
+		return nil, p.errorAtPeek("expected '}' after object pattern")
 	}
 	p.nextToken()
 	return pattern, nil
@@ -964,7 +1320,7 @@ func (p *Parser) parseArrayPattern() (ast.Pattern, error) {
 	p.nextToken()
 	for p.current.Type != lexer.TokenRBracket {
 		if p.current.Type == lexer.TokenEOF {
-			return nil, fmt.Errorf("expected ']' after array pattern")
+			return nil, p.errorAtCurrent("expected ']' after array pattern")
 		}
 		if p.current.Type == lexer.TokenComma {
 			pattern.Elements = append(pattern.Elements, ast.ArrayPatternElement{})
@@ -974,14 +1330,14 @@ func (p *Parser) parseArrayPattern() (ast.Pattern, error) {
 		if p.current.Type == lexer.TokenEllipsis {
 			p.nextToken()
 			if p.current.Type != lexer.TokenIdent {
-				return nil, fmt.Errorf("array rest element must be an identifier")
+				return nil, p.errorAtCurrent("array rest element must be an identifier")
 			}
 			pattern.Elements = append(pattern.Elements, ast.ArrayPatternElement{
 				Pattern: &ast.IdentifierPattern{Name: p.current.Literal},
 				Rest:    true,
 			})
 			if p.peek.Type != lexer.TokenRBracket {
-				return nil, fmt.Errorf("array rest element must be last")
+				return nil, p.errorAtPeek("array rest element must be last")
 			}
 			p.nextToken()
 			break
@@ -994,7 +1350,7 @@ func (p *Parser) parseArrayPattern() (ast.Pattern, error) {
 		if p.peek.Type == lexer.TokenAssign {
 			p.nextToken()
 			p.nextToken()
-			value, err := p.parseExpression()
+			value, err := p.parseExpressionNoComma()
 			if err != nil {
 				return nil, err
 			}
@@ -1007,7 +1363,7 @@ func (p *Parser) parseArrayPattern() (ast.Pattern, error) {
 			continue
 		}
 		if p.peek.Type != lexer.TokenRBracket {
-			return nil, fmt.Errorf("expected ']' after array pattern at %d:%d", p.peek.Line, p.peek.Column)
+			return nil, p.errorAtPeek("expected ']' after array pattern")
 		}
 		p.nextToken()
 	}
@@ -1015,7 +1371,62 @@ func (p *Parser) parseArrayPattern() (ast.Pattern, error) {
 }
 
 func (p *Parser) parseExpression() (ast.Expression, error) {
-	return p.parseNullish()
+	return p.parseSequenceExpression()
+}
+
+func (p *Parser) parseSequenceExpression() (ast.Expression, error) {
+	left, err := p.parseConditional()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek.Type == lexer.TokenComma {
+		p.nextToken()
+		p.nextToken()
+		right, err := p.parseConditional()
+		if err != nil {
+			return nil, err
+		}
+		left = &ast.CommaExpression{
+			BaseNode: ast.BaseNode{Pos: ast.PositionOf(left)},
+			Left:     left,
+			Right:    right,
+		}
+	}
+	return left, nil
+}
+
+func (p *Parser) parseExpressionNoComma() (ast.Expression, error) {
+	return p.parseConditional()
+}
+
+func (p *Parser) parseConditional() (ast.Expression, error) {
+	condition, err := p.parseNullish()
+	if err != nil {
+		return nil, err
+	}
+	if p.peek.Type != lexer.TokenQuestion {
+		return condition, nil
+	}
+	p.nextToken()
+	p.nextToken()
+	consequent, err := p.parseExpressionNoComma()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectPeek(lexer.TokenColon); err != nil {
+		return nil, err
+	}
+	p.nextToken()
+	alternative, err := p.parseConditional()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.ConditionalExpression{
+		BaseNode:    ast.BaseNode{Pos: ast.PositionOf(condition)},
+		Condition:   condition,
+		Consequent:  consequent,
+		Alternative: alternative,
+	}, nil
 }
 
 func (p *Parser) parseNullish() (ast.Expression, error) {
@@ -1053,14 +1464,14 @@ func (p *Parser) parseLogicalOr() (ast.Expression, error) {
 }
 
 func (p *Parser) parseLogicalAnd() (ast.Expression, error) {
-	left, err := p.parseComparison()
+	left, err := p.parseBitwiseOr()
 	if err != nil {
 		return nil, err
 	}
 	for p.peek.Type == lexer.TokenAnd {
 		p.nextToken()
 		p.nextToken()
-		right, err := p.parseComparison()
+		right, err := p.parseBitwiseOr()
 		if err != nil {
 			return nil, err
 		}
@@ -1069,16 +1480,95 @@ func (p *Parser) parseLogicalAnd() (ast.Expression, error) {
 	return left, nil
 }
 
+func (p *Parser) parseBitwiseOr() (ast.Expression, error) {
+	left, err := p.parseBitwiseXor()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek.Type == lexer.TokenBitOr {
+		p.nextToken()
+		operator := parseOperator(p.current.Type)
+		p.nextToken()
+		right, err := p.parseBitwiseXor()
+		if err != nil {
+			return nil, err
+		}
+		left = &ast.BinaryExpression{BaseNode: ast.BaseNode{Pos: ast.PositionOf(left)}, Operator: operator, Left: left, Right: right}
+	}
+	return left, nil
+}
+
+func (p *Parser) parseBitwiseXor() (ast.Expression, error) {
+	left, err := p.parseBitwiseAnd()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek.Type == lexer.TokenBitXor {
+		p.nextToken()
+		operator := parseOperator(p.current.Type)
+		p.nextToken()
+		right, err := p.parseBitwiseAnd()
+		if err != nil {
+			return nil, err
+		}
+		left = &ast.BinaryExpression{BaseNode: ast.BaseNode{Pos: ast.PositionOf(left)}, Operator: operator, Left: left, Right: right}
+	}
+	return left, nil
+}
+
+func (p *Parser) parseBitwiseAnd() (ast.Expression, error) {
+	left, err := p.parseComparison()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek.Type == lexer.TokenBitAnd {
+		p.nextToken()
+		operator := parseOperator(p.current.Type)
+		p.nextToken()
+		right, err := p.parseComparison()
+		if err != nil {
+			return nil, err
+		}
+		left = &ast.BinaryExpression{BaseNode: ast.BaseNode{Pos: ast.PositionOf(left)}, Operator: operator, Left: left, Right: right}
+	}
+	return left, nil
+}
+
 func (p *Parser) parseComparison() (ast.Expression, error) {
-	left, err := p.parseAdditive()
+	left, err := p.parseShift()
 	if err != nil {
 		return nil, err
 	}
 	for isComparisonToken(p.peek.Type) {
 		p.nextToken()
 		tokenType := p.current.Type
+		if tokenType == lexer.TokenIs {
+			p.nextToken()
+			typeAnnotation, err := p.parseTypeExpression(func(tokenType lexer.TokenType) bool {
+				switch tokenType {
+				case lexer.TokenSemicolon,
+					lexer.TokenComma,
+					lexer.TokenColon,
+					lexer.TokenQuestion,
+					lexer.TokenNullish,
+					lexer.TokenAnd,
+					lexer.TokenOr,
+					lexer.TokenRParen,
+					lexer.TokenRBracket,
+					lexer.TokenRBrace:
+					return true
+				default:
+					return false
+				}
+			})
+			if err != nil {
+				return nil, err
+			}
+			left = &ast.TypeCheckExpression{BaseNode: ast.BaseNode{Pos: ast.PositionOf(left)}, Value: left, TypeAnnotation: typeAnnotation}
+			continue
+		}
 		p.nextToken()
-		right, err := p.parseAdditive()
+		right, err := p.parseShift()
 		if err != nil {
 			return nil, err
 		}
@@ -1088,6 +1578,24 @@ func (p *Parser) parseComparison() (ast.Expression, error) {
 		}
 		operator := parseComparisonOperator(tokenType)
 		left = &ast.ComparisonExpression{Operator: operator, Left: left, Right: right}
+	}
+	return left, nil
+}
+
+func (p *Parser) parseShift() (ast.Expression, error) {
+	left, err := p.parseAdditive()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek.Type == lexer.TokenShiftLeft || p.peek.Type == lexer.TokenShiftRight || p.peek.Type == lexer.TokenUnsignedShift {
+		p.nextToken()
+		operator := parseOperator(p.current.Type)
+		p.nextToken()
+		right, err := p.parseAdditive()
+		if err != nil {
+			return nil, err
+		}
+		left = &ast.BinaryExpression{BaseNode: ast.BaseNode{Pos: ast.PositionOf(left)}, Operator: operator, Left: left, Right: right}
 	}
 	return left, nil
 }
@@ -1145,6 +1653,14 @@ func (p *Parser) parseUnary() (ast.Expression, error) {
 		}
 		return &ast.UnaryExpression{BaseNode: p.currentBase(), Operator: ast.OperatorNot, Right: right}, nil
 	}
+	if p.current.Type == lexer.TokenBitNot {
+		p.nextToken()
+		right, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.UnaryExpression{BaseNode: p.currentBase(), Operator: ast.OperatorBitNot, Right: right}, nil
+	}
 	if p.current.Type == lexer.TokenMinus {
 		p.nextToken()
 		right, err := p.parseUnary()
@@ -1167,6 +1683,7 @@ func tokenCanBePropertyName(tokenType lexer.TokenType) bool {
 		lexer.TokenNative,
 		lexer.TokenStatic,
 		lexer.TokenNew,
+		lexer.TokenIs,
 		lexer.TokenTypeof,
 		lexer.TokenInstanceof,
 		lexer.TokenThis,
@@ -1207,16 +1724,77 @@ func tokenCanBePropertyName(tokenType lexer.TokenType) bool {
 
 func tokenCanBeTypeName(tokenType lexer.TokenType) bool {
 	switch tokenType {
-	case lexer.TokenIdent, lexer.TokenString, lexer.TokenNumber, lexer.TokenTrue, lexer.TokenFalse, lexer.TokenNull, lexer.TokenUndefined:
+	case lexer.TokenIdent, lexer.TokenString, lexer.TokenNumber, lexer.TokenTrue, lexer.TokenFalse, lexer.TokenNull, lexer.TokenUndefined, lexer.TokenLBracket, lexer.TokenLBrace, lexer.TokenLParen:
 		return true
 	default:
 		return false
 	}
 }
 
+func (p *Parser) parseTypeExpression(stop func(lexer.TokenType) bool) (string, error) {
+	if !tokenCanBeTypeName(p.current.Type) {
+		return "", p.errorAtCurrent("expected type annotation")
+	}
+	var builder strings.Builder
+	parens := 0
+	brackets := 0
+	braces := 0
+	for {
+		if builder.Len() > 0 && needsTypeSpace(builder.String()[builder.Len()-1], p.current.Literal) {
+			builder.WriteByte(' ')
+		}
+		switch p.current.Type {
+		case lexer.TokenString:
+			builder.WriteString(strconv.Quote(p.current.Literal))
+		default:
+			builder.WriteString(p.current.Literal)
+		}
+		switch p.current.Type {
+		case lexer.TokenLParen:
+			parens++
+		case lexer.TokenRParen:
+			parens--
+		case lexer.TokenLBracket:
+			brackets++
+		case lexer.TokenRBracket:
+			brackets--
+		case lexer.TokenLBrace:
+			braces++
+		case lexer.TokenRBrace:
+			braces--
+			if braces < 0 {
+				return "", p.errorAtCurrent("unexpected '}' in type annotation")
+			}
+		}
+		if p.peek.Type == lexer.TokenEOF {
+			break
+		}
+		if stop(p.peek.Type) && parens == 0 && brackets == 0 && braces == 0 {
+			break
+		}
+		p.nextToken()
+	}
+	return builder.String(), nil
+}
+
+func needsTypeSpace(last byte, next string) bool {
+	if len(next) == 0 {
+		return false
+	}
+	nextByte := next[0]
+	if isTypeWordChar(last) && isTypeWordChar(nextByte) {
+		return true
+	}
+	return false
+}
+
+func isTypeWordChar(ch byte) bool {
+	return ch == '_' || ch >= '0' && ch <= '9' || ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z'
+}
+
 func (p *Parser) parseDotPropertyName() (string, error) {
 	if !tokenCanBePropertyName(p.peek.Type) {
-		return "", fmt.Errorf("expected property name after '.', got %s", p.peek.Type)
+		return "", p.errorAtPeek("expected property name after '.', got %s", p.peek.Type)
 	}
 	p.nextToken()
 	return p.current.Literal, nil
@@ -1229,6 +1807,16 @@ func (p *Parser) parsePostfix() (ast.Expression, error) {
 	}
 	for {
 		switch p.peek.Type {
+		case lexer.TokenIdent:
+			if p.peek.Literal != "as" {
+				return expr, nil
+			}
+			p.nextToken()
+			p.nextToken()
+			if !tokenCanBeTypeName(p.current.Type) {
+				return nil, p.errorAtCurrent("expected type name after as")
+			}
+			expr = &ast.CastExpression{BaseNode: ast.BaseNode{Pos: ast.PositionOf(expr)}, Value: expr, TypeAnnotation: p.current.Literal}
 		case lexer.TokenLParen:
 			p.nextToken()
 			args, err := p.parseArguments()
@@ -1249,7 +1837,7 @@ func (p *Parser) parsePostfix() (ast.Expression, error) {
 				return nil, err
 			}
 			if p.peek.Type != lexer.TokenRBracket {
-				return nil, fmt.Errorf("expected ']' after index")
+				return nil, p.errorAtPeek("expected ']' after index")
 			}
 			p.nextToken()
 			expr = &ast.IndexExpression{BaseNode: p.currentBase(), Target: expr, Index: index}
@@ -1276,7 +1864,7 @@ func (p *Parser) parsePostfix() (ast.Expression, error) {
 					return nil, err
 				}
 				if p.peek.Type != lexer.TokenRBracket {
-					return nil, fmt.Errorf("expected ']' after optional index")
+					return nil, p.errorAtPeek("expected ']' after optional index")
 				}
 				p.nextToken()
 				expr = &ast.IndexExpression{BaseNode: p.currentBase(), Target: expr, Index: index, Optional: true}
@@ -1318,6 +1906,8 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			return nil, fmt.Errorf("invalid number literal %q", p.current.Literal)
 		}
 		return &ast.NumberLiteral{BaseNode: p.currentBase(), Value: value}, nil
+	case lexer.TokenBigInt:
+		return &ast.BigIntLiteral{BaseNode: p.currentBase(), Value: p.current.Literal}, nil
 	case lexer.TokenTrue:
 		return &ast.BooleanLiteral{BaseNode: p.currentBase(), Value: true}, nil
 	case lexer.TokenFalse:
@@ -1344,7 +1934,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if p.peek.Type == lexer.TokenFunction {
 			return p.parseFunctionExpression()
 		}
-		return nil, fmt.Errorf("async is only supported before function declarations and function expressions")
+		return nil, p.errorAtCurrent("async is only supported before function declarations and function expressions")
 	case lexer.TokenThis:
 		return &ast.ThisExpression{BaseNode: p.currentBase()}, nil
 	case lexer.TokenSuper:
@@ -1359,6 +1949,17 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			return nil, err
 		}
 		return &ast.AwaitExpression{BaseNode: start, Value: value}, nil
+	case lexer.TokenYield:
+		start := p.currentBase()
+		if p.peek.Type == lexer.TokenSemicolon || p.peek.Type == lexer.TokenRBrace || p.peek.Type == lexer.TokenEOF {
+			return &ast.YieldExpression{BaseNode: start, Value: &ast.UndefinedLiteral{BaseNode: start}}, nil
+		}
+		p.nextToken()
+		value, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.YieldExpression{BaseNode: start, Value: value}, nil
 	case lexer.TokenLParen:
 		if p.isArrowFunctionStart() {
 			return p.parseParenthesizedArrowFunction()
@@ -1369,7 +1970,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			return nil, err
 		}
 		if p.peek.Type != lexer.TokenRParen {
-			return nil, fmt.Errorf("expected ')'")
+			return nil, p.errorAtPeek("expected ')'")
 		}
 		p.nextToken()
 		return expr, nil
@@ -1378,13 +1979,14 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 	case lexer.TokenLBracket:
 		return p.parseArrayLiteral()
 	default:
-		return nil, fmt.Errorf("unexpected expression token %q", p.current.Literal)
+		return nil, p.errorAtCurrent("unexpected expression token %q", p.current.Literal)
 	}
 }
 
 func (p *Parser) parseFunctionExpression() (ast.Expression, error) {
 	start := p.currentBase()
 	isAsync := false
+	isGenerator := false
 	if p.current.Type == lexer.TokenAsync {
 		isAsync = true
 		if err := p.expectPeek(lexer.TokenFunction); err != nil {
@@ -1393,6 +1995,10 @@ func (p *Parser) parseFunctionExpression() (ast.Expression, error) {
 	}
 	if err := p.expectCurrent(lexer.TokenFunction); err != nil {
 		return nil, err
+	}
+	if p.peek.Type == lexer.TokenStar {
+		p.nextToken()
+		isGenerator = true
 	}
 	if err := p.expectPeek(lexer.TokenLParen); err != nil {
 		return nil, err
@@ -1412,7 +2018,7 @@ func (p *Parser) parseFunctionExpression() (ast.Expression, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.FunctionExpression{BaseNode: start, Params: params, ReturnType: returnType, IsAsync: isAsync, Body: body}, nil
+	return &ast.FunctionExpression{BaseNode: start, Params: params, ReturnType: returnType, IsAsync: isAsync, IsGenerator: isGenerator, Body: body}, nil
 }
 
 func (p *Parser) parseSingleParamArrowFunction() (ast.Expression, error) {
@@ -1474,7 +2080,7 @@ func (p *Parser) parseAsyncArrowFunction() (ast.Expression, error) {
 		return expr, nil
 	}
 	if p.current.Type != lexer.TokenLParen {
-		return nil, fmt.Errorf("async arrow function expects parameter list")
+		return nil, p.errorAtCurrent("async arrow function expects parameter list")
 	}
 	params, err := p.parseParameters()
 	if err != nil {
@@ -1521,7 +2127,7 @@ func (p *Parser) parseNewExpression() (ast.Expression, error) {
 			return nil, err
 		}
 		if p.current.Literal != "target" {
-			return nil, fmt.Errorf("expected target after new.")
+			return nil, p.errorAtCurrent("expected target after new.")
 		}
 		return &ast.NewTargetExpression{BaseNode: p.currentBase()}, nil
 	}
@@ -1558,38 +2164,57 @@ func (p *Parser) parseObjectLiteral() (ast.Expression, error) {
 		p.nextToken()
 	}
 	if p.peek.Type != lexer.TokenRBrace {
-		return nil, fmt.Errorf("expected '}' after object literal")
+		return nil, p.errorAtPeek("expected '}' after object literal")
 	}
 	p.nextToken()
 	return &ast.ObjectLiteral{BaseNode: p.currentBase(), Properties: properties}, nil
 }
 
 func (p *Parser) parseObjectProperty() (ast.ObjectProperty, error) {
+	if p.current.Type == lexer.TokenEllipsis {
+		p.nextToken()
+		value, err := p.parseExpressionNoComma()
+		if err != nil {
+			return ast.ObjectProperty{}, err
+		}
+		return ast.ObjectProperty{Value: value, Spread: true}, nil
+	}
 	if p.current.Type == lexer.TokenLBracket {
 		p.nextToken()
-		keyExpr, err := p.parseExpression()
+		keyExpr, err := p.parseExpressionNoComma()
 		if err != nil {
 			return ast.ObjectProperty{}, err
 		}
 		if p.peek.Type != lexer.TokenRBracket {
-			return ast.ObjectProperty{}, fmt.Errorf("expected ']' after computed object key")
+			return ast.ObjectProperty{}, p.errorAtPeek("expected ']' after computed object key")
 		}
 		p.nextToken()
 		if p.peek.Type != lexer.TokenColon {
-			return ast.ObjectProperty{}, fmt.Errorf("expected ':' after computed object key")
+			return ast.ObjectProperty{}, p.errorAtPeek("expected ':' after computed object key")
 		}
 		p.nextToken()
 		p.nextToken()
-		value, err := p.parseExpression()
+		value, err := p.parseExpressionNoComma()
 		if err != nil {
 			return ast.ObjectProperty{}, err
 		}
 		return ast.ObjectProperty{KeyExpr: keyExpr, Value: value, Computed: true}, nil
 	}
 	if p.current.Type != lexer.TokenIdent && p.current.Type != lexer.TokenString {
-		return ast.ObjectProperty{}, fmt.Errorf("expected object property name")
+		return ast.ObjectProperty{}, p.errorAtCurrent("expected object property name")
 	}
 	key := p.current.Literal
+	isGetter := false
+	isSetter := false
+	if p.current.Type == lexer.TokenIdent && (p.current.Literal == "get" || p.current.Literal == "set") && (p.peek.Type == lexer.TokenIdent || p.peek.Type == lexer.TokenString) {
+		kind := p.current.Literal
+		p.nextToken()
+		key = p.current.Literal
+		if p.peek.Type == lexer.TokenLParen {
+			isGetter = kind == "get"
+			isSetter = kind == "set"
+		}
+	}
 	if p.peek.Type == lexer.TokenLParen {
 		p.nextToken()
 		params, err := p.parseParameters()
@@ -1603,14 +2228,19 @@ func (p *Parser) parseObjectProperty() (ast.ObjectProperty, error) {
 		if err != nil {
 			return ast.ObjectProperty{}, err
 		}
-		return ast.ObjectProperty{Key: key, Value: &ast.FunctionExpression{BaseNode: p.currentBase(), Params: params, Body: body}}, nil
+		return ast.ObjectProperty{
+			Key:    key,
+			Value:  &ast.FunctionExpression{BaseNode: p.currentBase(), Params: params, Body: body},
+			Getter: isGetter,
+			Setter: isSetter,
+		}, nil
 	}
 	if p.peek.Type != lexer.TokenColon {
-		return ast.ObjectProperty{}, fmt.Errorf("expected ':' after object property name")
+		return ast.ObjectProperty{}, p.errorAtPeek("expected ':' after object property name")
 	}
 	p.nextToken()
 	p.nextToken()
-	value, err := p.parseExpression()
+	value, err := p.parseExpressionNoComma()
 	if err != nil {
 		return ast.ObjectProperty{}, err
 	}
@@ -1631,13 +2261,13 @@ func (p *Parser) parseArrayLiteral() (ast.Expression, error) {
 		)
 		if p.current.Type == lexer.TokenEllipsis {
 			p.nextToken()
-			value, parseErr := p.parseExpression()
+			value, parseErr := p.parseExpressionNoComma()
 			if parseErr != nil {
 				return nil, parseErr
 			}
 			element = &ast.SpreadExpression{BaseNode: p.currentBase(), Value: value}
 		} else {
-			element, err = p.parseExpression()
+			element, err = p.parseExpressionNoComma()
 		}
 		if err != nil {
 			return nil, err
@@ -1649,7 +2279,7 @@ func (p *Parser) parseArrayLiteral() (ast.Expression, error) {
 		p.nextToken()
 	}
 	if p.peek.Type != lexer.TokenRBracket {
-		return nil, fmt.Errorf("expected ']' after array literal")
+		return nil, p.errorAtPeek("expected ']' after array literal")
 	}
 	p.nextToken()
 	return &ast.ArrayLiteral{BaseNode: p.currentBase(), Elements: elements}, nil
@@ -1668,13 +2298,13 @@ func (p *Parser) parseArguments() ([]ast.Expression, error) {
 		)
 		if p.current.Type == lexer.TokenEllipsis {
 			p.nextToken()
-			value, parseErr := p.parseExpression()
+			value, parseErr := p.parseExpressionNoComma()
 			if parseErr != nil {
 				return nil, parseErr
 			}
 			arg = &ast.SpreadExpression{BaseNode: p.currentBase(), Value: value}
 		} else {
-			arg, err = p.parseExpression()
+			arg, err = p.parseExpressionNoComma()
 		}
 		if err != nil {
 			return nil, err
@@ -1687,7 +2317,7 @@ func (p *Parser) parseArguments() ([]ast.Expression, error) {
 		p.nextToken()
 	}
 	if p.peek.Type != lexer.TokenRParen {
-		return nil, fmt.Errorf("expected ')' after arguments")
+		return nil, p.errorAtPeek("expected ')' after arguments")
 	}
 	p.nextToken()
 	return args, nil
@@ -1699,10 +2329,10 @@ func (p *Parser) parseForInit() (ast.Statement, error) {
 		return nil, nil
 	}
 	if p.current.Type == lexer.TokenPrivate || p.current.Type == lexer.TokenPublic {
-		return nil, fmt.Errorf("private/public are not supported in for initializers")
+		return nil, p.errorAtCurrent("private/public are not supported in for initializers")
 	}
 	if p.current.Type == lexer.TokenLet {
-		return nil, fmt.Errorf("let is not supported; use var or const")
+		return nil, p.errorAtCurrent("let is not supported; use var or const")
 	}
 	if p.current.Type == lexer.TokenVar || p.current.Type == lexer.TokenConst {
 		stmt, err := p.parseInlineVariableDeclaration()
@@ -1710,7 +2340,7 @@ func (p *Parser) parseForInit() (ast.Statement, error) {
 			return nil, err
 		}
 		if p.peek.Type != lexer.TokenSemicolon {
-			return nil, fmt.Errorf("expected ';' after for initializer")
+			return nil, p.errorAtPeek("expected ';' after for initializer")
 		}
 		p.nextToken()
 		return stmt, nil
@@ -1720,7 +2350,7 @@ func (p *Parser) parseForInit() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.peek.Type != lexer.TokenSemicolon {
-		return nil, fmt.Errorf("expected ';' after for initializer")
+		return nil, p.errorAtPeek("expected ';' after for initializer")
 	}
 	p.nextToken()
 	return stmt, nil
@@ -1736,7 +2366,7 @@ func (p *Parser) parseForCondition() (ast.Expression, error) {
 		return nil, err
 	}
 	if p.peek.Type != lexer.TokenSemicolon {
-		return nil, fmt.Errorf("expected ';' after for condition")
+		return nil, p.errorAtPeek("expected ';' after for condition")
 	}
 	p.nextToken()
 	return expr, nil
@@ -1752,7 +2382,7 @@ func (p *Parser) parseForUpdate() (ast.Statement, error) {
 		return nil, err
 	}
 	if p.peek.Type != lexer.TokenRParen {
-		return nil, fmt.Errorf("expected ')' after for update")
+		return nil, p.errorAtPeek("expected ')' after for update")
 	}
 	p.nextToken()
 	return stmt, nil
@@ -1766,13 +2396,13 @@ func (p *Parser) parseInlineVariableDeclaration() (ast.Statement, error) {
 	case lexer.TokenConst:
 		kind = ast.DeclarationConst
 	default:
-		return nil, fmt.Errorf("expected var or const")
+		return nil, p.errorAtCurrent("expected var or const")
 	}
 	if err := p.expectPeek(lexer.TokenIdent); err != nil {
 		return nil, err
 	}
 	name := p.current.Literal
-	annotation, err := p.parseOptionalReturnType()
+	annotation, err := p.parseTypeAnnotation()
 	if err != nil {
 		return nil, err
 	}
@@ -1826,7 +2456,36 @@ func (p *Parser) expectPeek(expected lexer.TokenType) error {
 	return nil
 }
 
+func (p *Parser) consumeStatementTerminator() error {
+	if p.peek.Type == lexer.TokenSemicolon {
+		p.nextToken()
+		return nil
+	}
+	if p.peek.Type == lexer.TokenRBrace || p.peek.Type == lexer.TokenEOF || p.lineBreakBeforePeek() {
+		return nil
+	}
+	return p.errorAtPeek("expected statement terminator, got %s", p.peek.Type)
+}
+
+func (p *Parser) consumeKeywordTerminator() error {
+	if p.peek.Type == lexer.TokenSemicolon {
+		p.nextToken()
+		return nil
+	}
+	if p.peek.Type == lexer.TokenRBrace || p.peek.Type == lexer.TokenEOF || p.lineBreakBeforePeek() {
+		return nil
+	}
+	return p.errorAtPeek("expected statement terminator after %s, got %s", p.current.Type, p.peek.Type)
+}
+
+func (p *Parser) lineBreakBeforePeek() bool {
+	return p.peek.Line > p.current.Line
+}
+
 func (p *Parser) errorAtCurrent(format string, args ...any) error {
+	if p.current.Type == lexer.TokenIllegal {
+		return illegalTokenError(p.current)
+	}
 	return &DiagnosticError{
 		Line:    p.current.Line,
 		Column:  p.current.Column,
@@ -1835,10 +2494,27 @@ func (p *Parser) errorAtCurrent(format string, args ...any) error {
 }
 
 func (p *Parser) errorAtPeek(format string, args ...any) error {
+	if p.peek.Type == lexer.TokenIllegal {
+		return illegalTokenError(p.peek)
+	}
 	return &DiagnosticError{
 		Line:    p.peek.Line,
 		Column:  p.peek.Column,
 		Message: fmt.Sprintf(format, args...),
+	}
+}
+
+func illegalTokenError(token lexer.Token) error {
+	message := token.Literal
+	switch token.Literal {
+	case "unterminated string", "unterminated template":
+	default:
+		message = fmt.Sprintf("unexpected character %q", token.Literal)
+	}
+	return &lexer.DiagnosticError{
+		Line:    token.Line,
+		Column:  token.Column,
+		Message: message,
 	}
 }
 
@@ -2019,14 +2695,26 @@ func parseOperator(tokenType lexer.TokenType) ast.BinaryOperator {
 		return ast.OperatorSub
 	case lexer.TokenStar:
 		return ast.OperatorMul
-	default:
+	case lexer.TokenSlash:
 		return ast.OperatorDiv
+	case lexer.TokenBitAnd:
+		return ast.OperatorBitAnd
+	case lexer.TokenBitOr:
+		return ast.OperatorBitOr
+	case lexer.TokenBitXor:
+		return ast.OperatorBitXor
+	case lexer.TokenShiftLeft:
+		return ast.OperatorShl
+	case lexer.TokenShiftRight:
+		return ast.OperatorShr
+	default:
+		return ast.OperatorUShr
 	}
 }
 
 func isComparisonToken(tokenType lexer.TokenType) bool {
 	switch tokenType {
-	case lexer.TokenEq, lexer.TokenNe, lexer.TokenStrictEq, lexer.TokenStrictNe, lexer.TokenLt, lexer.TokenLte, lexer.TokenGt, lexer.TokenGte, lexer.TokenInstanceof:
+	case lexer.TokenEq, lexer.TokenNe, lexer.TokenStrictEq, lexer.TokenStrictNe, lexer.TokenLt, lexer.TokenLte, lexer.TokenGt, lexer.TokenGte, lexer.TokenInstanceof, lexer.TokenIs:
 		return true
 	default:
 		return false

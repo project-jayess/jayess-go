@@ -27,6 +27,8 @@ func LowerClasses(program *ast.Program) []ir.ClassDecl {
 					Private:       member.Private,
 					Static:        member.Static,
 					IsConstructor: member.IsConstructor,
+					IsGetter:      member.IsGetter,
+					IsSetter:      member.IsSetter,
 					ParamCount:    len(member.Params),
 				})
 			}

@@ -138,6 +138,8 @@ func (l *asyncLowerer) lowerFunctionExpressionsInExpression(expr ast.Expression)
 		return &ast.CallExpression{BaseNode: expr.BaseNode, Callee: expr.Callee, Arguments: args}
 	case *ast.BinaryExpression:
 		return &ast.BinaryExpression{BaseNode: expr.BaseNode, Left: l.lowerFunctionExpressionsInExpression(expr.Left), Operator: expr.Operator, Right: l.lowerFunctionExpressionsInExpression(expr.Right)}
+	case *ast.CastExpression:
+		return &ast.CastExpression{BaseNode: expr.BaseNode, Value: l.lowerFunctionExpressionsInExpression(expr.Value), TypeAnnotation: expr.TypeAnnotation}
 	case *ast.AwaitExpression:
 		return &ast.AwaitExpression{BaseNode: expr.BaseNode, Value: l.lowerFunctionExpressionsInExpression(expr.Value)}
 	default:

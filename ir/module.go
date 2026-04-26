@@ -19,6 +19,7 @@ type ValueKind string
 
 const (
 	ValueNumber    ValueKind = "number"
+	ValueBigInt    ValueKind = "bigint"
 	ValueBoolean   ValueKind = "boolean"
 	ValueString    ValueKind = "string"
 	ValueNull      ValueKind = "null"
@@ -36,10 +37,16 @@ type LogicalOperator string
 type UnaryOperator string
 
 const (
-	OperatorAdd BinaryOperator = "+"
-	OperatorSub BinaryOperator = "-"
-	OperatorMul BinaryOperator = "*"
-	OperatorDiv BinaryOperator = "/"
+	OperatorAdd    BinaryOperator = "+"
+	OperatorSub    BinaryOperator = "-"
+	OperatorMul    BinaryOperator = "*"
+	OperatorDiv    BinaryOperator = "/"
+	OperatorBitAnd BinaryOperator = "&"
+	OperatorBitOr  BinaryOperator = "|"
+	OperatorBitXor BinaryOperator = "^"
+	OperatorShl    BinaryOperator = "<<"
+	OperatorShr    BinaryOperator = ">>"
+	OperatorUShr   BinaryOperator = ">>>"
 )
 
 const (
@@ -59,7 +66,8 @@ const (
 )
 
 const (
-	OperatorNot UnaryOperator = "!"
+	OperatorNot    UnaryOperator = "!"
+	OperatorBitNot UnaryOperator = "~"
 )
 
 type Module struct {
@@ -88,6 +96,8 @@ type ClassMethod struct {
 	Private       bool
 	Static        bool
 	IsConstructor bool
+	IsGetter      bool
+	IsSetter      bool
 	ParamCount    int
 }
 
@@ -101,6 +111,8 @@ type Parameter struct {
 type Function struct {
 	Visibility Visibility
 	Name       string
+	Line       int
+	Column     int
 	Params     []Parameter
 	Body       []Statement
 }
@@ -153,6 +165,19 @@ type WhileStatement struct {
 
 func (*WhileStatement) statementNode() {}
 
+type DoWhileStatement struct {
+	Body      []Statement
+	Condition Expression
+}
+
+func (*DoWhileStatement) statementNode() {}
+
+type BlockStatement struct {
+	Body []Statement
+}
+
+func (*BlockStatement) statementNode() {}
+
 type ForStatement struct {
 	Init      Statement
 	Condition Expression
@@ -162,11 +187,35 @@ type ForStatement struct {
 
 func (*ForStatement) statementNode() {}
 
-type BreakStatement struct{}
+type SwitchCase struct {
+	Test       Expression
+	Consequent []Statement
+}
+
+type SwitchStatement struct {
+	Discriminant Expression
+	Cases        []SwitchCase
+	Default      []Statement
+}
+
+func (*SwitchStatement) statementNode() {}
+
+type LabeledStatement struct {
+	Label     string
+	Statement Statement
+}
+
+func (*LabeledStatement) statementNode() {}
+
+type BreakStatement struct {
+	Label string
+}
 
 func (*BreakStatement) statementNode() {}
 
-type ContinueStatement struct{}
+type ContinueStatement struct {
+	Label string
+}
 
 func (*ContinueStatement) statementNode() {}
 
@@ -207,6 +256,12 @@ type NumberLiteral struct {
 
 func (*NumberLiteral) expressionNode() {}
 
+type BigIntLiteral struct {
+	Value string
+}
+
+func (*BigIntLiteral) expressionNode() {}
+
 type BooleanLiteral struct {
 	Value bool
 }
@@ -232,6 +287,9 @@ type ObjectProperty struct {
 	KeyExpr  Expression
 	Value    Expression
 	Computed bool
+	Spread   bool
+	Getter   bool
+	Setter   bool
 }
 
 type ObjectLiteral struct {
@@ -300,6 +358,7 @@ type BinaryExpression struct {
 	Operator BinaryOperator
 	Left     Expression
 	Right    Expression
+	Kind     ValueKind
 }
 
 func (*BinaryExpression) expressionNode() {}
@@ -328,9 +387,27 @@ type NullishCoalesceExpression struct {
 
 func (*NullishCoalesceExpression) expressionNode() {}
 
+type CommaExpression struct {
+	Left  Expression
+	Right Expression
+	Kind  ValueKind
+}
+
+func (*CommaExpression) expressionNode() {}
+
+type ConditionalExpression struct {
+	Condition   Expression
+	Consequent  Expression
+	Alternative Expression
+	Kind        ValueKind
+}
+
+func (*ConditionalExpression) expressionNode() {}
+
 type UnaryExpression struct {
 	Operator UnaryOperator
 	Right    Expression
+	Kind     ValueKind
 }
 
 func (*UnaryExpression) expressionNode() {}

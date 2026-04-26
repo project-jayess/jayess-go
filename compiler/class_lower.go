@@ -12,8 +12,12 @@ type loweredClassInfo struct {
 	base                 string
 	constructor          *ast.ClassMethodDecl
 	methods              map[string]int
+	getters              map[string]bool
+	setters              map[string]bool
 	privateMethods       map[string]bool
 	staticMethods        map[string]int
+	staticGetters        map[string]bool
+	staticSetters        map[string]bool
 	privateStaticMethods map[string]bool
 	staticFields         map[string]bool
 	privateStaticFields  map[string]bool
@@ -51,6 +55,7 @@ func lowerClasses(program *ast.Program) (*ast.Program, error) {
 	}
 
 	out := &ast.Program{
+		TypeAliases:     append([]*ast.TypeAliasDecl{}, program.TypeAliases...),
 		ExternFunctions: append([]*ast.ExternFunctionDecl{}, program.ExternFunctions...),
 	}
 
@@ -150,8 +155,12 @@ func collectClassInfo(classDecl *ast.ClassDecl) (*loweredClassInfo, error) {
 		name:                 classDecl.Name,
 		base:                 classDecl.SuperClass,
 		methods:              map[string]int{},
+		getters:              map[string]bool{},
+		setters:              map[string]bool{},
 		privateMethods:       map[string]bool{},
 		staticMethods:        map[string]int{},
+		staticGetters:        map[string]bool{},
+		staticSetters:        map[string]bool{},
 		privateStaticMethods: map[string]bool{},
 		staticFields:         map[string]bool{},
 		privateStaticFields:  map[string]bool{},
@@ -177,6 +186,26 @@ func collectClassInfo(classDecl *ast.ClassDecl) (*loweredClassInfo, error) {
 					return nil, fmt.Errorf("class %s declares multiple constructors", classDecl.Name)
 				}
 				info.constructor = member
+				continue
+			}
+			if member.IsGetter || member.IsSetter {
+				if member.Private {
+					return nil, fmt.Errorf("private getters and setters are not supported yet")
+				}
+				if member.IsGetter {
+					if member.Static {
+						info.staticGetters[member.Name] = true
+					} else {
+						info.getters[member.Name] = true
+					}
+				}
+				if member.IsSetter {
+					if member.Static {
+						info.staticSetters[member.Name] = true
+					} else {
+						info.setters[member.Name] = true
+					}
+				}
 				continue
 			}
 			switch {
@@ -213,6 +242,7 @@ func emitClassConstructor(info *loweredClassInfo, classes map[string]*loweredCla
 		body = append(body, instanceFieldInitializers(info)...)
 		body = append(body, &ast.ReturnStatement{Value: &ast.Identifier{Name: "__self"}})
 		return &ast.FunctionDecl{
+			BaseNode:   ast.BaseNode{},
 			Visibility: ast.VisibilityPublic,
 			Name:       info.name,
 			Body:       body,
@@ -237,7 +267,7 @@ func emitClassConstructor(info *loweredClassInfo, classes map[string]*loweredCla
 		if err != nil {
 			return nil, err
 		}
-		body = append(body, rewritten...)
+		body = append(body, stripTrailingImplicitReturn(rewritten)...)
 	} else if superIndex >= 0 {
 		before, err := rewriteStatements(info.constructor.Body[:superIndex+1], map[string]string{}, map[string]callBinding{}, ctx, classes)
 		if err != nil {
@@ -247,11 +277,11 @@ func emitClassConstructor(info *loweredClassInfo, classes map[string]*loweredCla
 		if err != nil {
 			return nil, err
 		}
-		body = append(body, before...)
+		body = append(body, stripTrailingImplicitReturn(before)...)
 		body = append(body, setClassTagStatement(info.name))
 		body = append(body, setClassMarkerStatements(info, classes)...)
 		body = append(body, instanceFieldInitializers(info)...)
-		body = append(body, after...)
+		body = append(body, stripTrailingImplicitReturn(after)...)
 	} else {
 		body = append(body, implicitSuperInit(info.base))
 		body = append(body, setClassTagStatement(info.name))
@@ -261,7 +291,7 @@ func emitClassConstructor(info *loweredClassInfo, classes map[string]*loweredCla
 		if err != nil {
 			return nil, err
 		}
-		body = append(body, rewritten...)
+		body = append(body, stripTrailingImplicitReturn(rewritten)...)
 	}
 
 	body = append(body, &ast.ReturnStatement{Value: &ast.Identifier{Name: "__self"}})
@@ -270,6 +300,7 @@ func emitClassConstructor(info *loweredClassInfo, classes map[string]*loweredCla
 		return nil, err
 	}
 	return &ast.FunctionDecl{
+		BaseNode:   info.constructor.BaseNode,
 		Visibility: ast.VisibilityPublic,
 		Name:       info.name,
 		Params:     params,
@@ -295,7 +326,11 @@ func emitClassMethod(info *loweredClassInfo, method *ast.ClassMethodDecl, classe
 	if method.Static {
 		name = staticMemberSymbol(info.name, method.Name, method.Private)
 	}
+	if method.IsGetter || method.IsSetter {
+		name = accessorSymbol(info.name, method.Name, method.IsGetter, method.Static)
+	}
 	return &ast.FunctionDecl{
+		BaseNode:   method.BaseNode,
 		Visibility: ast.VisibilityPublic,
 		Name:       name,
 		Params:     params,
@@ -315,6 +350,7 @@ func rewriteFunction(fn *ast.FunctionDecl, globalBindings map[string]string, glo
 		return nil, err
 	}
 	return &ast.FunctionDecl{
+		BaseNode:   fn.BaseNode,
 		Visibility: fn.Visibility,
 		Name:       fn.Name,
 		Params:     params,
@@ -402,6 +438,11 @@ func rewriteStatement(stmt ast.Statement, bindings map[string]string, callBindin
 		}
 		return &ast.VariableDecl{Visibility: stmt.Visibility, Kind: stmt.Kind, Name: stmt.Name, TypeAnnotation: stmt.TypeAnnotation, Value: value}, nil
 	case *ast.AssignmentStatement:
+		if rewritten, ok, err := rewriteStaticAccessorAssignment(stmt, bindings, callBindings, ctx, classes); err != nil {
+			return nil, err
+		} else if ok {
+			return rewritten, nil
+		}
 		target, err := rewriteExpression(stmt.Target, bindings, callBindings, ctx, classes)
 		if err != nil {
 			return nil, err
@@ -417,6 +458,9 @@ func rewriteStatement(stmt ast.Statement, bindings map[string]string, callBindin
 		}
 		return &ast.AssignmentStatement{Target: target, Value: value}, nil
 	case *ast.ReturnStatement:
+		if stmt.Value == nil {
+			return &ast.ReturnStatement{}, nil
+		}
 		value, err := rewriteExpression(stmt.Value, bindings, callBindings, ctx, classes)
 		if err != nil {
 			return nil, err
@@ -478,6 +522,22 @@ func rewriteStatement(stmt ast.Statement, bindings map[string]string, callBindin
 			return nil, err
 		}
 		return &ast.WhileStatement{Condition: condition, Body: body}, nil
+	case *ast.DoWhileStatement:
+		body, err := rewriteStatements(stmt.Body, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		condition, err := rewriteExpression(stmt.Condition, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.DoWhileStatement{Body: body, Condition: condition}, nil
+	case *ast.BlockStatement:
+		body, err := rewriteStatements(stmt.Body, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.BlockStatement{Body: body}, nil
 	case *ast.ForStatement:
 		var init ast.Statement
 		var condition ast.Expression
@@ -555,16 +615,70 @@ func rewriteStatement(stmt ast.Statement, bindings map[string]string, callBindin
 		}
 		out.Default = defaultBody
 		return out, nil
-	case *ast.BreakStatement, *ast.ContinueStatement:
-		return stmt, nil
+	case *ast.LabeledStatement:
+		rewritten, err := rewriteStatement(stmt.Statement, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.LabeledStatement{Label: stmt.Label, Statement: rewritten}, nil
+	case *ast.BreakStatement:
+		return &ast.BreakStatement{Label: stmt.Label}, nil
+	case *ast.ContinueStatement:
+		return &ast.ContinueStatement{Label: stmt.Label}, nil
 	default:
 		return nil, fmt.Errorf("unsupported statement during class lowering")
 	}
 }
 
+func rewriteStaticAccessorAssignment(stmt *ast.AssignmentStatement, bindings map[string]string, callBindings map[string]callBinding, ctx *classRewriteContext, classes map[string]*loweredClassInfo) (ast.Statement, bool, error) {
+	member, ok := stmt.Target.(*ast.MemberExpression)
+	if !ok || member.Private {
+		return nil, false, nil
+	}
+	owner := resolveStaticSetterOwner(member, bindings, ctx, classes)
+	if owner == "" {
+		return nil, false, nil
+	}
+	if _, ok, err := inferCallBinding(stmt.Value, bindings, callBindings, ctx, classes); err != nil {
+		return nil, false, err
+	} else if ok {
+		return &ast.ExpressionStatement{
+			Expression: &ast.CallExpression{
+				Callee:    accessorSymbol(owner, member.Property, false, true),
+				Arguments: []ast.Expression{&ast.UndefinedLiteral{}},
+			},
+		}, true, nil
+	}
+	value, err := rewriteExpression(stmt.Value, bindings, callBindings, ctx, classes)
+	if err != nil {
+		return nil, false, err
+	}
+	return &ast.ExpressionStatement{
+		Expression: &ast.CallExpression{
+			Callee:    accessorSymbol(owner, member.Property, false, true),
+			Arguments: []ast.Expression{value},
+		},
+	}, true, nil
+}
+
+func stripTrailingImplicitReturn(statements []ast.Statement) []ast.Statement {
+	if len(statements) == 0 {
+		return statements
+	}
+	if ret, ok := statements[len(statements)-1].(*ast.ReturnStatement); ok {
+		if ret.Value == nil {
+			return statements[:len(statements)-1]
+		}
+		if _, ok := ret.Value.(*ast.UndefinedLiteral); ok {
+			return statements[:len(statements)-1]
+		}
+	}
+	return statements
+}
+
 func rewriteExpression(expr ast.Expression, bindings map[string]string, callBindings map[string]callBinding, ctx *classRewriteContext, classes map[string]*loweredClassInfo) (ast.Expression, error) {
 	switch expr := expr.(type) {
-	case *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.UndefinedLiteral, *ast.StringLiteral:
+	case *ast.NumberLiteral, *ast.BigIntLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.UndefinedLiteral, *ast.StringLiteral:
 		return expr, nil
 	case *ast.Identifier:
 		return expr, nil
@@ -606,7 +720,15 @@ func rewriteExpression(expr ast.Expression, bindings map[string]string, callBind
 			if err != nil {
 				return nil, err
 			}
-			out.Properties = append(out.Properties, ast.ObjectProperty{Key: property.Key, KeyExpr: keyExpr, Value: value, Computed: property.Computed})
+			out.Properties = append(out.Properties, ast.ObjectProperty{
+				Key:      property.Key,
+				KeyExpr:  keyExpr,
+				Value:    value,
+				Computed: property.Computed,
+				Spread:   property.Spread,
+				Getter:   property.Getter,
+				Setter:   property.Setter,
+			})
 		}
 		return out, nil
 	case *ast.ArrayLiteral:
@@ -651,6 +773,12 @@ func rewriteExpression(expr ast.Expression, bindings map[string]string, callBind
 			return nil, err
 		}
 		return &ast.TypeofExpression{Value: value}, nil
+	case *ast.TypeCheckExpression:
+		value, err := rewriteExpression(expr.Value, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.TypeCheckExpression{Value: value, TypeAnnotation: expr.TypeAnnotation}, nil
 	case *ast.InstanceofExpression:
 		left, err := rewriteExpression(expr.Left, bindings, callBindings, ctx, classes)
 		if err != nil {
@@ -691,6 +819,30 @@ func rewriteExpression(expr ast.Expression, bindings map[string]string, callBind
 			return nil, err
 		}
 		return &ast.NullishCoalesceExpression{Left: left, Right: right}, nil
+	case *ast.CommaExpression:
+		left, err := rewriteExpression(expr.Left, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		right, err := rewriteExpression(expr.Right, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CommaExpression{Left: left, Right: right}, nil
+	case *ast.ConditionalExpression:
+		condition, err := rewriteExpression(expr.Condition, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		consequent, err := rewriteExpression(expr.Consequent, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		alternative, err := rewriteExpression(expr.Alternative, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.ConditionalExpression{Condition: condition, Consequent: consequent, Alternative: alternative}, nil
 	case *ast.UnaryExpression:
 		right, err := rewriteExpression(expr.Right, bindings, callBindings, ctx, classes)
 		if err != nil {
@@ -710,6 +862,23 @@ func rewriteExpression(expr ast.Expression, bindings map[string]string, callBind
 	case *ast.MemberExpression:
 		return rewriteMemberExpression(expr, bindings, callBindings, ctx, classes)
 	case *ast.CallExpression:
+		if expr.Callee == "Symbol" {
+			if len(expr.Arguments) > 1 {
+				return nil, fmt.Errorf("Symbol expects at most 1 argument")
+			}
+			out := &ast.CallExpression{Callee: "__jayess_std_symbol"}
+			for _, arg := range expr.Arguments {
+				value, err := rewriteExpression(arg, bindings, callBindings, ctx, classes)
+				if err != nil {
+					return nil, err
+				}
+				out.Arguments = append(out.Arguments, value)
+			}
+			if len(out.Arguments) == 0 {
+				out.Arguments = append(out.Arguments, &ast.UndefinedLiteral{})
+			}
+			return out, nil
+		}
 		if binding, ok := callBindings[expr.Callee]; ok {
 			args := make([]ast.Expression, 0, len(expr.Arguments)+1)
 			for _, arg := range expr.Arguments {
@@ -758,7 +927,13 @@ func rewriteExpression(expr ast.Expression, bindings map[string]string, callBind
 		if err != nil {
 			return nil, err
 		}
-		return &ast.ClosureExpression{FunctionName: expr.FunctionName, Environment: env}, nil
+		return &ast.ClosureExpression{BaseNode: expr.BaseNode, FunctionName: expr.FunctionName, Environment: env}, nil
+	case *ast.CastExpression:
+		value, err := rewriteExpression(expr.Value, bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CastExpression{BaseNode: expr.BaseNode, Value: value, TypeAnnotation: expr.TypeAnnotation}, nil
 	default:
 		return nil, fmt.Errorf("unsupported expression during class lowering")
 	}
@@ -774,6 +949,8 @@ func rewriteNewExpression(expr *ast.NewExpression, bindings map[string]string, c
 		return nil, fmt.Errorf("dynamic constructors are not supported")
 	}
 	switch ident.Name {
+	case "Symbol":
+		return nil, fmt.Errorf("Symbol is not a constructor")
 	case "Map":
 		if len(expr.Arguments) != 0 {
 			return nil, fmt.Errorf("Map constructor expects 0 arguments")
@@ -784,6 +961,16 @@ func rewriteNewExpression(expr *ast.NewExpression, bindings map[string]string, c
 			return nil, fmt.Errorf("Set constructor expects 0 arguments")
 		}
 		return &ast.CallExpression{Callee: "__jayess_std_set_new"}, nil
+	case "WeakMap":
+		if len(expr.Arguments) != 0 {
+			return nil, fmt.Errorf("WeakMap constructor expects 0 arguments")
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_weak_map_new"}, nil
+	case "WeakSet":
+		if len(expr.Arguments) != 0 {
+			return nil, fmt.Errorf("WeakSet constructor expects 0 arguments")
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_weak_set_new"}, nil
 	case "Date":
 		call := &ast.CallExpression{Callee: "__jayess_std_date_new"}
 		if len(expr.Arguments) > 1 {
@@ -850,6 +1037,24 @@ func rewriteNewExpression(expr *ast.NewExpression, bindings map[string]string, c
 			return nil, err
 		}
 		return &ast.CallExpression{Callee: "__jayess_std_array_buffer_new", Arguments: []ast.Expression{value}}, nil
+	case "SharedArrayBuffer":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("SharedArrayBuffer constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_shared_array_buffer_new", Arguments: []ast.Expression{value}}, nil
+	case "Int8Array":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("Int8Array constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_int8_array_new", Arguments: []ast.Expression{value}}, nil
 	case "Uint8Array":
 		if len(expr.Arguments) != 1 {
 			return nil, fmt.Errorf("Uint8Array constructor expects exactly 1 argument")
@@ -859,6 +1064,60 @@ func rewriteNewExpression(expr *ast.NewExpression, bindings map[string]string, c
 			return nil, err
 		}
 		return &ast.CallExpression{Callee: "__jayess_std_uint8_array_new", Arguments: []ast.Expression{value}}, nil
+	case "Uint16Array":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("Uint16Array constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_uint16_array_new", Arguments: []ast.Expression{value}}, nil
+	case "Int16Array":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("Int16Array constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_int16_array_new", Arguments: []ast.Expression{value}}, nil
+	case "Uint32Array":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("Uint32Array constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_uint32_array_new", Arguments: []ast.Expression{value}}, nil
+	case "Int32Array":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("Int32Array constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_int32_array_new", Arguments: []ast.Expression{value}}, nil
+	case "Float32Array":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("Float32Array constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_float32_array_new", Arguments: []ast.Expression{value}}, nil
+	case "Float64Array":
+		if len(expr.Arguments) != 1 {
+			return nil, fmt.Errorf("Float64Array constructor expects exactly 1 argument")
+		}
+		value, err := rewriteExpression(expr.Arguments[0], bindings, callBindings, ctx, classes)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.CallExpression{Callee: "__jayess_std_float64_array_new", Arguments: []ast.Expression{value}}, nil
 	case "DataView":
 		if len(expr.Arguments) != 1 {
 			return nil, fmt.Errorf("DataView constructor expects exactly 1 argument")
@@ -972,6 +1231,127 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 					}
 					return &ast.CallExpression{Callee: "__jayess_math_random"}, nil
 				}
+			case "crypto":
+				switch member.Property {
+				case "randomBytes":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("crypto.randomBytes expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_random_bytes", Arguments: []ast.Expression{args[0]}}, nil
+				case "hash":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("crypto.hash expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_hash", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "hmac":
+					if len(args) != 3 {
+						return nil, fmt.Errorf("crypto.hmac expects exactly 3 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_hmac", Arguments: []ast.Expression{args[0], args[1], args[2]}}, nil
+				case "secureCompare":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("crypto.secureCompare expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_secure_compare", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "encrypt":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("crypto.encrypt expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_encrypt", Arguments: []ast.Expression{args[0]}}, nil
+				case "decrypt":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("crypto.decrypt expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_decrypt", Arguments: []ast.Expression{args[0]}}, nil
+				case "generateKeyPair":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("crypto.generateKeyPair expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_generate_key_pair", Arguments: []ast.Expression{args[0]}}, nil
+				case "publicEncrypt":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("crypto.publicEncrypt expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_public_encrypt", Arguments: []ast.Expression{args[0]}}, nil
+				case "privateDecrypt":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("crypto.privateDecrypt expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_private_decrypt", Arguments: []ast.Expression{args[0]}}, nil
+				case "sign":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("crypto.sign expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_sign", Arguments: []ast.Expression{args[0]}}, nil
+				case "verify":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("crypto.verify expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_crypto_verify", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "compression":
+				switch member.Property {
+				case "gzip":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("compression.gzip expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_gzip", Arguments: []ast.Expression{args[0]}}, nil
+				case "gunzip":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("compression.gunzip expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_gunzip", Arguments: []ast.Expression{args[0]}}, nil
+				case "deflate":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("compression.deflate expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_deflate", Arguments: []ast.Expression{args[0]}}, nil
+				case "inflate":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("compression.inflate expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_inflate", Arguments: []ast.Expression{args[0]}}, nil
+				case "brotli":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("compression.brotli expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_brotli", Arguments: []ast.Expression{args[0]}}, nil
+				case "unbrotli":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("compression.unbrotli expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_unbrotli", Arguments: []ast.Expression{args[0]}}, nil
+				case "createGzipStream":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("compression.createGzipStream expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_create_gzip_stream"}, nil
+				case "createGunzipStream":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("compression.createGunzipStream expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_create_gunzip_stream"}, nil
+				case "createDeflateStream":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("compression.createDeflateStream expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_create_deflate_stream"}, nil
+				case "createInflateStream":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("compression.createInflateStream expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_create_inflate_stream"}, nil
+				case "createBrotliStream":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("compression.createBrotliStream expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_create_brotli_stream"}, nil
+				case "createUnbrotliStream":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("compression.createUnbrotliStream expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_compression_create_unbrotli_stream"}, nil
+				}
 			case "Object":
 				switch member.Property {
 				case "keys":
@@ -989,6 +1369,11 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("Object.entries expects exactly 1 argument")
 					}
 					return &ast.CallExpression{Callee: "__jayess_object_entries", Arguments: []ast.Expression{args[0]}}, nil
+				case "getOwnPropertySymbols":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Object.getOwnPropertySymbols expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_object_symbols", Arguments: []ast.Expression{args[0]}}, nil
 				case "assign":
 					if len(args) != 2 {
 						return nil, fmt.Errorf("Object.assign expects exactly 2 arguments")
@@ -1004,6 +1389,19 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("Object.fromEntries expects exactly 1 argument")
 					}
 					return &ast.CallExpression{Callee: "__jayess_object_from_entries", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "Symbol":
+				switch member.Property {
+				case "for":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Symbol.for expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_symbol_for", Arguments: []ast.Expression{args[0]}}, nil
+				case "keyFor":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("Symbol.keyFor expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_std_symbol_key_for", Arguments: []ast.Expression{args[0]}}, nil
 				}
 			case "Number":
 				switch member.Property {
@@ -1143,6 +1541,41 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("process.arch expects no arguments")
 					}
 					return &ast.CallExpression{Callee: "__jayess_process_arch"}, nil
+				case "tmpdir":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("process.tmpdir expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_tmpdir"}, nil
+				case "hostname":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("process.hostname expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_hostname"}, nil
+				case "uptime":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("process.uptime expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_uptime"}, nil
+				case "hrtime":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("process.hrtime expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_hrtime"}, nil
+				case "cpuInfo":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("process.cpuInfo expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_cpu_info"}, nil
+				case "memoryInfo":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("process.memoryInfo expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_memory_info"}, nil
+				case "userInfo":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("process.userInfo expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_user_info"}, nil
 				case "threadPoolSize":
 					if len(args) != 0 {
 						return nil, fmt.Errorf("process.threadPoolSize expects no arguments")
@@ -1153,6 +1586,26 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("process.exit expects exactly 1 argument")
 					}
 					return &ast.CallExpression{Callee: "__jayess_process_exit", Arguments: []ast.Expression{args[0]}}, nil
+				case "onSignal":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("process.onSignal expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_on_signal", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "onceSignal":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("process.onceSignal expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_once_signal", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "offSignal":
+					if len(args) != 1 && len(args) != 2 {
+						return nil, fmt.Errorf("process.offSignal expects 1 or 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_off_signal", Arguments: args}, nil
+				case "raise":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("process.raise expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_process_raise", Arguments: []ast.Expression{args[0]}}, nil
 				}
 			case "path":
 				switch member.Property {
@@ -1255,6 +1708,54 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 					}
 					return &ast.CallExpression{Callee: "__jayess_dns_reverse", Arguments: []ast.Expression{args[0]}}, nil
 				}
+			case "childProcess":
+				switch member.Property {
+				case "exec":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("childProcess.exec expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_child_process_exec", Arguments: []ast.Expression{args[0]}}, nil
+				case "spawn":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("childProcess.spawn expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_child_process_spawn", Arguments: []ast.Expression{args[0]}}, nil
+				case "kill":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("childProcess.kill expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_child_process_kill", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "worker":
+				switch member.Property {
+				case "create":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("worker.create expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_worker_create", Arguments: []ast.Expression{args[0]}}, nil
+				}
+			case "Atomics":
+				switch member.Property {
+				case "load", "store", "add", "sub", "and", "or", "xor", "exchange", "compareExchange":
+					if member.Property == "load" && len(args) != 2 {
+						return nil, fmt.Errorf("Atomics.load expects exactly 2 arguments")
+					}
+					if member.Property != "load" && member.Property != "compareExchange" && len(args) != 3 {
+						return nil, fmt.Errorf("Atomics.%s expects exactly 3 arguments", member.Property)
+					}
+					if member.Property == "compareExchange" && len(args) != 4 {
+						return nil, fmt.Errorf("Atomics.compareExchange expects exactly 4 arguments")
+					}
+					rewrittenArgs := make([]ast.Expression, 0, len(args))
+					for _, arg := range args {
+						value, err := rewriteExpression(arg, bindings, callBindings, ctx, classes)
+						if err != nil {
+							return nil, err
+						}
+						rewrittenArgs = append(rewrittenArgs, value)
+					}
+					return &ast.CallExpression{Callee: "__jayess_atomics_" + member.Property, Arguments: rewrittenArgs}, nil
+				}
 			case "net":
 				switch member.Property {
 				case "isIP":
@@ -1262,6 +1763,11 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("net.isIP expects exactly 1 argument")
 					}
 					return &ast.CallExpression{Callee: "__jayess_net_is_ip", Arguments: []ast.Expression{args[0]}}, nil
+				case "createDatagramSocket":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("net.createDatagramSocket expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_net_create_datagram_socket", Arguments: []ast.Expression{args[0]}}, nil
 				case "connect":
 					if len(args) != 1 {
 						return nil, fmt.Errorf("net.connect expects exactly 1 argument")
@@ -1300,6 +1806,11 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("http.request expects exactly 1 argument")
 					}
 					return &ast.CallExpression{Callee: "__jayess_http_request", Arguments: []ast.Expression{args[0]}}, nil
+				case "createServer":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("http.createServer expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_http_create_server", Arguments: []ast.Expression{args[0]}}, nil
 				case "requestStream":
 					if len(args) != 1 {
 						return nil, fmt.Errorf("http.requestStream expects exactly 1 argument")
@@ -1348,6 +1859,11 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("https.backend expects exactly 0 arguments")
 					}
 					return &ast.CallExpression{Callee: "__jayess_https_backend"}, nil
+				case "createServer":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("https.createServer expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_https_create_server", Arguments: []ast.Expression{args[0], args[1]}}, nil
 				case "request":
 					if len(args) != 1 {
 						return nil, fmt.Errorf("https.request expects exactly 1 argument")
@@ -1406,6 +1922,11 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("tls.connect expects exactly 1 argument")
 					}
 					return &ast.CallExpression{Callee: "__jayess_tls_connect", Arguments: []ast.Expression{args[0]}}, nil
+				case "createServer":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("tls.createServer expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_tls_create_server", Arguments: []ast.Expression{args[0], args[1]}}, nil
 				}
 			case "fs":
 				switch member.Property {
@@ -1424,6 +1945,11 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("fs.writeFile expects exactly 2 arguments")
 					}
 					return &ast.CallExpression{Callee: "__jayess_fs_write_file", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "appendFile":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("fs.appendFile expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_fs_append_file", Arguments: []ast.Expression{args[0], args[1]}}, nil
 				case "writeFileAsync":
 					if len(args) != 2 {
 						return nil, fmt.Errorf("fs.writeFileAsync expects exactly 2 arguments")
@@ -1479,6 +2005,17 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("fs.rename expects exactly 2 arguments")
 					}
 					return &ast.CallExpression{Callee: "__jayess_fs_rename", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "symlink":
+					if len(args) != 2 {
+						return nil, fmt.Errorf("fs.symlink expects exactly 2 arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_fs_symlink", Arguments: []ast.Expression{args[0], args[1]}}, nil
+				case "watch":
+				case "watchSync":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("fs.%s expects exactly 1 argument", member.Property)
+					}
+					return &ast.CallExpression{Callee: "__jayess_fs_watch", Arguments: []ast.Expression{args[0]}}, nil
 				}
 			case "timers":
 				switch member.Property {
@@ -1650,6 +2187,9 @@ func rewriteMemberExpression(expr *ast.MemberExpression, bindings map[string]str
 			if owner := lookupStaticFieldOwnerAST(classes, ctx.info.name, expr.Property); owner != "" {
 				return &ast.Identifier{Name: staticMemberSymbol(owner, expr.Property, false)}, nil
 			}
+			if owner := lookupStaticGetterOwnerAST(classes, ctx.info.name, expr.Property); owner != "" {
+				return &ast.CallExpression{Callee: accessorSymbol(owner, expr.Property, true, true)}, nil
+			}
 			if owner := lookupStaticMethodOwnerAST(classes, ctx.info.name, expr.Property); owner != "" {
 				return &ast.Identifier{Name: staticMemberSymbol(owner, expr.Property, false)}, nil
 			}
@@ -1690,6 +2230,9 @@ func rewriteMemberExpression(expr *ast.MemberExpression, bindings map[string]str
 			if owner := lookupStaticFieldOwnerAST(classes, ctx.info.base, expr.Property); owner != "" {
 				return &ast.Identifier{Name: staticMemberSymbol(owner, expr.Property, false)}, nil
 			}
+			if owner := lookupStaticGetterOwnerAST(classes, ctx.info.base, expr.Property); owner != "" {
+				return &ast.CallExpression{Callee: accessorSymbol(owner, expr.Property, true, true)}, nil
+			}
 			if owner := lookupStaticMethodOwnerAST(classes, ctx.info.base, expr.Property); owner != "" {
 				return &ast.Identifier{Name: staticMemberSymbol(owner, expr.Property, false)}, nil
 			}
@@ -1712,6 +2255,9 @@ func rewriteMemberExpression(expr *ast.MemberExpression, bindings map[string]str
 		if target.IsStatic {
 			if owner := lookupStaticFieldOwnerAST(classes, target.BaseClass, expr.Property); owner != "" {
 				return &ast.Identifier{Name: staticMemberSymbol(owner, expr.Property, false)}, nil
+			}
+			if owner := lookupStaticGetterOwnerAST(classes, target.BaseClass, expr.Property); owner != "" {
+				return &ast.CallExpression{Callee: accessorSymbol(owner, expr.Property, true, true)}, nil
 			}
 			if owner := lookupStaticMethodOwnerAST(classes, target.BaseClass, expr.Property); owner != "" {
 				return &ast.Identifier{Name: staticMemberSymbol(owner, expr.Property, false)}, nil
@@ -1736,6 +2282,30 @@ func rewriteMemberExpression(expr *ast.MemberExpression, bindings map[string]str
 				return &ast.CallExpression{Callee: "__jayess_process_arch"}, nil
 			}
 		}
+		if target.Name == "Symbol" {
+			switch expr.Property {
+			case "iterator":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_iterator"}, nil
+			case "asyncIterator":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_async_iterator"}, nil
+			case "toStringTag":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_to_string_tag"}, nil
+			case "hasInstance":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_has_instance"}, nil
+			case "species":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_species"}, nil
+			case "match":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_match"}, nil
+			case "replace":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_replace"}, nil
+			case "search":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_search"}, nil
+			case "split":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_split"}, nil
+			case "toPrimitive":
+				return &ast.CallExpression{Callee: "__jayess_std_symbol_to_primitive"}, nil
+			}
+		}
 		if target.Name == "path" {
 			switch expr.Property {
 			case "sep":
@@ -1750,6 +2320,9 @@ func rewriteMemberExpression(expr *ast.MemberExpression, bindings map[string]str
 			}
 			if owner := lookupStaticFieldOwnerAST(classes, target.Name, expr.Property); owner != "" {
 				return &ast.Identifier{Name: staticMemberSymbol(owner, expr.Property, false)}, nil
+			}
+			if owner := lookupStaticGetterOwnerAST(classes, target.Name, expr.Property); owner != "" {
+				return &ast.CallExpression{Callee: accessorSymbol(owner, expr.Property, true, true)}, nil
 			}
 			if owner := lookupStaticMethodOwnerAST(classes, target.Name, expr.Property); owner != "" {
 				return &ast.Identifier{Name: staticMemberSymbol(owner, expr.Property, false)}, nil
@@ -1827,6 +2400,24 @@ func instanceFieldInitializers(info *loweredClassInfo) []ast.Statement {
 			Value:  value,
 		})
 	}
+	for name := range info.getters {
+		out = append(out, &ast.AssignmentStatement{
+			Target: &ast.MemberExpression{Target: &ast.Identifier{Name: "__self"}, Property: accessorStorageKey(true, name)},
+			Value: &ast.ClosureExpression{
+				FunctionName: accessorSymbol(info.name, name, true, false),
+				Environment:  &ast.Identifier{Name: "__self"},
+			},
+		})
+	}
+	for name := range info.setters {
+		out = append(out, &ast.AssignmentStatement{
+			Target: &ast.MemberExpression{Target: &ast.Identifier{Name: "__self"}, Property: accessorStorageKey(false, name)},
+			Value: &ast.ClosureExpression{
+				FunctionName: accessorSymbol(info.name, name, false, false),
+				Environment:  &ast.Identifier{Name: "__self"},
+			},
+		})
+	}
 	return out
 }
 
@@ -1896,6 +2487,34 @@ func lookupStaticMethodOwnerAST(classes map[string]*loweredClassInfo, className,
 		return ""
 	}
 	return lookupStaticMethodOwnerAST(classes, info.base, methodName)
+}
+
+func lookupStaticGetterOwnerAST(classes map[string]*loweredClassInfo, className, propertyName string) string {
+	info, ok := classes[className]
+	if !ok {
+		return ""
+	}
+	if info.staticGetters[propertyName] {
+		return className
+	}
+	if info.base == "" {
+		return ""
+	}
+	return lookupStaticGetterOwnerAST(classes, info.base, propertyName)
+}
+
+func lookupStaticSetterOwnerAST(classes map[string]*loweredClassInfo, className, propertyName string) string {
+	info, ok := classes[className]
+	if !ok {
+		return ""
+	}
+	if info.staticSetters[propertyName] {
+		return className
+	}
+	if info.base == "" {
+		return ""
+	}
+	return lookupStaticSetterOwnerAST(classes, info.base, propertyName)
 }
 
 func lookupStaticFieldOwnerAST(classes map[string]*loweredClassInfo, className, fieldName string) string {
@@ -2022,6 +2641,7 @@ func emitDispatchHelpers(classes map[string]*loweredClassInfo, dispatches map[di
 		}
 		body = append(body, &ast.ReturnStatement{Value: &ast.UndefinedLiteral{}})
 		out = append(out, &ast.FunctionDecl{
+			BaseNode:   ast.BaseNode{},
 			Visibility: ast.VisibilityPublic,
 			Name:       dispatchFunctionName(sig),
 			Params:     params,
@@ -2082,6 +2702,49 @@ func staticMemberSymbol(className, name string, private bool) string {
 		return fmt.Sprintf("%s__private__%s", className, name)
 	}
 	return fmt.Sprintf("%s__%s", className, name)
+}
+
+func accessorSymbol(className, name string, getter, isStatic bool) string {
+	kind := "set"
+	if getter {
+		kind = "get"
+	}
+	if isStatic {
+		return fmt.Sprintf("%s__static_accessor__%s__%s", className, kind, name)
+	}
+	return fmt.Sprintf("%s__accessor__%s__%s", className, kind, name)
+}
+
+func accessorStorageKey(getter bool, name string) string {
+	if getter {
+		return "__jayess_get_" + name
+	}
+	return "__jayess_set_" + name
+}
+
+func resolveStaticSetterOwner(member *ast.MemberExpression, bindings map[string]string, ctx *classRewriteContext, classes map[string]*loweredClassInfo) string {
+	switch target := member.Target.(type) {
+	case *ast.ThisExpression:
+		if ctx == nil || ctx.info == nil || !ctx.isStatic {
+			return ""
+		}
+		return lookupStaticSetterOwnerAST(classes, ctx.info.name, member.Property)
+	case *ast.SuperExpression:
+		if ctx == nil || ctx.info == nil || ctx.info.base == "" {
+			return ""
+		}
+		return lookupStaticSetterOwnerAST(classes, ctx.info.base, member.Property)
+	case *ast.BoundSuperExpression:
+		if target.BaseClass == "" {
+			return ""
+		}
+		return lookupStaticSetterOwnerAST(classes, target.BaseClass, member.Property)
+	case *ast.Identifier:
+		if _, ok := classes[target.Name]; ok {
+			return lookupStaticSetterOwnerAST(classes, target.Name, member.Property)
+		}
+	}
+	return ""
 }
 
 func privateFieldStorage(className, fieldName string) string {

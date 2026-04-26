@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -63,12 +64,31 @@ type packageJSON struct {
 	Jayess string `json:"jayess"`
 	Module string `json:"module"`
 	Main   string `json:"main"`
+	Native string `json:"native"`
+}
+
+type bindExportSpec struct {
+	Symbol string
+	Type   string
+}
+
+type resolvedNativeImport struct {
+	DisplayPath string
+	Sources     []string
+	IncludeDirs []string
+	CFlags      []string
+	LDFlags     []string
+	PkgConfig   []string
+	Exports     map[string]bindExportSpec
 }
 
 type loadedSourceTree struct {
-	Source        string
-	NativeImports []string
-	NativeSymbols []*ast.ExternFunctionDecl
+	Source             string
+	NativeImports      []string
+	NativeIncludeDirs  []string
+	NativeCompileFlags []string
+	NativeLinkFlags    []string
+	NativeSymbols      []*ast.ExternFunctionDecl
 }
 
 type LoaderDiagnosticError struct {
@@ -96,12 +116,18 @@ func (e *LoaderDiagnosticError) Error() string {
 	return e.Message
 }
 
-func loadSourceTree(entryPath string) (*loadedSourceTree, error) {
+func loadSourceTree(entryPath string, targetTriple string) (*loadedSourceTree, error) {
 	modules := map[string]*loadedModule{}
 	active := map[string]bool{}
 	var parts []string
 	nativeSet := map[string]bool{}
 	var nativeImports []string
+	nativeIncludeSet := map[string]bool{}
+	var nativeIncludeDirs []string
+	nativeCompileFlagSet := map[string]bool{}
+	var nativeCompileFlags []string
+	nativeLinkFlagSet := map[string]bool{}
+	var nativeLinkFlags []string
 	var nativeSymbols []*ast.ExternFunctionDecl
 
 	absEntry, err := filepath.Abs(entryPath)
@@ -109,14 +135,21 @@ func loadSourceTree(entryPath string) (*loadedSourceTree, error) {
 		return nil, fmt.Errorf("resolve entry path: %w", err)
 	}
 
-	if _, err := loadSourceFile(absEntry, modules, active, &parts, nativeSet, &nativeImports, &nativeSymbols, nil); err != nil {
+	if _, err := loadSourceFile(absEntry, targetTriple, modules, active, &parts, nativeSet, &nativeImports, nativeIncludeSet, &nativeIncludeDirs, nativeCompileFlagSet, &nativeCompileFlags, nativeLinkFlagSet, &nativeLinkFlags, &nativeSymbols, nil); err != nil {
 		return nil, err
 	}
 
-	return &loadedSourceTree{Source: strings.Join(parts, "\n\n"), NativeImports: nativeImports, NativeSymbols: nativeSymbols}, nil
+	return &loadedSourceTree{
+		Source:             strings.Join(parts, "\n\n"),
+		NativeImports:      nativeImports,
+		NativeIncludeDirs:  nativeIncludeDirs,
+		NativeCompileFlags: nativeCompileFlags,
+		NativeLinkFlags:    nativeLinkFlags,
+		NativeSymbols:      nativeSymbols,
+	}, nil
 }
 
-func loadSourceFile(path string, modules map[string]*loadedModule, active map[string]bool, parts *[]string, nativeSet map[string]bool, nativeImports *[]string, nativeSymbols *[]*ast.ExternFunctionDecl, stack []string) (*loadedModule, error) {
+func loadSourceFile(path string, targetTriple string, modules map[string]*loadedModule, active map[string]bool, parts *[]string, nativeSet map[string]bool, nativeImports *[]string, nativeIncludeSet map[string]bool, nativeIncludeDirs *[]string, nativeCompileFlagSet map[string]bool, nativeCompileFlags *[]string, nativeLinkFlagSet map[string]bool, nativeLinkFlags *[]string, nativeSymbols *[]*ast.ExternFunctionDecl, stack []string) (*loadedModule, error) {
 	if module, ok := modules[path]; ok {
 		return module, nil
 	}
@@ -152,27 +185,19 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 		switch {
 		case nativeImportLinePattern.MatchString(line):
 			matches := nativeImportLinePattern.FindStringSubmatch(line)
-			nativePath, err := resolveNativeImportPath(path, matches[1])
+			nativeImport, err := resolveBindImport(path, matches[1], targetTriple)
 			if err != nil {
 				return nil, wrapLoaderImportError(path, lineNumber, column, err)
 			}
-			if !nativeSet[nativePath] {
-				nativeSet[nativePath] = true
-				*nativeImports = append(*nativeImports, nativePath)
-			}
+			registerNativeImport(nativeImport, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags)
 
 		case bareImportLinePattern.MatchString(line):
 			matches := bareImportLinePattern.FindStringSubmatch(line)
-			if isNativeImportSpec(matches[1]) {
-				nativePath, err := resolveNativeImportPath(path, matches[1])
+			if _, ok, err := maybeResolveBindImport(path, matches[1], targetTriple); ok {
 				if err != nil {
 					return nil, wrapLoaderImportError(path, lineNumber, column, err)
 				}
-				if !nativeSet[nativePath] {
-					nativeSet[nativePath] = true
-					*nativeImports = append(*nativeImports, nativePath)
-				}
-				continue
+				return nil, loaderError(path, lineNumber, column, "native binding modules are not Jayess source modules; use named imports from *.bind.js")
 			}
 			importedPath, err := resolveImportPath(path, matches[1])
 			if err != nil {
@@ -181,14 +206,17 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if active[importedPath] {
 				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
 			}
-			if _, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path)); err != nil {
+			if _, err := loadSourceFile(importedPath, targetTriple, modules, active, parts, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags, nativeSymbols, append(stack, path)); err != nil {
 				return nil, err
 			}
 
 		case defaultAndNamedImportLinePattern.MatchString(line):
 			matches := defaultAndNamedImportLinePattern.FindStringSubmatch(line)
-			if isNativeImportSpec(matches[3]) {
-				return nil, loaderError(path, lineNumber, column, "default imports from native sources are not supported")
+			if _, ok, err := maybeResolveBindImport(path, matches[3], targetTriple); ok {
+				if err != nil {
+					return nil, wrapLoaderImportError(path, lineNumber, column, err)
+				}
+				return nil, loaderError(path, lineNumber, column, "native binding modules are not Jayess source modules; use named imports from *.bind.js")
 			}
 			importedPath, err := resolveImportPath(path, matches[3])
 			if err != nil {
@@ -197,7 +225,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if active[importedPath] {
 				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			importedModule, err := loadSourceFile(importedPath, targetTriple, modules, active, parts, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
@@ -228,8 +256,11 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 
 		case defaultImportLinePattern.MatchString(line):
 			matches := defaultImportLinePattern.FindStringSubmatch(line)
-			if isNativeImportSpec(matches[2]) {
-				return nil, loaderError(path, lineNumber, column, "default imports from native sources are not supported")
+			if _, ok, err := maybeResolveBindImport(path, matches[2], targetTriple); ok {
+				if err != nil {
+					return nil, wrapLoaderImportError(path, lineNumber, column, err)
+				}
+				return nil, loaderError(path, lineNumber, column, "native binding modules are not Jayess source modules; use named imports from *.bind.js")
 			}
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
@@ -238,7 +269,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if active[importedPath] {
 				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			importedModule, err := loadSourceFile(importedPath, targetTriple, modules, active, parts, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
@@ -253,8 +284,11 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 
 		case namespaceImportLinePattern.MatchString(line):
 			matches := namespaceImportLinePattern.FindStringSubmatch(line)
-			if isNativeImportSpec(matches[2]) {
-				return nil, loaderError(path, lineNumber, column, "namespace imports from native sources are not supported")
+			if _, ok, err := maybeResolveBindImport(path, matches[2], targetTriple); ok {
+				if err != nil {
+					return nil, wrapLoaderImportError(path, lineNumber, column, err)
+				}
+				return nil, loaderError(path, lineNumber, column, "native binding modules are not Jayess source modules; use named imports from *.bind.js")
 			}
 			importedPath, err := resolveImportPath(path, matches[2])
 			if err != nil {
@@ -263,7 +297,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if active[importedPath] {
 				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			importedModule, err := loadSourceFile(importedPath, targetTriple, modules, active, parts, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
@@ -274,24 +308,40 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 
 		case namedImportLinePattern.MatchString(line):
 			matches := namedImportLinePattern.FindStringSubmatch(line)
-			if isNativeImportSpec(matches[2]) {
-				nativePath, err := resolveNativeImportPath(path, matches[2])
+			if nativeImport, ok, err := maybeResolveBindImport(path, matches[2], targetTriple); ok {
 				if err != nil {
 					return nil, wrapLoaderImportError(path, lineNumber, column, err)
 				}
-				if !nativeSet[nativePath] {
-					nativeSet[nativePath] = true
-					*nativeImports = append(*nativeImports, nativePath)
-				}
+				registerNativeImport(nativeImport, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags)
 				for _, spec := range parseImportedNames(matches[1]) {
 					if err := registerImportedLocal(importedLocals, spec.local, matches[2]); err != nil {
 						return nil, loaderError(path, lineNumber, column, err.Error())
 					}
-					*nativeSymbols = append(*nativeSymbols, &ast.ExternFunctionDecl{
-						Name:         spec.local,
-						NativeSymbol: spec.exported,
-						Variadic:     true,
-					})
+					nativeSpec := bindExportSpec{Symbol: spec.exported, Type: "function"}
+					if len(nativeImport.Exports) > 0 {
+						resolvedSpec, ok := nativeImport.Exports[spec.exported]
+						if !ok {
+							return nil, loaderErrorf(path, lineNumber, column, "native module %s does not export %s", filepath.ToSlash(matches[2]), spec.exported)
+						}
+						nativeSpec = resolvedSpec
+					}
+					switch nativeSpec.Type {
+					case "", "function":
+						*nativeSymbols = append(*nativeSymbols, &ast.ExternFunctionDecl{
+							Name:         spec.local,
+							NativeSymbol: nativeSpec.Symbol,
+							Variadic:     true,
+						})
+					case "value":
+						getterName := "__jayess_bind_value_" + spec.local
+						*nativeSymbols = append(*nativeSymbols, &ast.ExternFunctionDecl{
+							Name:         getterName,
+							NativeSymbol: nativeSpec.Symbol,
+						})
+						bodyLines = append(bodyLines, fmt.Sprintf("const %s = %s();", spec.local, getterName))
+					default:
+						return nil, loaderErrorf(path, lineNumber, column, "native module %s export %s has unsupported type %s", filepath.ToSlash(matches[2]), spec.exported, nativeSpec.Type)
+					}
 				}
 				continue
 			}
@@ -302,7 +352,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if active[importedPath] {
 				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			importedModule, err := loadSourceFile(importedPath, targetTriple, modules, active, parts, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
@@ -401,7 +451,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if active[importedPath] {
 				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			importedModule, err := loadSourceFile(importedPath, targetTriple, modules, active, parts, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
@@ -424,7 +474,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if active[importedPath] {
 				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			importedModule, err := loadSourceFile(importedPath, targetTriple, modules, active, parts, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
@@ -443,7 +493,7 @@ func loadSourceFile(path string, modules map[string]*loadedModule, active map[st
 			if active[importedPath] {
 				return nil, loaderErrorWithNotes(path, lineNumber, column, "import cycle detected", []string{formatImportCycle(append(stack, path), importedPath)})
 			}
-			importedModule, err := loadSourceFile(importedPath, modules, active, parts, nativeSet, nativeImports, nativeSymbols, append(stack, path))
+			importedModule, err := loadSourceFile(importedPath, targetTriple, modules, active, parts, nativeSet, nativeImports, nativeIncludeSet, nativeIncludeDirs, nativeCompileFlagSet, nativeCompileFlags, nativeLinkFlagSet, nativeLinkFlags, nativeSymbols, append(stack, path))
 			if err != nil {
 				return nil, err
 			}
@@ -653,34 +703,641 @@ func resolveImportPath(fromPath, importPath string) (string, error) {
 	return resolvePackageImport(filepath.Dir(fromPath), importPath)
 }
 
-func resolveNativeImportPath(fromPath, importPath string) (string, error) {
-	if !strings.HasPrefix(importPath, ".") {
-		return "", fmt.Errorf("native import %q must use a relative path", importPath)
+func registerNativeImport(nativeImport resolvedNativeImport, nativeSet map[string]bool, nativeImports *[]string, nativeIncludeSet map[string]bool, nativeIncludeDirs *[]string, nativeCompileFlagSet map[string]bool, nativeCompileFlags *[]string, nativeLinkFlagSet map[string]bool, nativeLinkFlags *[]string) {
+	for _, source := range nativeImport.Sources {
+		if !nativeSet[source] {
+			nativeSet[source] = true
+			*nativeImports = append(*nativeImports, source)
+		}
 	}
-	resolved := filepath.Join(filepath.Dir(fromPath), filepath.FromSlash(importPath))
-	absPath, err := filepath.Abs(resolved)
+	for _, includeDir := range nativeImport.IncludeDirs {
+		if !nativeIncludeSet[includeDir] {
+			nativeIncludeSet[includeDir] = true
+			*nativeIncludeDirs = append(*nativeIncludeDirs, includeDir)
+		}
+	}
+	for _, flag := range nativeImport.CFlags {
+		if !nativeCompileFlagSet[flag] {
+			nativeCompileFlagSet[flag] = true
+			*nativeCompileFlags = append(*nativeCompileFlags, flag)
+		}
+	}
+	for _, flag := range nativeImport.LDFlags {
+		if !nativeLinkFlagSet[flag] {
+			nativeLinkFlagSet[flag] = true
+			*nativeLinkFlags = append(*nativeLinkFlags, flag)
+		}
+	}
+}
+
+func resolveBindImport(fromPath, importPath string, targetTriple string) (resolvedNativeImport, error) {
+	absPath, err := resolveBindFilePath(filepath.Dir(fromPath), importPath)
 	if err != nil {
-		return "", fmt.Errorf("resolve native import %q: %w", importPath, err)
+		return resolvedNativeImport{}, err
+	}
+	return loadBindFile(absPath, importPath, targetTriple)
+}
+
+func resolveBindFilePath(startDir, importPath string) (string, error) {
+	if strings.HasPrefix(importPath, ".") {
+		return resolveConcreteBindFile(filepath.Join(startDir, filepath.FromSlash(importPath)), importPath)
+	}
+	return resolvePackageBindImport(startDir, importPath)
+}
+
+func maybeResolveBindImport(fromPath, importPath string, targetTriple string) (resolvedNativeImport, bool, error) {
+	if isBindImportSpec(importPath) {
+		nativeImport, err := resolveBindImport(fromPath, importPath, targetTriple)
+		return nativeImport, true, err
+	}
+	if !strings.HasPrefix(importPath, ".") {
+		nativeImport, err := resolveBindImport(fromPath, importPath, targetTriple)
+		if err == nil {
+			return nativeImport, true, nil
+		}
+	}
+	return resolvedNativeImport{}, false, nil
+}
+
+func isBindImportSpec(importPath string) bool {
+	return strings.HasSuffix(strings.ToLower(importPath), ".bind.js")
+}
+
+func loadBindFile(absPath string, importPath string, targetTriple string) (resolvedNativeImport, error) {
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return resolvedNativeImport{}, fmt.Errorf("read binding file %q: %w", filepath.ToSlash(importPath), err)
+	}
+	text := string(data)
+	baseDir := filepath.Dir(absPath)
+	spec, err := parseBindModuleSpec(text)
+	if err != nil {
+		return resolvedNativeImport{}, fmt.Errorf("binding file %q: %w", filepath.ToSlash(importPath), err)
+	}
+
+	sources := append([]string{}, spec.Sources...)
+	if len(sources) == 0 {
+		return resolvedNativeImport{}, fmt.Errorf("binding file %q must declare at least one source file", filepath.ToSlash(importPath))
+	}
+	includeDirs := append([]string{}, spec.IncludeDirs...)
+	cflags := append([]string{}, spec.CFlags...)
+	ldflags := append([]string{}, spec.LDFlags...)
+	pkgConfig := append([]string{}, spec.PkgConfig...)
+	exports := spec.Exports
+	if len(exports) == 0 {
+		return resolvedNativeImport{}, fmt.Errorf("binding file %q must declare at least one export", filepath.ToSlash(importPath))
+	}
+	if platformKey := bindPlatformKey(targetTriple); platformKey != "" {
+		if platformSpec, ok := spec.Platforms[platformKey]; ok {
+			sources = append(sources, platformSpec.Sources...)
+			includeDirs = append(includeDirs, platformSpec.IncludeDirs...)
+			cflags = append(cflags, platformSpec.CFlags...)
+			ldflags = append(ldflags, platformSpec.LDFlags...)
+			pkgConfig = append(pkgConfig, platformSpec.PkgConfig...)
+		}
+	}
+	if len(pkgConfig) != 0 {
+		pkgCFlags, pkgLDFlags, err := resolvePkgConfigFlags(pkgConfig)
+		if err != nil {
+			return resolvedNativeImport{}, fmt.Errorf("binding file %q: %w", filepath.ToSlash(importPath), err)
+		}
+		cflags = append(cflags, pkgCFlags...)
+		ldflags = append(ldflags, pkgLDFlags...)
+	}
+
+	result := resolvedNativeImport{
+		DisplayPath: filepath.ToSlash(importPath),
+		Exports:     map[string]bindExportSpec{},
+		CFlags:      append([]string{}, cflags...),
+		LDFlags:     append([]string{}, ldflags...),
+		PkgConfig:   append([]string{}, pkgConfig...),
+	}
+	for _, source := range sources {
+		resolvedSource, err := resolveNativeManifestSource(baseDir, source)
+		if err != nil {
+			return resolvedNativeImport{}, fmt.Errorf("binding file %q: %w", filepath.ToSlash(importPath), err)
+		}
+		result.Sources = append(result.Sources, resolvedSource)
+	}
+	for _, includeDir := range includeDirs {
+		resolvedIncludeDir, err := resolveNativeManifestDir(baseDir, includeDir)
+		if err != nil {
+			return resolvedNativeImport{}, fmt.Errorf("binding file %q: %w", filepath.ToSlash(importPath), err)
+		}
+		result.IncludeDirs = append(result.IncludeDirs, resolvedIncludeDir)
+	}
+	for exportName, spec := range exports {
+		if spec.Symbol == "" {
+			return resolvedNativeImport{}, fmt.Errorf("binding file %q export %q must declare a symbol", filepath.ToSlash(importPath), exportName)
+		}
+		switch spec.Type {
+		case "", "function", "value":
+		default:
+			return resolvedNativeImport{}, fmt.Errorf("binding file %q export %q has unsupported type %q", filepath.ToSlash(importPath), exportName, spec.Type)
+		}
+		if spec.Type == "" {
+			spec.Type = "function"
+		}
+		result.Exports[exportName] = spec
+	}
+	return result, nil
+}
+
+func resolvePkgConfigFlags(packages []string) ([]string, []string, error) {
+	if len(packages) == 0 {
+		return nil, nil, nil
+	}
+	pkgConfigPath, err := exec.LookPath("pkg-config")
+	if err != nil {
+		return nil, nil, fmt.Errorf("pkg-config was not found in PATH")
+	}
+	cflagsCmd := exec.Command(pkgConfigPath, append([]string{"--cflags"}, packages...)...)
+	cflagsOut, err := cflagsCmd.CombinedOutput()
+	if err != nil {
+		return nil, nil, fmt.Errorf("pkg-config cflags lookup failed for %s: %s", strings.Join(packages, ", "), strings.TrimSpace(string(cflagsOut)))
+	}
+	libsCmd := exec.Command(pkgConfigPath, append([]string{"--libs"}, packages...)...)
+	libsOut, err := libsCmd.CombinedOutput()
+	if err != nil {
+		return nil, nil, fmt.Errorf("pkg-config libs lookup failed for %s: %s", strings.Join(packages, ", "), strings.TrimSpace(string(libsOut)))
+	}
+	return strings.Fields(strings.TrimSpace(string(cflagsOut))), strings.Fields(strings.TrimSpace(string(libsOut))), nil
+}
+
+type bindModuleSpec struct {
+	Sources     []string
+	IncludeDirs []string
+	CFlags      []string
+	LDFlags     []string
+	PkgConfig   []string
+	Exports     map[string]bindExportSpec
+	Platforms   map[string]bindPlatformSpec
+}
+
+type bindPlatformSpec struct {
+	Sources     []string
+	IncludeDirs []string
+	CFlags      []string
+	LDFlags     []string
+	PkgConfig   []string
+}
+
+func parseBindModuleSpec(text string) (bindModuleSpec, error) {
+	content, err := parseBindDefaultExportObject(text)
+	if err != nil {
+		return bindModuleSpec{}, err
+	}
+	fields, err := parseTopLevelObjectFields(content)
+	if err != nil {
+		return bindModuleSpec{}, err
+	}
+	spec := bindModuleSpec{Exports: map[string]bindExportSpec{}, Platforms: map[string]bindPlatformSpec{}}
+	if spec.Sources, err = parseBindArrayField(fields, "sources"); err != nil {
+		return bindModuleSpec{}, err
+	}
+	if spec.IncludeDirs, err = parseBindArrayField(fields, "includeDirs"); err != nil {
+		return bindModuleSpec{}, err
+	}
+	if spec.CFlags, err = parseBindArrayField(fields, "cflags"); err != nil {
+		return bindModuleSpec{}, err
+	}
+	if spec.LDFlags, err = parseBindArrayField(fields, "ldflags"); err != nil {
+		return bindModuleSpec{}, err
+	}
+	if spec.PkgConfig, err = parseBindArrayField(fields, "pkgConfig"); err != nil {
+		return bindModuleSpec{}, err
+	}
+	if spec.Exports, err = parseBindExports(fields["exports"]); err != nil {
+		return bindModuleSpec{}, err
+	}
+	if spec.Platforms, err = parseBindPlatforms(fields["platforms"]); err != nil {
+		return bindModuleSpec{}, err
+	}
+	return spec, nil
+}
+
+func parseBindDefaultExportObject(text string) (string, error) {
+	start := strings.Index(text, "export default")
+	if start < 0 {
+		return "", fmt.Errorf(`binding file must declare "export default { ... }"`)
+	}
+	open := strings.Index(text[start:], "{")
+	if open < 0 {
+		return "", fmt.Errorf(`binding file must declare "export default { ... }"`)
+	}
+	open += start
+	close := findMatchingDelimiter(text, open, '{', '}')
+	if close < 0 {
+		return "", fmt.Errorf(`binding file export default object has an unterminated object literal`)
+	}
+	return text[open+1 : close], nil
+}
+
+func parseBindArrayField(fields map[string]string, field string) ([]string, error) {
+	raw, ok := fields[field]
+	if !ok {
+		return nil, nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if raw[0] != '[' {
+		return nil, fmt.Errorf("field %q must be an array literal", field)
+	}
+	close := findMatchingDelimiter(raw, 0, '[', ']')
+	if close != len(raw)-1 {
+		return nil, fmt.Errorf("field %q must be an array literal", field)
+	}
+	content := raw[1:close]
+	var values []string
+	for _, match := range regexp.MustCompile(`["']([^"']+)["']`).FindAllStringSubmatch(content, -1) {
+		values = append(values, strings.TrimSpace(match[1]))
+	}
+	return values, nil
+}
+
+func parseBindExports(raw string) (map[string]bindExportSpec, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if raw[0] != '{' {
+		return nil, fmt.Errorf(`field "exports" must be an object literal`)
+	}
+	close := findMatchingDelimiter(raw, 0, '{', '}')
+	if close != len(raw)-1 {
+		return nil, fmt.Errorf(`field "exports" has an unterminated object literal`)
+	}
+	content := raw[1:close]
+	exports := map[string]bindExportSpec{}
+	index := 0
+	for index < len(content) {
+		if whitespace := strings.TrimLeft(content[index:], " \t\r\n,"); len(whitespace) != len(content[index:]) {
+			index = len(content) - len(whitespace)
+		}
+		if index >= len(content) {
+			break
+		}
+		colonOffset := strings.Index(content[index:], ":")
+		if colonOffset < 0 {
+			break
+		}
+		colon := index + colonOffset
+		name := strings.TrimSpace(content[index:colon])
+		name = strings.Trim(name, `"'`)
+		if name == "" {
+			return nil, fmt.Errorf(`field "exports" contains an empty export name`)
+		}
+		valueStart := colon + 1
+		for valueStart < len(content) && (content[valueStart] == ' ' || content[valueStart] == '\t' || content[valueStart] == '\r' || content[valueStart] == '\n') {
+			valueStart++
+		}
+		if valueStart >= len(content) || content[valueStart] != '{' {
+			return nil, fmt.Errorf(`export %q must be an object literal`, name)
+		}
+		valueEnd := findMatchingDelimiter(content, valueStart, '{', '}')
+		if valueEnd < 0 {
+			return nil, fmt.Errorf(`export %q has an unterminated object literal`, name)
+		}
+		spec, err := parseBindExportSpec(content[valueStart+1 : valueEnd])
+		if err != nil {
+			return nil, fmt.Errorf("export %q: %w", name, err)
+		}
+		exports[name] = spec
+		index = valueEnd + 1
+	}
+	return exports, nil
+}
+
+func parseBindPlatforms(raw string) (map[string]bindPlatformSpec, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]bindPlatformSpec{}, nil
+	}
+	if raw[0] != '{' {
+		return nil, fmt.Errorf(`field "platforms" must be an object literal`)
+	}
+	close := findMatchingDelimiter(raw, 0, '{', '}')
+	if close != len(raw)-1 {
+		return nil, fmt.Errorf(`field "platforms" has an unterminated object literal`)
+	}
+	content := raw[1:close]
+	fields, err := parseTopLevelObjectFields(content)
+	if err != nil {
+		return nil, fmt.Errorf(`field "platforms": %w`, err)
+	}
+	platforms := map[string]bindPlatformSpec{}
+	for platformName, platformRaw := range fields {
+		platformRaw = strings.TrimSpace(platformRaw)
+		if platformRaw == "" {
+			continue
+		}
+		if platformRaw[0] != '{' {
+			return nil, fmt.Errorf(`platform %q must be an object literal`, platformName)
+		}
+		platformClose := findMatchingDelimiter(platformRaw, 0, '{', '}')
+		if platformClose != len(platformRaw)-1 {
+			return nil, fmt.Errorf(`platform %q has an unterminated object literal`, platformName)
+		}
+		platformFields, err := parseTopLevelObjectFields(platformRaw[1:platformClose])
+		if err != nil {
+			return nil, fmt.Errorf("platform %q: %w", platformName, err)
+		}
+		spec := bindPlatformSpec{}
+		if spec.Sources, err = parseBindArrayField(platformFields, "sources"); err != nil {
+			return nil, fmt.Errorf("platform %q: %w", platformName, err)
+		}
+		if spec.IncludeDirs, err = parseBindArrayField(platformFields, "includeDirs"); err != nil {
+			return nil, fmt.Errorf("platform %q: %w", platformName, err)
+		}
+		if spec.CFlags, err = parseBindArrayField(platformFields, "cflags"); err != nil {
+			return nil, fmt.Errorf("platform %q: %w", platformName, err)
+		}
+		if spec.LDFlags, err = parseBindArrayField(platformFields, "ldflags"); err != nil {
+			return nil, fmt.Errorf("platform %q: %w", platformName, err)
+		}
+		if spec.PkgConfig, err = parseBindArrayField(platformFields, "pkgConfig"); err != nil {
+			return nil, fmt.Errorf("platform %q: %w", platformName, err)
+		}
+		platforms[platformName] = spec
+	}
+	return platforms, nil
+}
+
+func parseTopLevelObjectFields(content string) (map[string]string, error) {
+	fields := map[string]string{}
+	for index := 0; index < len(content); {
+		for index < len(content) {
+			switch content[index] {
+			case ' ', '\t', '\r', '\n', ',':
+				index++
+			default:
+				goto fieldStart
+			}
+		}
+		break
+	fieldStart:
+		start := index
+		if content[index] == '"' || content[index] == '\'' {
+			quote := content[index]
+			index++
+			for index < len(content) && content[index] != quote {
+				if content[index] == '\\' && index+1 < len(content) {
+					index += 2
+					continue
+				}
+				index++
+			}
+			if index >= len(content) {
+				return nil, fmt.Errorf("unterminated quoted field name")
+			}
+			index++
+		} else {
+			for index < len(content) && isBindFieldNameChar(content[index]) {
+				index++
+			}
+		}
+		name := strings.TrimSpace(content[start:index])
+		name = strings.Trim(name, `"'`)
+		if name == "" {
+			return nil, fmt.Errorf("empty field name")
+		}
+		for index < len(content) && (content[index] == ' ' || content[index] == '\t' || content[index] == '\r' || content[index] == '\n') {
+			index++
+		}
+		if index >= len(content) || content[index] != ':' {
+			return nil, fmt.Errorf("field %q is missing ':'", name)
+		}
+		index++
+		for index < len(content) && (content[index] == ' ' || content[index] == '\t' || content[index] == '\r' || content[index] == '\n') {
+			index++
+		}
+		valueStart := index
+		valueEnd, err := findTopLevelValueEnd(content, valueStart)
+		if err != nil {
+			return nil, fmt.Errorf("field %q: %w", name, err)
+		}
+		fields[name] = strings.TrimSpace(content[valueStart:valueEnd])
+		index = valueEnd
+	}
+	return fields, nil
+}
+
+func findTopLevelValueEnd(content string, start int) (int, error) {
+	depthBrace := 0
+	depthBracket := 0
+	depthParen := 0
+	var quote byte
+	for index := start; index < len(content); index++ {
+		ch := content[index]
+		if quote != 0 {
+			if ch == '\\' && index+1 < len(content) {
+				index++
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch ch {
+		case '"', '\'':
+			quote = ch
+		case '{':
+			depthBrace++
+		case '}':
+			if depthBrace == 0 && depthBracket == 0 && depthParen == 0 {
+				return index, nil
+			}
+			depthBrace--
+		case '[':
+			depthBracket++
+		case ']':
+			depthBracket--
+		case '(':
+			depthParen++
+		case ')':
+			depthParen--
+		case ',':
+			if depthBrace == 0 && depthBracket == 0 && depthParen == 0 {
+				return index, nil
+			}
+		}
+		if depthBrace < 0 || depthBracket < 0 || depthParen < 0 {
+			return 0, fmt.Errorf("unexpected closing delimiter")
+		}
+	}
+	if quote != 0 || depthBrace != 0 || depthBracket != 0 || depthParen != 0 {
+		return 0, fmt.Errorf("unterminated value")
+	}
+	return len(content), nil
+}
+
+func isBindFieldNameChar(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$'
+}
+
+func bindPlatformKey(targetTriple string) string {
+	lowered := strings.ToLower(targetTriple)
+	switch {
+	case strings.Contains(lowered, "windows"), strings.Contains(lowered, "win32"), strings.Contains(lowered, "mingw"), strings.Contains(lowered, "msvc"):
+		return "windows"
+	case strings.Contains(lowered, "darwin"), strings.Contains(lowered, "apple"), strings.Contains(lowered, "macos"):
+		return "darwin"
+	case strings.Contains(lowered, "linux"), strings.Contains(lowered, "gnu"), strings.Contains(lowered, "musl"):
+		return "linux"
+	default:
+		return ""
+	}
+}
+
+func parseBindExportSpec(text string) (bindExportSpec, error) {
+	spec := bindExportSpec{}
+	for _, field := range []string{"symbol", "type"} {
+		offset := strings.Index(text, field)
+		if offset < 0 {
+			continue
+		}
+		colonOffset := strings.Index(text[offset:], ":")
+		if colonOffset < 0 {
+			return bindExportSpec{}, fmt.Errorf("field %q is missing a value", field)
+		}
+		valueStart := offset + colonOffset + 1
+		for valueStart < len(text) && (text[valueStart] == ' ' || text[valueStart] == '\t' || text[valueStart] == '\r' || text[valueStart] == '\n') {
+			valueStart++
+		}
+		if valueStart >= len(text) || (text[valueStart] != '"' && text[valueStart] != '\'') {
+			return bindExportSpec{}, fmt.Errorf("field %q must be a string literal", field)
+		}
+		quote := text[valueStart]
+		valueEnd := valueStart + 1
+		for valueEnd < len(text) && text[valueEnd] != quote {
+			valueEnd++
+		}
+		if valueEnd >= len(text) {
+			return bindExportSpec{}, fmt.Errorf("field %q has an unterminated string literal", field)
+		}
+		value := text[valueStart+1 : valueEnd]
+		switch field {
+		case "symbol":
+			spec.Symbol = strings.TrimSpace(value)
+		case "type":
+			spec.Type = strings.TrimSpace(value)
+		}
+	}
+	return spec, nil
+}
+
+func findMatchingDelimiter(text string, start int, open byte, close byte) int {
+	depth := 0
+	for index := start; index < len(text); index++ {
+		switch text[index] {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return index
+			}
+		}
+	}
+	return -1
+}
+
+func resolveNativeManifestSource(baseDir string, source string) (string, error) {
+	resolvedPath := source
+	if !filepath.IsAbs(resolvedPath) {
+		resolvedPath = filepath.Join(baseDir, filepath.FromSlash(source))
+	}
+	absPath, err := filepath.Abs(resolvedPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve native source %q: %w", filepath.ToSlash(source), err)
 	}
 	info, err := os.Stat(absPath)
 	if err != nil || info.IsDir() {
-		return "", fmt.Errorf("native source %q was not found", filepath.ToSlash(importPath))
+		return "", fmt.Errorf("native source %q was not found", filepath.ToSlash(source))
 	}
 	switch strings.ToLower(filepath.Ext(absPath)) {
 	case ".c", ".cc", ".cpp", ".cxx":
 		return absPath, nil
 	default:
-		return "", fmt.Errorf("native import %q must point to a .c/.cc/.cpp/.cxx file", filepath.ToSlash(importPath))
+		return "", fmt.Errorf("native source %q must point to a .c/.cc/.cpp/.cxx file", filepath.ToSlash(source))
 	}
 }
 
-func isNativeImportSpec(importPath string) bool {
-	switch strings.ToLower(filepath.Ext(importPath)) {
-	case ".c", ".cc", ".cpp", ".cxx":
-		return true
-	default:
-		return false
+func resolveNativeManifestDir(baseDir string, dir string) (string, error) {
+	resolvedPath := dir
+	if !filepath.IsAbs(resolvedPath) {
+		resolvedPath = filepath.Join(baseDir, filepath.FromSlash(dir))
 	}
+	absPath, err := filepath.Abs(resolvedPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve include directory %q: %w", filepath.ToSlash(dir), err)
+	}
+	info, err := os.Stat(absPath)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("include directory %q was not found", filepath.ToSlash(dir))
+	}
+	return absPath, nil
+}
+
+func resolvePackageBindImport(startDir, importPath string) (string, error) {
+	packageName, subpath := splitPackageImport(importPath)
+	for dir := startDir; ; dir = filepath.Dir(dir) {
+		candidateBase := filepath.Join(dir, "node_modules", filepath.FromSlash(packageName))
+		if info, err := os.Stat(candidateBase); err == nil && info.IsDir() {
+			return resolvePackageBindEntry(candidateBase, subpath, importPath)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return "", fmt.Errorf("package %q was not found in node_modules; run npm install or check package.json dependencies", importPath)
+}
+
+func resolvePackageBindEntry(packageDir, subpath, importPath string) (string, error) {
+	if subpath != "" {
+		return resolveConcreteBindFile(filepath.Join(packageDir, filepath.FromSlash(subpath)), importPath)
+	}
+
+	for _, candidate := range []string{
+		filepath.Join(packageDir, "index.bind.js"),
+	} {
+		if resolved, err := resolveConcreteBindFile(candidate, importPath); err == nil {
+			return resolved, nil
+		}
+	}
+
+	return "", fmt.Errorf("package %q does not expose a supported binding entrypoint via *.bind.js", importPath)
+}
+
+func resolveConcreteBindFile(path string, importPath string) (string, error) {
+	candidates := []string{path}
+	if filepath.Ext(path) == "" {
+		candidates = append(candidates,
+			path+".bind.js",
+			filepath.Join(path, "index.bind.js"),
+		)
+	}
+	for _, candidate := range candidates {
+		absPath, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(absPath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(absPath)) {
+		case ".js":
+			if strings.HasSuffix(strings.ToLower(absPath), ".bind.js") {
+				return absPath, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("native import %q must point to a .bind.js file", filepath.ToSlash(importPath))
 }
 
 func resolvePackageImport(startDir, importPath string) (string, error) {

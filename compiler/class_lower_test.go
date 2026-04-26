@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -261,6 +262,39 @@ function main(args) {
 		"@jayess_std_date_new",
 		"@jayess_std_json_stringify",
 		"@jayess_std_json_parse",
+	} {
+		if !strings.Contains(irText, symbol) {
+			t.Fatalf("expected %s in LLVM IR, got:\n%s", symbol, irText)
+		}
+	}
+}
+
+func TestCompileSupportsWeakMapWeakSetStandardLibrarySurface(t *testing.T) {
+	source := `
+function main(args) {
+  var weakMap = new WeakMap();
+  var weakSet = new WeakSet();
+  var key = {};
+  weakMap.set(key, "kimchi");
+  print(weakMap.get(key));
+  print(weakMap.has(key));
+  print(weakMap.delete(key));
+  weakSet.add(key);
+  print(weakSet.has(key));
+  print(weakSet.delete(key));
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, symbol := range []string{
+		"@jayess_std_weak_map_new",
+		"@jayess_std_weak_set_new",
+		"@jayess_value_get_member",
 	} {
 		if !strings.Contains(irText, symbol) {
 			t.Fatalf("expected %s in LLVM IR, got:\n%s", symbol, irText)
@@ -569,6 +603,789 @@ function main(args) {
 	}
 }
 
+func TestCompileSupportsPropertyTypeAnnotationsAndLocalInference(t *testing.T) {
+	source := `
+class Box {
+  value: number = 1;
+  payload: object = { label: "kimchi" };
+  items: array = [1, 2, 3];
+  ready: boolean = true;
+  note: any = "broth";
+}
+
+function add(left: number, right: number): number {
+  return left + right;
+}
+
+function main(args) {
+  const inferred = 2;
+  const text = "ramen";
+  const flag = true;
+  const huge: bigint = 1n;
+  var box = new Box();
+  console.log(add(inferred, 3), box.value, text, flag, huge, box.payload.label, box.items.length, box.note);
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileEnforcesClassFieldTypeAnnotations(t *testing.T) {
+	source := `
+class Box {
+  value: number = "kimchi";
+}
+
+function main(args) {
+  return 0;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err == nil {
+		t.Fatalf("expected compile error")
+	}
+	if !strings.Contains(err.Error(), "cannot initialize number field value with string") {
+		t.Fatalf("expected class field type annotation error, got %v", err)
+	}
+}
+
+func TestCompileSupportsUnknownNeverNullAndUndefinedTypeAnnotations(t *testing.T) {
+	source := `
+function fail(message: string): never {
+  throw new Error(message);
+}
+
+function main(args) {
+  var mystery: unknown = 1;
+  mystery = "kimchi";
+  var nothing: null = null;
+  var missing: undefined = undefined;
+  if (false) {
+    fail("boom");
+  }
+  console.log("typed");
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileEnforcesUnknownNeverNullAndUndefinedTypeRules(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "null initializer mismatch",
+			source: `
+function main(args) {
+  var value: null = undefined;
+  return 0;
+}
+`,
+			message: "cannot initialize null variable value with undefined",
+		},
+		{
+			name: "undefined initializer mismatch",
+			source: `
+function main(args) {
+  var value: undefined = null;
+  return 0;
+}
+`,
+			message: "cannot initialize undefined variable value with null",
+		},
+		{
+			name: "unknown cannot flow into number",
+			source: `
+function main(args) {
+  var mystery: unknown = 1;
+  var count: number = mystery;
+  return 0;
+}
+`,
+			message: "cannot initialize number variable count with unknown",
+		},
+		{
+			name: "never requires terminal throw",
+			source: `
+function fail(): never {
+  return undefined;
+}
+
+function main(args) {
+  fail();
+  return 0;
+}
+`,
+			message: "function fail must return never, got undefined",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
+func TestCompileSupportsTypeAliasesAndAsAssertions(t *testing.T) {
+	source := `
+type Count = number;
+type Label = string;
+type Total = Count;
+
+function main(args) {
+  var raw = 3;
+  var count: Total = raw as Count;
+  var title = "kimchi";
+  var label: Label = title as Label;
+  console.log(count + 1, label);
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileRejectsInvalidTypeAliasesAndAsAssertions(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "duplicate alias",
+			source: `
+type Count = number;
+type Count = string;
+
+function main(args) {
+  return 0;
+}
+`,
+			message: "duplicate type alias Count",
+		},
+		{
+			name: "alias cycle",
+			source: `
+type Left = Right;
+type Right = Left;
+
+function main(args) {
+  return 0;
+}
+`,
+			message: "type alias cycle detected involving",
+		},
+		{
+			name: "unknown alias target",
+			source: `
+type Count = Missing;
+
+function main(args) {
+  return 0;
+}
+`,
+			message: "unknown type alias Missing",
+		},
+		{
+			name: "cast to never",
+			source: `
+function main(args) {
+  var value = 1 as never;
+  return 0;
+}
+`,
+			message: "casts to never are not supported",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
+func TestCompileSupportsStructuredTypeAnnotations(t *testing.T) {
+	source := `
+interface User {
+  readonly id: number;
+  name: string;
+  age?: number;
+}
+
+type Pair = [number, string];
+type Mapper = (number, string) => boolean;
+
+function makeMapper(): Mapper {
+  return (count: number, label: string): boolean => count > 0;
+}
+
+function main(args) {
+  var user: User = { id: 1, name: "kimchi" };
+  var pair: Pair = [3, "ramen"];
+  var mapper: Mapper = makeMapper();
+  var directMapper: (number, string) => boolean = mapper;
+  console.log(user.name);
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileEnforcesStructuredTypeAnnotations(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "tuple length mismatch",
+			source: `
+type Pair = [number, string];
+
+function main(args) {
+  var pair: Pair = [1];
+  return 0;
+}
+`,
+			message: "cannot initialize [number,string] variable pair with array",
+		},
+		{
+			name: "missing required interface property",
+			source: `
+interface User {
+  id: number;
+  name: string;
+  age?: number;
+}
+
+function main(args) {
+  var user: User = { id: 1 };
+  return 0;
+}
+`,
+			message: "cannot initialize {id:number,name:string,age?:number} variable user with object",
+		},
+		{
+			name: "callable mismatch",
+			source: `
+type Mapper = (number, string) => boolean;
+
+function main(args) {
+  var mapper: Mapper = 1;
+  return 0;
+}
+`,
+			message: "cannot initialize (number,string)=>boolean variable mapper with number",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
+func TestCompileSupportsReadonlyAndIndexSignatureTypes(t *testing.T) {
+	source := `
+interface Dictionary {
+  [key: string]: number;
+}
+
+function main(args) {
+  var values: Dictionary = { kimchi: 3, ramen: 5 };
+  values.extra = 8;
+  values["bonus"] = 13;
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileEnforcesReadonlyAndIndexSignatureTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "readonly property assignment",
+			source: `
+interface User {
+  readonly id: number;
+  name: string;
+}
+
+function main(args) {
+  var user: User = { id: 1, name: "kimchi" };
+  user.id = 2;
+  return 0;
+}
+`,
+			message: "cannot assign to readonly property id",
+		},
+		{
+			name: "readonly index signature assignment",
+			source: `
+interface Dictionary {
+  readonly [key: string]: number;
+}
+
+function main(args) {
+  var values: Dictionary = { kimchi: 3 };
+  values.extra = 8;
+  return 0;
+}
+`,
+			message: "cannot assign to readonly property extra",
+		},
+		{
+			name: "index signature value mismatch",
+			source: `
+interface Dictionary {
+  [key: string]: number;
+}
+
+function main(args) {
+  var values: Dictionary = { kimchi: 3 };
+  values.extra = "bad";
+  return 0;
+}
+`,
+			message: "cannot assign string to number",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
+func TestCompileSupportsLiteralAndUnionTypes(t *testing.T) {
+	source := `
+type Status = "ok" | "error";
+type Count = 1 | 2;
+type Tagged = { kind: "ok", value: number } | { kind: "error", message: string };
+
+function main(args) {
+  var status: Status = "ok";
+  var count: Count = 1;
+  var tagged: Tagged = { kind: "ok", value: 3 };
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileEnforcesLiteralAndUnionTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "string literal mismatch",
+			source: `
+type Status = "ok";
+
+function main(args) {
+  var status: Status = "error";
+  return 0;
+}
+`,
+			message: "cannot initialize \"ok\" variable status with string",
+		},
+		{
+			name: "string union mismatch",
+			source: `
+type Status = "ok" | "error";
+
+function main(args) {
+  var status: Status = "pending";
+  return 0;
+}
+`,
+			message: "cannot initialize \"ok\"|\"error\" variable status with string",
+		},
+		{
+			name: "tagged union mismatch",
+			source: `
+type Tagged = { kind: "ok", value: number } | { kind: "error", message: string };
+
+function main(args) {
+  var tagged: Tagged = { kind: "ok", message: "bad" };
+  return 0;
+}
+`,
+			message: "cannot initialize {kind:\"ok\",value:number}|{kind:\"error\",message:string} variable tagged with object",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
+func TestCompileSupportsEnums(t *testing.T) {
+	source := `
+enum Status {
+  Ok,
+  Error = 3,
+  Ready = "ready",
+}
+
+function main(args) {
+  var numeric = Status.Ok;
+  var named: Status = "ready";
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileEnforcesEnumTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "enum value mismatch",
+			source: `
+enum Status {
+  Ok,
+  Error = 3,
+}
+
+function main(args) {
+  var status: Status = "bad";
+  return 0;
+}
+`,
+			message: "cannot initialize 0|3 variable status with string",
+		},
+		{
+			name: "enum implicit after string member",
+			source: `
+enum Status {
+  Ready = "ready",
+  Done,
+}
+
+function main(args) {
+  return 0;
+}
+`,
+			message: "enum member Done requires an explicit initializer after a non-numeric member",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
+func TestCompileSupportsIntersectionTypes(t *testing.T) {
+	source := `
+type Combined = { id: number } & { name: string };
+
+function main(args) {
+  var value: Combined = { id: 1, name: "kimchi" };
+  console.log(value.id, value.name);
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileEnforcesIntersectionTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "missing intersected property",
+			source: `
+type Combined = { id: number } & { name: string };
+
+function main(args) {
+  var value: Combined = { id: 1 };
+  return 0;
+}
+`,
+			message: "cannot initialize {id:number}&{name:string} variable value with object",
+		},
+		{
+			name: "readonly in intersection",
+			source: `
+type Combined = { readonly id: number } & { name: string };
+
+function main(args) {
+  var value: Combined = { id: 1, name: "kimchi" };
+  value.id = 2;
+  return 0;
+}
+`,
+			message: "cannot assign to readonly property id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
+func TestCompileSupportsDiscriminatedUnionNarrowing(t *testing.T) {
+	source := `
+type Result = { kind: "ok", value: number } | { kind: "error", message: string };
+
+function main(args) {
+  var result: Result = { kind: "ok", value: 3 };
+  if (result.kind === "ok") {
+    console.log(result.value);
+  } else {
+    console.log(result.message);
+  }
+  switch (result.kind) {
+    case "ok": {
+      console.log(result.value);
+      break;
+    }
+    case "error": {
+      console.log(result.message);
+      break;
+    }
+  }
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileSupportsRuntimeTypeChecks(t *testing.T) {
+	source := `
+type Result = { kind: "ok", value: number } | { kind: "error", message: string };
+
+function main(args) {
+  var value: string | number = "kimchi";
+  if (value is string) {
+    var text: string = value;
+    console.log(text);
+  }
+
+  var pair = [1, "ok"];
+  var ok = pair is [number, string];
+  var result = { kind: "ok", value: 3 } is Result;
+  console.log(ok, result);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	if len(result.LLVMIR) == 0 {
+		t.Fatalf("expected runtime type check program to emit LLVM IR")
+	}
+}
+
+func TestCompileUsesRuntimeManagedExceptionsWithoutLLVMEH(t *testing.T) {
+	result, err := Compile(`
+function main(args) {
+  try {
+    throw "boom";
+  } catch (err) {
+    console.log(err);
+  }
+  return 0;
+}
+`, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, fragment := range []string{
+		"@jayess_throw(",
+		"@jayess_has_exception()",
+		"@jayess_take_exception()",
+		"@jayess_push_call_frame(",
+		"@jayess_pop_call_frame()",
+	} {
+		if !strings.Contains(irText, fragment) {
+			t.Fatalf("expected runtime-managed exception fragment %q, got:\n%s", fragment, irText)
+		}
+	}
+	for _, forbidden := range []string{" invoke ", "\ninvoke ", "landingpad", "personality "} {
+		if strings.Contains(irText, forbidden) {
+			t.Fatalf("expected no LLVM EH construct %q, got:\n%s", forbidden, irText)
+		}
+	}
+}
+
+func TestCompileSupportsGenericAliasesAndConstraints(t *testing.T) {
+	source := `
+type Box<T> = { value: T };
+type Named<T extends string | number> = { id: T, name: string };
+interface Pair<T> {
+  left: T,
+  right: T,
+}
+
+function main(args) {
+  var box: Box<number> = { value: 1 };
+  var named: Named<string> = { id: "kimchi", name: "ok" };
+  var pair: Pair<boolean> = { left: true, right: false };
+  console.log(box.value, named.id, pair.left);
+  return 0;
+}
+`
+
+	if _, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"}); err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+}
+
+func TestCompileEnforcesGenericAliasConstraints(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		message string
+	}{
+		{
+			name: "missing type arguments",
+			source: `
+type Box<T> = { value: T };
+
+function main(args) {
+  var box: Box = { value: 1 };
+  return 0;
+}
+`,
+			message: "generic type alias Box requires type arguments",
+		},
+		{
+			name: "constraint violation",
+			source: `
+type Named<T extends string | number> = { id: T, name: string };
+
+function main(args) {
+  var named: Named<boolean> = { id: true, name: "ok" };
+  return 0;
+}
+`,
+			message: "type argument boolean does not satisfy constraint string|number for T",
+		},
+		{
+			name: "wrong arity",
+			source: `
+type Pair<T, U> = { left: T, right: U };
+
+function main(args) {
+  var pair: Pair<number> = { left: 1, right: 2 };
+  return 0;
+}
+`,
+			message: "type alias Pair expects 2 type arguments",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Compile(tt.source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+			if err == nil {
+				t.Fatalf("expected compile error")
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("expected %q in error, got %v", tt.message, err)
+			}
+		})
+	}
+}
+
 func TestCompileWarnsWhenUsingDeprecatedPrint(t *testing.T) {
 	source := `
 function main(args) {
@@ -713,6 +1530,141 @@ function main(args) {
 	}
 }
 
+func TestCompileReportsLifetimeEscapeWarnings(t *testing.T) {
+	source := `
+var sink = null;
+
+function buildCounter() {
+  var count = 1;
+  var box = { value: count };
+  sink = box;
+  return () => count;
+}
+
+function main(args) {
+  buildCounter();
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	var lifetimeWarnings []Diagnostic
+	for _, warning := range result.Warnings {
+		if warning.Category == "lifetime" {
+			lifetimeWarnings = append(lifetimeWarnings, warning)
+		}
+	}
+	if len(lifetimeWarnings) < 3 {
+		t.Fatalf("expected at least 3 lifetime warnings, got %#v", lifetimeWarnings)
+	}
+	expected := []struct {
+		line    int
+		column  int
+		message string
+	}{
+		{line: 7, column: 10, message: "local box escapes via assignment to global state"},
+		{line: 8, column: 16, message: "local count escapes via closure capture"},
+		{line: 8, column: 16, message: "local count escapes via return"},
+	}
+	for _, want := range expected {
+		found := false
+		for _, warning := range lifetimeWarnings {
+			if warning.Code == "JY400" && warning.Line == want.line && warning.Column == want.column && warning.Message == want.message {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected lifetime warning %#v in %#v", want, lifetimeWarnings)
+		}
+	}
+}
+
+func TestCompileLifetimeWarningPolicyCanEscalate(t *testing.T) {
+	source := `
+function makeBox() {
+  var count = 1;
+  return { value: count };
+}
+
+function main(args) {
+  makeBox();
+  return 0;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc", WarningPolicy: "error"})
+	if err == nil {
+		t.Fatalf("expected warning policy to escalate lifetime warning")
+	}
+	var compileErr *CompileError
+	if !errors.As(err, &compileErr) {
+		t.Fatalf("expected CompileError, got %T: %v", err, err)
+	}
+	if compileErr.Diagnostic.Category != "lifetime" || compileErr.Diagnostic.Code != "JY400" {
+		t.Fatalf("expected lifetime diagnostic, got %#v", compileErr.Diagnostic)
+	}
+	if !strings.Contains(compileErr.Diagnostic.Message, "local count escapes via return") {
+		t.Fatalf("expected lifetime return message, got %#v", compileErr.Diagnostic)
+	}
+}
+
+func TestCompileReportsConservativeEscapeWarnings(t *testing.T) {
+	source := `
+extern function retain(value);
+
+function main(args) {
+  var count = 1;
+  var box = {};
+  var items = [];
+  var update = () => {
+    count = count + 1;
+    return count;
+  };
+  box.value = count;
+  items[0] = count;
+  retain(count);
+  return update();
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	var lifetimeWarnings []Diagnostic
+	for _, warning := range result.Warnings {
+		if warning.Category == "lifetime" {
+			lifetimeWarnings = append(lifetimeWarnings, warning)
+		}
+	}
+
+	wants := []string{
+		"local count escapes via closure capture",
+		"local count escapes via assignment to outer scope",
+		"local count escapes via return",
+		"local count escapes via object storage",
+		"local count escapes via array storage",
+		"local count escapes via call to unknown or external function",
+	}
+	for _, want := range wants {
+		found := false
+		for _, warning := range lifetimeWarnings {
+			if warning.Message == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected conservative lifetime warning %q in %#v", want, lifetimeWarnings)
+		}
+	}
+}
+
 func TestCompilePathReportsSemanticSourceSpan(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "broken.js")
@@ -734,6 +1686,104 @@ func TestCompilePathReportsSemanticSourceSpan(t *testing.T) {
 	}
 }
 
+func TestCompileRejectsUsingBlockScopedVariableOutsideBlock(t *testing.T) {
+	source := `
+function main(args) {
+  if (true) {
+    var scoped = 1;
+  }
+  return scoped;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err == nil {
+		t.Fatalf("expected block scope error")
+	}
+	if !strings.Contains(err.Error(), "unknown identifier scoped") {
+		t.Fatalf("expected block-scoped identifier error, got: %v", err)
+	}
+}
+
+func TestCompileReportsLexerDiagnosticWithSourceSpan(t *testing.T) {
+	source := `
+function main(args) {
+  return @;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err == nil {
+		t.Fatalf("expected lexer error")
+	}
+	var compileErr *CompileError
+	if !errors.As(err, &compileErr) {
+		t.Fatalf("expected CompileError, got %T: %v", err, err)
+	}
+	if compileErr.Diagnostic.Category != "lexer" || compileErr.Diagnostic.Code != "JY050" {
+		t.Fatalf("expected lexer diagnostic, got %#v", compileErr.Diagnostic)
+	}
+	if compileErr.Diagnostic.Line != 3 || compileErr.Diagnostic.Column != 10 {
+		t.Fatalf("expected lexer diagnostic span 3:10, got %d:%d", compileErr.Diagnostic.Line, compileErr.Diagnostic.Column)
+	}
+	if !strings.Contains(compileErr.Diagnostic.Message, "unexpected character") || !strings.Contains(compileErr.Diagnostic.Message, "@") {
+		t.Fatalf("expected helpful lexer message, got %#v", compileErr.Diagnostic)
+	}
+}
+
+func TestCompileReportsUnterminatedStringAsLexerDiagnostic(t *testing.T) {
+	source := `
+function main(args) {
+  return "unterminated;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err == nil {
+		t.Fatalf("expected lexer error")
+	}
+	var compileErr *CompileError
+	if !errors.As(err, &compileErr) {
+		t.Fatalf("expected CompileError, got %T: %v", err, err)
+	}
+	if compileErr.Diagnostic.Category != "lexer" {
+		t.Fatalf("expected lexer category, got %#v", compileErr.Diagnostic)
+	}
+	if compileErr.Diagnostic.Line != 3 || compileErr.Diagnostic.Column != 10 {
+		t.Fatalf("expected lexer diagnostic span 3:10, got %d:%d", compileErr.Diagnostic.Line, compileErr.Diagnostic.Column)
+	}
+	if compileErr.Diagnostic.Message != "unterminated string" {
+		t.Fatalf("expected unterminated string message, got %#v", compileErr.Diagnostic)
+	}
+}
+
+func TestCompileReportsParserDiagnosticWithSourceSpan(t *testing.T) {
+	source := `
+function main(args) {
+  let value = 1;
+  return value;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err == nil {
+		t.Fatalf("expected parser error")
+	}
+	var compileErr *CompileError
+	if !errors.As(err, &compileErr) {
+		t.Fatalf("expected CompileError, got %T: %v", err, err)
+	}
+	if compileErr.Diagnostic.Category != "parse" || compileErr.Diagnostic.Code != "JY100" {
+		t.Fatalf("expected parse diagnostic, got %#v", compileErr.Diagnostic)
+	}
+	if compileErr.Diagnostic.Line != 3 || compileErr.Diagnostic.Column != 3 {
+		t.Fatalf("expected parser diagnostic span 3:3, got %d:%d", compileErr.Diagnostic.Line, compileErr.Diagnostic.Column)
+	}
+	if !strings.Contains(compileErr.Diagnostic.Message, "let is not supported") {
+		t.Fatalf("expected helpful parser message, got %#v", compileErr.Diagnostic)
+	}
+}
+
 func TestCompileSupportsProcessPathAndFsSurface(t *testing.T) {
 	source := `
 function main(args) {
@@ -741,7 +1791,11 @@ function main(args) {
   var argv = process.argv();
   var platform = process.platform();
   var arch = process.arch();
+  var hr = process.hrtime();
   var home = process.env("HOME");
+  var shared = new SharedArrayBuffer(4);
+  var sharedInts = new Int32Array(shared);
+  var atomicLoaded = Atomics.load(sharedInts, 0);
   var file = path.join("build", "tmp.txt");
   var sep = path.sep;
   var delimiter = path.delimiter;
@@ -754,6 +1808,8 @@ function main(args) {
   var base = path.basename(file);
   var dir = path.dirname(file);
   var ext = path.extname(file);
+  var killed = childProcess.kill({ pid: 123, signal: "SIGTERM" });
+  var w = worker.create(function(message) { return message; });
   var wrote = fs.writeFile(file, "kimchi");
   var made = fs.mkdir(path.join("build", "tmpdir"), { recursive: true });
   var exists = fs.exists(file);
@@ -764,7 +1820,7 @@ function main(args) {
   var copiedDir = fs.copyDir("build", "build-copy");
   var renamed = fs.rename(path.join("build", "tmp-copy.txt"), path.join("build", "tmp-copy-2.txt"));
   var removed = fs.remove("build-copy", { recursive: true });
-  console.log(cwd, argv, platform, arch, home, sep, delimiter, normalized, resolved, relative, parsed, formatted, absolute, base, dir, ext, wrote, made, exists, text, stat, entries, copied, copiedDir, renamed, removed);
+  console.log(cwd, argv, platform, arch, hr, home, atomicLoaded, sep, delimiter, normalized, resolved, relative, parsed, formatted, absolute, base, dir, ext, killed, w, wrote, made, exists, text, stat, entries, copied, copiedDir, renamed, removed);
   return 0;
 }
 `
@@ -779,7 +1835,9 @@ function main(args) {
 		"@jayess_std_process_argv",
 		"@jayess_std_process_platform",
 		"@jayess_std_process_arch",
+		"@jayess_std_process_hrtime",
 		"@jayess_std_process_env",
+		"@jayess_std_shared_array_buffer_new",
 		"@jayess_std_path_join",
 		"@jayess_std_path_normalize",
 		"@jayess_std_path_resolve",
@@ -792,6 +1850,9 @@ function main(args) {
 		"@jayess_std_path_basename",
 		"@jayess_std_path_dirname",
 		"@jayess_std_path_extname",
+		"@jayess_std_child_process_kill",
+		"@jayess_std_worker_create",
+		"@jayess_atomics_load",
 		"@jayess_std_fs_read_file",
 		"@jayess_std_fs_write_file",
 		"@jayess_std_fs_exists",
@@ -823,6 +1884,73 @@ function main(args) {
 	}
 	if !strings.Contains(string(result.LLVMIR), "@jayess_std_process_exit") {
 		t.Fatalf("expected process exit runtime symbol in LLVM IR, got:\n%s", string(result.LLVMIR))
+	}
+}
+
+func TestCompileSupportsCryptoSurface(t *testing.T) {
+	source := `
+function main(args) {
+  var bytes = crypto.randomBytes(16);
+  var digest = crypto.hash("sha256", "kimchi");
+  var mac = crypto.hmac("sha256", "secret", bytes);
+  var same = crypto.secureCompare(digest, mac);
+  var encrypted = crypto.encrypt({ algorithm: "aes-256-gcm", key: bytes, iv: bytes.slice(0, 12), data: "kimchi" });
+  var decrypted = crypto.decrypt({ algorithm: "aes-256-gcm", key: bytes, iv: encrypted.iv, data: encrypted.ciphertext, tag: encrypted.tag });
+  var pair = crypto.generateKeyPair({ type: "rsa", modulusLength: 2048 });
+  var sealed = crypto.publicEncrypt({ algorithm: "rsa-oaep-sha256", key: pair.publicKey, data: "jjigae" });
+  var opened = crypto.privateDecrypt({ algorithm: "rsa-oaep-sha256", key: pair.privateKey, data: sealed });
+  var signature = crypto.sign({ algorithm: "rsa-pss-sha256", key: pair.privateKey, data: "kimchi" });
+  var verified = crypto.verify({ algorithm: "rsa-pss-sha256", key: pair.publicKey, data: "kimchi", signature: signature });
+  var gz = compression.gzip("kimchi");
+  var gunzipped = compression.gunzip(gz);
+  var df = compression.deflate("jjigae");
+  var inflated = compression.inflate(df);
+  var br = compression.brotli("mandu");
+  var unbr = compression.unbrotli(br);
+  var gzStream = compression.createGzipStream();
+  var gunzipStream = compression.createGunzipStream();
+  var deflateStream = compression.createDeflateStream();
+  var inflateStream = compression.createInflateStream();
+  var brotliStream = compression.createBrotliStream();
+  var unbrotliStream = compression.createUnbrotliStream();
+  console.log(bytes, digest, mac, same);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, symbol := range []string{
+		"@jayess_std_crypto_random_bytes",
+		"@jayess_std_crypto_hash",
+		"@jayess_std_crypto_hmac",
+		"@jayess_std_crypto_secure_compare",
+		"@jayess_std_crypto_encrypt",
+		"@jayess_std_crypto_decrypt",
+		"@jayess_std_crypto_generate_key_pair",
+		"@jayess_std_crypto_public_encrypt",
+		"@jayess_std_crypto_private_decrypt",
+		"@jayess_std_crypto_sign",
+		"@jayess_std_crypto_verify",
+		"@jayess_std_compression_gzip",
+		"@jayess_std_compression_gunzip",
+		"@jayess_std_compression_deflate",
+		"@jayess_std_compression_inflate",
+		"@jayess_std_compression_brotli",
+		"@jayess_std_compression_unbrotli",
+		"@jayess_std_compression_create_gzip_stream",
+		"@jayess_std_compression_create_gunzip_stream",
+		"@jayess_std_compression_create_deflate_stream",
+		"@jayess_std_compression_create_inflate_stream",
+		"@jayess_std_compression_create_brotli_stream",
+		"@jayess_std_compression_create_unbrotli_stream",
+	} {
+		if !strings.Contains(irText, symbol) {
+			t.Fatalf("expected %s in LLVM IR, got:\n%s", symbol, irText)
+		}
 	}
 }
 
@@ -1133,6 +2261,247 @@ function main(args) {
 	}
 }
 
+func TestCompileSupportsConditionalOperator(t *testing.T) {
+	source := `
+function main(args) {
+  var label = args[0] ? "yes" : "no";
+  print(label);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	llvmIR := string(result.LLVMIR)
+	if !strings.Contains(llvmIR, "cond.true") || !strings.Contains(llvmIR, "cond.false") {
+		t.Fatalf("expected conditional operator to emit branch labels, got: %s", llvmIR)
+	}
+}
+
+func TestCompileSupportsAutomaticSemicolonInsertion(t *testing.T) {
+	source := `
+function main(args) {
+  var first = "kimchi"
+  var second = "ramen"
+  print(first + second)
+  return 0
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	llvmIR := string(result.LLVMIR)
+	if !strings.Contains(llvmIR, "@jayess_print") {
+		t.Fatalf("expected semicolonless program to compile, got: %s", llvmIR)
+	}
+}
+
+func TestCompileSupportsReturnASI(t *testing.T) {
+	source := `
+function main(args) {
+  return
+  42;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	llvmIR := string(result.LLVMIR)
+	if !strings.Contains(llvmIR, "ret double 0.000000") {
+		t.Fatalf("expected newline after return to end the statement, got: %s", llvmIR)
+	}
+}
+
+func TestCompileRejectsThrowLineBreak(t *testing.T) {
+	source := `
+function main(args) {
+  throw
+  "boom";
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err == nil {
+		t.Fatalf("expected line break after throw to be rejected")
+	}
+	if !strings.Contains(err.Error(), "line break or statement end is not allowed after throw") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompileSupportsBigIntLiterals(t *testing.T) {
+	source := `
+function main(args) {
+  const value = 123n;
+  print(value);
+  print(typeof 123n);
+  print(123n === 123n);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	llvmIR := string(result.LLVMIR)
+	if !strings.Contains(llvmIR, "@jayess_value_from_bigint") {
+		t.Fatalf("expected bigint literals to use runtime bigint boxing")
+	}
+	if !strings.Contains(llvmIR, "bigint") {
+		t.Fatalf("expected bigint typeof support in generated IR")
+	}
+}
+
+func TestCompileSupportsBitwiseOperators(t *testing.T) {
+	source := `
+function main(args) {
+  const number = (5 & 3) | (8 ^ 1);
+  const shifted = (number << 2) >> 1;
+  const unsigned = -1 >>> 1;
+  const big = (~5n) ^ (3n << 2n);
+  print(number, shifted, unsigned, big);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	llvmIR := string(result.LLVMIR)
+	for _, helper := range []string{
+		"@jayess_value_bitwise_and",
+		"@jayess_value_bitwise_or",
+		"@jayess_value_bitwise_xor",
+		"@jayess_value_bitwise_shl",
+		"@jayess_value_bitwise_shr",
+		"@jayess_value_bitwise_ushr",
+		"@jayess_value_bitwise_not",
+	} {
+		if !strings.Contains(llvmIR, helper) {
+			t.Fatalf("expected bitwise operators to lower through %s", helper)
+		}
+	}
+}
+
+func TestCompileSupportsCommaExpressions(t *testing.T) {
+	source := `
+function main(args) {
+  const value = (print("side effect"), 41 + 1);
+  return value;
+}
+`
+
+	p := parser.New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	if len(program.Functions) == 0 || len(program.Functions[0].Body) == 0 {
+		t.Fatalf("expected parsed function body")
+	}
+	decl, ok := program.Functions[0].Body[0].(*ast.VariableDecl)
+	if !ok {
+		t.Fatalf("expected first statement to be a variable declaration, got %T", program.Functions[0].Body[0])
+	}
+	if _, ok := decl.Value.(*ast.CommaExpression); !ok {
+		t.Fatalf("expected variable initializer to parse as a comma expression, got %T", decl.Value)
+	}
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	llvmIR := string(result.LLVMIR)
+	if !strings.Contains(llvmIR, "side effect") {
+		t.Fatalf("expected comma expression to preserve left-hand side effects")
+	}
+}
+
+func TestCompileSupportsDoWhile(t *testing.T) {
+	source := `
+function main(args) {
+  var count = 0;
+  do {
+    count += 1;
+  } while (count < 3);
+  return count;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	llvmIR := string(result.LLVMIR)
+	if !strings.Contains(llvmIR, "dowhile.body") || !strings.Contains(llvmIR, "dowhile.cond") {
+		t.Fatalf("expected do-while to lower through dedicated loop labels")
+	}
+}
+
+func TestCompileSupportsLabeledStatements(t *testing.T) {
+	source := `
+function main(args) {
+  var outer = 0;
+  loop: while (outer < 5) {
+    outer = outer + 1;
+    block: {
+      if (outer == 2) {
+        break block;
+      }
+      if (outer == 4) {
+        break loop;
+      }
+    }
+    continue loop;
+  }
+
+  pick: switch (outer) {
+    case 4:
+      break pick;
+    default:
+      outer = outer + 10;
+  }
+  return outer;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	llvmIR := string(result.LLVMIR)
+	if !strings.Contains(llvmIR, "label.end") || !strings.Contains(llvmIR, "switch.end") {
+		t.Fatalf("expected labeled statement lowering in LLVM IR, got:\n%s", llvmIR)
+	}
+}
+
+func TestCompileRejectsContinueToNonLoopLabel(t *testing.T) {
+	source := `
+function main(args) {
+  block: {
+    continue block;
+  }
+  return 0;
+}
+`
+
+	_, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err == nil {
+		t.Fatalf("expected Compile to reject continue to non-loop label")
+	}
+	if !strings.Contains(err.Error(), "unknown continue label block") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCompileSupportsOptionalChaining(t *testing.T) {
 	source := `
 function main(args) {
@@ -1433,6 +2802,32 @@ function main(args) {
 	irText := string(result.LLVMIR)
 	if !strings.Contains(irText, "@__jayess_lambda_0") || !strings.Contains(irText, "@__jayess_lambda_1") {
 		t.Fatalf("expected nested lowered closure helpers in LLVM IR")
+	}
+}
+
+func TestCompilePreservesSharedCapturedMutation(t *testing.T) {
+	source := `
+function main(args) {
+  var count = 0;
+  var inc = () => {
+    count = count + 1;
+    return count;
+  };
+  var read = () => count;
+  return inc() + read();
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if strings.Count(irText, "@jayess_value_get_member") < 2 || !strings.Contains(irText, "@jayess_value_set_member") {
+		t.Fatalf("expected closure cell accesses to lower through object member helpers, got:\n%s", irText)
+	}
+	if !strings.Contains(irText, "c\"count\\00\"") || !strings.Contains(irText, "c\"value\\00\"") {
+		t.Fatalf("expected closure cell lowering to access captured variable and cell value members, got:\n%s", irText)
 	}
 }
 
@@ -1837,6 +3232,201 @@ function main(args) {
 	}
 }
 
+func TestCompileSupportsSymbol(t *testing.T) {
+	source := `
+function main(args) {
+  var left = Symbol("kimchi");
+  var right = Symbol("kimchi");
+  print(typeof left);
+  print(left == left);
+  print(left == right);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_std_symbol") {
+		t.Fatalf("expected Symbol() to lower to runtime symbol helper")
+	}
+	if !strings.Contains(irText, "@jayess_value_typeof") {
+		t.Fatalf("expected typeof on symbols to use runtime typeof helper")
+	}
+	if !strings.Contains(irText, "@jayess_value_eq") {
+		t.Fatalf("expected symbol equality to use runtime equality helper")
+	}
+}
+
+func TestCompileSupportsSymbolPropertyKeys(t *testing.T) {
+	source := `
+function main(args) {
+  var sym = Symbol("k");
+  var obj = { [sym]: 1, plain: 2 };
+  print(obj[sym]);
+  print(Object.hasOwn(obj, sym));
+  print(Object.getOwnPropertySymbols(obj));
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_set_computed_member") {
+		t.Fatalf("expected symbol-keyed object literals to use computed member runtime helper")
+	}
+	if !strings.Contains(irText, "@jayess_value_object_symbols") {
+		t.Fatalf("expected Object.getOwnPropertySymbols to lower to runtime symbol-key helper")
+	}
+}
+
+func TestCompileSupportsSymbolRegistryAndWellKnownSymbols(t *testing.T) {
+	source := `
+function main(args) {
+  var left = Symbol.for("kimchi");
+  var right = Symbol.for("kimchi");
+  var key = Symbol.keyFor(left);
+  var iter = Symbol.iterator;
+  print(left == right);
+  print(key);
+  print(typeof iter);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, want := range []string{
+		"@jayess_std_symbol_for",
+		"@jayess_std_symbol_key_for",
+		"@jayess_std_symbol_iterator",
+	} {
+		if !strings.Contains(irText, want) {
+			t.Fatalf("expected generated IR to contain %s", want)
+		}
+	}
+}
+
+func TestCompileSupportsTypedArrays(t *testing.T) {
+	source := `
+function main(args) {
+  var buffer = new ArrayBuffer(16);
+  var a = new Int8Array(buffer);
+  var b = new Uint16Array(buffer);
+  var c = new Float32Array(2);
+  print(a[0]);
+  print(b[0]);
+  print(c[0]);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, want := range []string{
+		"@jayess_std_int8_array_new",
+		"@jayess_std_uint16_array_new",
+		"@jayess_std_float32_array_new",
+	} {
+		if !strings.Contains(irText, want) {
+			t.Fatalf("expected generated IR to contain %s", want)
+		}
+	}
+}
+
+func TestCompileSupportsIterableProtocol(t *testing.T) {
+	source := `
+function main(args) {
+  var iterable = {
+    [Symbol.iterator]: function() {
+      return {
+        next: function() {
+          return { value: 1, done: true };
+        }
+      };
+    }
+  };
+  var values = Array.from(iterable);
+  for (var ch of "ab") {
+    print(ch);
+  }
+  return values.length;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_iterable_values") {
+		t.Fatalf("expected iterable protocol lowering to use runtime iterable helper")
+	}
+}
+
+func TestCompileSupportsGenerators(t *testing.T) {
+	source := `
+function* values() {
+  yield 1;
+  yield 2;
+  return 99;
+}
+
+function main(args) {
+  var make = function*() {
+    yield 3;
+  };
+  var iter = values();
+  var other = make();
+  print(iter.next().value);
+  print(other.next().value);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_std_iterator_from") {
+		t.Fatalf("expected generator lowering to return iterator values, got:\n%s", irText)
+	}
+}
+
+func TestCompileSupportsAsyncGenerators(t *testing.T) {
+	source := `
+async function* values() {
+  yield await Promise.resolve(1);
+  yield 2;
+}
+
+function main(args) {
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_std_async_iterator_from") || !strings.Contains(irText, "@jayess_await") {
+		t.Fatalf("expected async generator lowering to use async iterator and await helpers, got:\n%s", irText)
+	}
+}
+
 func TestCompileSupportsInstanceofWithInheritance(t *testing.T) {
 	source := `
 class Animal {}
@@ -2084,8 +3674,8 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "if.then") {
-		t.Fatalf("expected switch to lower through conditional branches")
+	if !strings.Contains(string(result.LLVMIR), "switch.case") || !strings.Contains(string(result.LLVMIR), "switch.end") {
+		t.Fatalf("expected switch to lower through dedicated switch labels")
 	}
 }
 
@@ -2179,6 +3769,115 @@ function main(args) {
 	}
 }
 
+func TestCompileSupportsObjectSpread(t *testing.T) {
+	source := `
+function main(args) {
+  var base = { second: "b", third: "c" };
+  var obj = { first: "a", ...base, fourth: "d" };
+  print(obj.first);
+  print(obj.fourth);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_object_assign") {
+		t.Fatalf("expected object spread to lower through runtime object assign helper")
+	}
+}
+
+func TestCompileSupportsObjectLiteralAccessors(t *testing.T) {
+	source := `
+function main(args) {
+  var hidden = 10;
+  var obj = {
+    get value() {
+      return hidden;
+    },
+    set value(next) {
+      hidden = next;
+    }
+  };
+  obj.value = 42;
+  print(obj.value);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, want := range []string{
+		"@jayess_value_get_member",
+		"@jayess_value_set_member",
+		"__jayess_get_value",
+		"__jayess_set_value",
+	} {
+		if !strings.Contains(irText, want) {
+			t.Fatalf("expected object literal accessors to include %q in generated IR", want)
+		}
+	}
+}
+
+func TestCompileSupportsClassAccessors(t *testing.T) {
+	source := `
+class Counter {
+  constructor() {
+    this._value = 1;
+  }
+
+  get value() {
+    return this._value;
+  }
+
+  set value(next) {
+    this._value = next;
+  }
+
+  static get label() {
+    return "counter";
+  }
+
+  static set label(next) {
+    print(next);
+  }
+}
+
+function main(args) {
+  var counter = new Counter();
+  counter.value = 7;
+  print(counter.value);
+  Counter.label = "updated";
+  print(Counter.label);
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, want := range []string{
+		"Counter__accessor__get__value",
+		"Counter__accessor__set__value",
+		"Counter__static_accessor__get__label",
+		"Counter__static_accessor__set__label",
+		"__jayess_get_value",
+		"__jayess_set_value",
+	} {
+		if !strings.Contains(irText, want) {
+			t.Fatalf("expected class accessors to include %q in generated IR", want)
+		}
+	}
+}
+
 func TestLowerNestedClosureRewritesCapturedEnvValues(t *testing.T) {
 	source := `
 function main(args) {
@@ -2246,6 +3945,11 @@ func collectIdentifiersFromStatement(stmt ast.Statement, out *[]string) {
 		for _, child := range stmt.Body {
 			collectIdentifiersFromStatement(child, out)
 		}
+	case *ast.DoWhileStatement:
+		for _, child := range stmt.Body {
+			collectIdentifiersFromStatement(child, out)
+		}
+		collectIdentifiersFromExpression(stmt.Condition, out)
 	case *ast.ForStatement:
 		if stmt.Init != nil {
 			collectIdentifiersFromStatement(stmt.Init, out)
@@ -2259,6 +3963,23 @@ func collectIdentifiersFromStatement(stmt ast.Statement, out *[]string) {
 		for _, child := range stmt.Body {
 			collectIdentifiersFromStatement(child, out)
 		}
+	case *ast.BlockStatement:
+		for _, child := range stmt.Body {
+			collectIdentifiersFromStatement(child, out)
+		}
+	case *ast.SwitchStatement:
+		collectIdentifiersFromExpression(stmt.Discriminant, out)
+		for _, switchCase := range stmt.Cases {
+			collectIdentifiersFromExpression(switchCase.Test, out)
+			for _, child := range switchCase.Consequent {
+				collectIdentifiersFromStatement(child, out)
+			}
+		}
+		for _, child := range stmt.Default {
+			collectIdentifiersFromStatement(child, out)
+		}
+	case *ast.LabeledStatement:
+		collectIdentifiersFromStatement(stmt.Statement, out)
 	}
 }
 
@@ -2283,6 +4004,9 @@ func collectIdentifiersFromExpression(expr ast.Expression, out *[]string) {
 		collectIdentifiersFromExpression(expr.Left, out)
 		collectIdentifiersFromExpression(expr.Right, out)
 	case *ast.LogicalExpression:
+		collectIdentifiersFromExpression(expr.Left, out)
+		collectIdentifiersFromExpression(expr.Right, out)
+	case *ast.CommaExpression:
 		collectIdentifiersFromExpression(expr.Left, out)
 		collectIdentifiersFromExpression(expr.Right, out)
 	case *ast.UnaryExpression:
@@ -2334,11 +4058,27 @@ func statementContainsIdentifier(stmt ast.Statement, name string) bool {
 		return expressionContainsIdentifier(stmt.Condition, name) || functionBodyContainsIdentifier(stmt.Consequence, name) || functionBodyContainsIdentifier(stmt.Alternative, name)
 	case *ast.WhileStatement:
 		return expressionContainsIdentifier(stmt.Condition, name) || functionBodyContainsIdentifier(stmt.Body, name)
+	case *ast.DoWhileStatement:
+		return functionBodyContainsIdentifier(stmt.Body, name) || expressionContainsIdentifier(stmt.Condition, name)
 	case *ast.ForStatement:
 		return (stmt.Init != nil && statementContainsIdentifier(stmt.Init, name)) ||
 			(stmt.Condition != nil && expressionContainsIdentifier(stmt.Condition, name)) ||
 			(stmt.Update != nil && statementContainsIdentifier(stmt.Update, name)) ||
 			functionBodyContainsIdentifier(stmt.Body, name)
+	case *ast.BlockStatement:
+		return functionBodyContainsIdentifier(stmt.Body, name)
+	case *ast.SwitchStatement:
+		if expressionContainsIdentifier(stmt.Discriminant, name) || functionBodyContainsIdentifier(stmt.Default, name) {
+			return true
+		}
+		for _, switchCase := range stmt.Cases {
+			if expressionContainsIdentifier(switchCase.Test, name) || functionBodyContainsIdentifier(switchCase.Consequent, name) {
+				return true
+			}
+		}
+		return false
+	case *ast.LabeledStatement:
+		return statementContainsIdentifier(stmt.Statement, name)
 	default:
 		return false
 	}
@@ -2367,6 +4107,8 @@ func expressionContainsIdentifier(expr ast.Expression, name string) bool {
 	case *ast.ComparisonExpression:
 		return expressionContainsIdentifier(expr.Left, name) || expressionContainsIdentifier(expr.Right, name)
 	case *ast.LogicalExpression:
+		return expressionContainsIdentifier(expr.Left, name) || expressionContainsIdentifier(expr.Right, name)
+	case *ast.CommaExpression:
 		return expressionContainsIdentifier(expr.Left, name) || expressionContainsIdentifier(expr.Right, name)
 	case *ast.UnaryExpression:
 		return expressionContainsIdentifier(expr.Right, name)

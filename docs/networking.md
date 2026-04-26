@@ -2,7 +2,7 @@
 
 Jayess currently includes URL, query-string, HTTP message, basic HTTP/HTTPS client, DNS, and TCP helpers as the first networking-oriented standard library surface.
 
-These helpers now include basic blocking plain-HTTP client requests and a first native Windows HTTPS client surface. Low-level TLS streams are still not implemented, and the `http` helpers remain the shared protocol/message layer that future `https`, `tls`, `net`, `dgram`, and `dns` APIs can build on.
+These helpers now include blocking HTTP and HTTPS client requests, plus blocking `http.createServer(...)` and `https.createServer(...)` server surfaces. The `http` helpers remain the shared protocol/message layer that the higher-level `https`, `tls`, `net`, `dgram`, and `dns` APIs build on.
 
 ## URL
 
@@ -78,6 +78,7 @@ Supported helpers:
 - `http.formatRequest(parts)`
 - `http.parseResponse(input)`
 - `http.formatResponse(parts)`
+- `http.createServer(handler)`
 - `http.request(options)`
 - `http.requestStream(options)`
 - `http.requestStreamAsync(options)`
@@ -113,6 +114,13 @@ var responseText = http.formatResponse({
 var response = http.parseResponse(responseText);
 console.log(response.status);
 console.log(response.body);
+
+var server = http.createServer((req, res) => {
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/plain");
+  res.end("hello");
+});
+server.listen(8080, "127.0.0.1");
 
 var live = http.get({ host: "example.com", port: 80, path: "/" });
 console.log(live.status);
@@ -159,15 +167,22 @@ Current boundary:
 - `http.parseResponse(...)`, `http.request(...)`, `http.get(...)`, `http.requestAsync(...)`, and `http.getAsync(...)` now decode `Transfer-Encoding: chunked` response bodies.
 - The HTTP client now stops reading once a full response is available from `Content-Length` or chunked framing instead of always waiting for socket close.
 - `http.requestStream(...)` and `http.getStream(...)` now return before the entire body is buffered, so user code can decide whether to read, pipe, or close the body stream.
+- `http.createServer(handler)` currently provides a blocking plain-HTTP server path with `listen(port[, host])` and `close()`.
+- `https.createServer(options, handler)` currently provides a blocking HTTPS server path with the same `listen(port[, host])` and `close()` methods.
+- request handlers receive `req` with `method`, `url`, `path`, `headers`, and `body`.
+- response objects currently support `statusCode`, `setHeader(name, value)`, `write(chunk)`, and `end(chunk?)`.
 - Async HTTP currently runs on the runtime worker pool around blocking socket operations, not a true nonblocking transport.
 - Redirect following is currently limited to plain `http://...` targets and root-relative `Location` headers.
-- Chunked request encoding, keep-alive state, trailers, and compression are not implemented yet.
-- `https` and `tls` are still missing transport/security layers, but they can share this message/request layer when added.
+- Chunked request encoding, trailers, and compression are not implemented yet.
+- The current HTTP/HTTPS server path now supports sequential keep-alive requests on the same connection when the client keeps it open. Responses fall back to chunked transfer encoding when needed so the connection can remain reusable.
+- `https.createServer(...)` currently uses the OpenSSL-backed TLS path on non-Windows builds and expects PEM file paths in `options.cert` and `options.key`.
+- Server-side HTTPS is not implemented on Windows yet.
 
 ## HTTPS
 
 Supported helpers:
 
+- `https.createServer(options, handler)`
 - `https.get(input)`
 - `https.request(input)`
 - `https.requestStream(input)`
@@ -220,6 +235,15 @@ var asyncResponse = await https.getAsync({
   rejectUnauthorized: insecure
 });
 console.log(asyncResponse.body);
+
+var server = https.createServer({
+  cert: "./server-cert.pem",
+  key: "./server-key.pem",
+}, (req, res) => {
+  res.statusCode = 200;
+  res.end("secure");
+});
+server.listen(8443, "127.0.0.1");
 ```
 
 Current boundary:
@@ -233,6 +257,7 @@ Current boundary:
 - `https.backend()` reports the active TLS backend name, currently `schannel` on Windows and `openssl` on non-Windows builds.
 - HTTPS responses expose `status`, `reason`, `statusText`, `ok`, `headers`, `body`, `bodyBytes`, `redirected`, `redirectCount`, and `url`.
 - `rejectUnauthorized` defaults to `true`. Setting it to `false` skips certificate validation checks for development/testing use.
+- `https.createServer(...)` accepts PEM file paths in `cert` and `key`, and request handlers receive the same `(req, res)` shape as `http.createServer(...)`.
 - HTTPS also passes through TLS trust options like `serverName`, `caFile`, `caPath`, and `trustSystem`.
 - HTTPS currently pins ALPN to `http/1.1` because the Jayess HTTP client is still HTTP/1.x only.
 - HTTPS redirects are now handled by the Jayess-owned redirect loop, including `maxRedirects`.
@@ -240,6 +265,7 @@ Current boundary:
 - Non-Windows HTTPS now depends on an OpenSSL-backed TLS build/runtime.
 - Custom CA file/path trust configuration now works on both backends.
 - On the Schannel backend, Jayess validates the peer certificate against a custom trust collection built from `caFile` / `caPath`, optionally combined with system trust when `trustSystem` is left enabled.
+- The current HTTPS server path is blocking and now supports sequential keep-alive requests on the same connection when the client keeps it open.
 
 ## TLS
 
@@ -248,6 +274,7 @@ Supported helpers:
 - `tls.isAvailable()`
 - `tls.backend()`
 - `tls.connect(options)`
+- `tls.createServer(options, handler)`
 
 Example:
 
@@ -265,6 +292,16 @@ if (socket) {
   console.log(cert.subjectAltNames);
   socket.close();
 }
+
+var server = tls.createServer({
+  cert: "./server-cert.pem",
+  key: "./server-key.pem",
+}, (socket) => {
+  var text = socket.read();
+  socket.write("pong");
+  socket.close();
+});
+server.listen(8443, "127.0.0.1");
 ```
 
 Current boundary:
@@ -272,8 +309,10 @@ Current boundary:
 - `tls.isAvailable()` reports whether a native TLS/HTTPS backend is present in the current build/runtime.
 - `tls.backend()` returns the backend name, currently `schannel` on Windows and `openssl` on non-Windows builds.
 - `tls.connect(...)` performs a real native TCP+TLS handshake and returns a stream-like `Socket` object with the normal socket lifecycle methods.
+- `tls.createServer(...)` performs server-side TLS handshakes and passes accepted secure sockets to the handler.
 - `tls.connect(...)` also accepts `alpnProtocols` as either a string or an array of protocol strings.
 - `tls.connect(...)` also accepts trust-related options: `serverName`, `caFile`, `caPath`, and `trustSystem`.
+- `tls.createServer(...)` currently accepts PEM file paths in `cert` and `key`.
 - TLS sockets currently expose `secure`, `authorized`, `backend`, `protocol`, `alpnProtocol`, `alpnProtocols`, and `getPeerCertificate()` in addition to the standard socket properties.
 - `socket.getPeerCertificate()` returns an object with `subject`, `issuer`, `subjectCN`, `issuerCN`, `serialNumber`, `validFrom`, `validTo`, `subjectAltNames`, `backend`, and `authorized`, or `undefined` when no peer certificate is available.
 - `rejectUnauthorized` defaults to `true`. Setting it to `false` disables certificate rejection for development/testing use.
@@ -281,6 +320,7 @@ Current boundary:
 - On the OpenSSL backend, `caFile`/`caPath` can provide custom trust roots and `trustSystem: false` disables default system trust roots.
 - On the Schannel backend, `caFile`/`caPath` load custom trust roots for post-handshake certificate validation and `trustSystem: false` disables fallback to system trust.
 - `https.*` now uses this low-level TLS socket transport instead of a separate request backend.
+- `tls.createServer(...)` is currently implemented on non-Windows builds only.
 
 ## DNS
 
@@ -293,6 +333,46 @@ Supported helpers:
 `dns.lookup(host)` resolves a hostname using the platform resolver. It returns an object with `host`, `address`, and `family`, or `undefined` when the hostname cannot be resolved.
 `dns.lookupAll(host)` resolves all available IPv4/IPv6 records and returns an array of `{ host, address, family }` objects, or `undefined` when resolution fails.
 `dns.reverse(address)` resolves an IPv4 or IPv6 address back to a hostname, or returns `undefined` when the input is not an IP address or no reverse name is available.
+
+## UDP
+
+Supported helpers:
+
+- `net.createDatagramSocket(options)`
+
+Datagram socket methods:
+
+- `address()`
+- `send(value, port, host)`
+- `receive(size?)`
+- `setBroadcast(enabled)`
+- `joinGroup(group, interfaceAddress?)`
+- `leaveGroup(group, interfaceAddress?)`
+- `setMulticastInterface(interfaceAddress)`
+- `setMulticastLoopback(enabled)`
+- `setTimeout(ms)`
+- `close()`
+
+Example:
+
+```js
+var receiver = net.createDatagramSocket({ host: "0.0.0.0", port: 9999, type: "udp4" });
+var sender = net.createDatagramSocket({ host: "0.0.0.0", port: 0, type: "udp4" });
+
+sender.setBroadcast(true);
+sender.send("hello", 9999, "255.255.255.255");
+
+receiver.joinGroup("239.255.0.1", "127.0.0.1");
+sender.setMulticastInterface("127.0.0.1");
+sender.setMulticastLoopback(true);
+sender.send("hello", 9999, "239.255.0.1");
+```
+
+Current boundary:
+
+- UDP sockets support send/receive, local bind, timeout, broadcast, and IPv4 multicast group join/leave.
+- `receive(...)` returns `{ data, bytes, address, port, family }`.
+- The current multicast helpers are IPv4-oriented and use explicit interface addresses such as `127.0.0.1` for loopback tests.
 
 Example:
 

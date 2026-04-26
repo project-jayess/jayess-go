@@ -1,6 +1,9 @@
 package lexer
 
-import "unicode"
+import (
+	"fmt"
+	"unicode"
+)
 
 type Lexer struct {
 	input  []rune
@@ -13,6 +16,22 @@ type State struct {
 	Pos    int
 	Line   int
 	Column int
+}
+
+type DiagnosticError struct {
+	Line    int
+	Column  int
+	Message string
+}
+
+func (e *DiagnosticError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Line > 0 {
+		return fmt.Sprintf("%d:%d: %s", e.Line, e.Column, e.Message)
+	}
+	return e.Message
 }
 
 func New(input string) *Lexer {
@@ -122,6 +141,8 @@ func (l *Lexer) NextToken() Token {
 			l.advance()
 			return Token{Type: TokenAnd, Literal: "&&", Line: startLine, Column: startColumn}
 		}
+		l.advance()
+		return Token{Type: TokenBitAnd, Literal: "&", Line: startLine, Column: startColumn}
 	case '|':
 		if l.peek() == '|' && l.peekSecond() == '=' {
 			l.advance()
@@ -134,7 +155,20 @@ func (l *Lexer) NextToken() Token {
 			l.advance()
 			return Token{Type: TokenOr, Literal: "||", Line: startLine, Column: startColumn}
 		}
+		l.advance()
+		return Token{Type: TokenBitOr, Literal: "|", Line: startLine, Column: startColumn}
+	case '^':
+		l.advance()
+		return Token{Type: TokenBitXor, Literal: "^", Line: startLine, Column: startColumn}
+	case '~':
+		l.advance()
+		return Token{Type: TokenBitNot, Literal: "~", Line: startLine, Column: startColumn}
 	case '<':
+		if l.peek() == '<' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenShiftLeft, Literal: "<<", Line: startLine, Column: startColumn}
+		}
 		if l.peek() == '=' {
 			l.advance()
 			l.advance()
@@ -143,6 +177,17 @@ func (l *Lexer) NextToken() Token {
 		l.advance()
 		return Token{Type: TokenLt, Literal: "<", Line: startLine, Column: startColumn}
 	case '>':
+		if l.peek() == '>' && l.peekSecond() == '>' {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Type: TokenUnsignedShift, Literal: ">>>", Line: startLine, Column: startColumn}
+		}
+		if l.peek() == '>' {
+			l.advance()
+			l.advance()
+			return Token{Type: TokenShiftRight, Literal: ">>", Line: startLine, Column: startColumn}
+		}
 		if l.peek() == '=' {
 			l.advance()
 			l.advance()
@@ -214,7 +259,10 @@ func (l *Lexer) NextToken() Token {
 		return Token{Type: lookupIdent(literal), Literal: literal, Line: startLine, Column: startColumn}
 	}
 	if unicode.IsDigit(ch) {
-		literal := l.readNumber()
+		literal, isBigInt := l.readNumber()
+		if isBigInt {
+			return Token{Type: TokenBigInt, Literal: literal, Line: startLine, Column: startColumn}
+		}
 		return Token{Type: TokenNumber, Literal: literal, Line: startLine, Column: startColumn}
 	}
 
@@ -268,7 +316,7 @@ func (l *Lexer) readIdentifier() string {
 	return string(l.input[start:l.pos])
 }
 
-func (l *Lexer) readNumber() string {
+func (l *Lexer) readNumber() (string, bool) {
 	start := l.pos
 	dotSeen := false
 	for {
@@ -279,8 +327,12 @@ func (l *Lexer) readNumber() string {
 		case ch == '.' && !dotSeen:
 			dotSeen = true
 			l.advance()
+		case ch == 'n' && !dotSeen:
+			literal := string(l.input[start:l.pos])
+			l.advance()
+			return literal, true
 		default:
-			return string(l.input[start:l.pos])
+			return string(l.input[start:l.pos]), false
 		}
 	}
 }
@@ -403,6 +455,8 @@ func lookupIdent(literal string) TokenType {
 		return TokenTypeof
 	case "instanceof":
 		return TokenInstanceof
+	case "is":
+		return TokenIs
 	case "this":
 		return TokenThis
 	case "super":
@@ -423,6 +477,8 @@ func lookupIdent(literal string) TokenType {
 		return TokenIf
 	case "else":
 		return TokenElse
+	case "do":
+		return TokenDo
 	case "while":
 		return TokenWhile
 	case "for":
@@ -455,6 +511,8 @@ func lookupIdent(literal string) TokenType {
 		return TokenAwait
 	case "async":
 		return TokenAsync
+	case "yield":
+		return TokenYield
 	case "true":
 		return TokenTrue
 	case "false":

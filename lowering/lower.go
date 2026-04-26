@@ -6,6 +6,7 @@ import (
 
 	"jayess-go/ast"
 	"jayess-go/ir"
+	"jayess-go/typesys"
 )
 
 var lowerTempCounter uint64
@@ -57,7 +58,13 @@ func Lower(program *ast.Program) (*ir.Module, error) {
 }
 
 func lowerFunction(fn *ast.FunctionDecl, globals map[string]ir.ValueKind, functions map[string]bool) (ir.Function, error) {
-	result := ir.Function{Visibility: lowerVisibility(fn.Visibility), Name: fn.Name}
+	pos := ast.PositionOf(fn)
+	result := ir.Function{
+		Visibility: lowerVisibility(fn.Visibility),
+		Name:       fn.Name,
+		Line:       pos.Line,
+		Column:     pos.Column,
+	}
 
 	symbols := cloneKinds(globals)
 	for _, param := range fn.Params {
@@ -150,6 +157,9 @@ func lowerStatement(stmt ast.Statement, symbols map[string]ir.ValueKind, functio
 		}
 		return &ir.AssignmentStatement{Target: target, Value: value}, nil
 	case *ast.ReturnStatement:
+		if stmt.Value == nil {
+			return &ir.ReturnStatement{Value: &ir.UndefinedLiteral{}}, nil
+		}
 		value, err := lowerExpression(stmt.Value, symbols, functions)
 		if err != nil {
 			return nil, err
@@ -205,6 +215,12 @@ func lowerStatement(stmt ast.Statement, symbols map[string]ir.ValueKind, functio
 			return nil, err
 		}
 		return &ir.IfStatement{Condition: condition, Consequence: consequence, Alternative: alternative}, nil
+	case *ast.BlockStatement:
+		body, err := lowerStatements(stmt.Body, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		return &ir.BlockStatement{Body: body}, nil
 	case *ast.WhileStatement:
 		condition, err := lowerExpression(stmt.Condition, symbols, functions)
 		if err != nil {
@@ -215,6 +231,16 @@ func lowerStatement(stmt ast.Statement, symbols map[string]ir.ValueKind, functio
 			return nil, err
 		}
 		return &ir.WhileStatement{Condition: condition, Body: body}, nil
+	case *ast.DoWhileStatement:
+		body, err := lowerStatements(stmt.Body, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		condition, err := lowerExpression(stmt.Condition, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		return &ir.DoWhileStatement{Body: body, Condition: condition}, nil
 	case *ast.ForStatement:
 		var init ir.Statement
 		var condition ir.Expression
@@ -258,10 +284,16 @@ func lowerStatement(stmt ast.Statement, symbols map[string]ir.ValueKind, functio
 		return lowerForInStatement(stmt, symbols, functions)
 	case *ast.SwitchStatement:
 		return lowerSwitchStatement(stmt, symbols, functions)
+	case *ast.LabeledStatement:
+		lowered, err := lowerStatement(stmt.Statement, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		return &ir.LabeledStatement{Label: stmt.Label, Statement: lowered}, nil
 	case *ast.BreakStatement:
-		return &ir.BreakStatement{}, nil
+		return &ir.BreakStatement{Label: stmt.Label}, nil
 	case *ast.ContinueStatement:
-		return &ir.ContinueStatement{}, nil
+		return &ir.ContinueStatement{Label: stmt.Label}, nil
 	default:
 		return nil, fmt.Errorf("unsupported statement in lowering")
 	}
@@ -271,6 +303,8 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 	switch expr := expr.(type) {
 	case *ast.NumberLiteral:
 		return &ir.NumberLiteral{Value: expr.Value}, nil
+	case *ast.BigIntLiteral:
+		return &ir.BigIntLiteral{Value: expr.Value}, nil
 	case *ast.BooleanLiteral:
 		return &ir.BooleanLiteral{Value: expr.Value}, nil
 	case *ast.NullLiteral:
@@ -296,7 +330,14 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 			if err != nil {
 				return nil, err
 			}
-			lowered := ir.ObjectProperty{Key: property.Key, Value: value, Computed: property.Computed}
+			lowered := ir.ObjectProperty{
+				Key:      property.Key,
+				Value:    value,
+				Computed: property.Computed,
+				Spread:   property.Spread,
+				Getter:   property.Getter,
+				Setter:   property.Setter,
+			}
 			if property.Computed {
 				keyExpr, err := lowerExpression(property.KeyExpr, symbols, functions)
 				if err != nil {
@@ -351,6 +392,8 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 			}
 		}
 		return &ir.FunctionValue{Name: expr.FunctionName, Environment: environment}, nil
+	case *ast.CastExpression:
+		return lowerExpression(expr.Value, symbols, functions)
 	case *ast.BinaryExpression:
 		left, err := lowerExpression(expr.Left, symbols, functions)
 		if err != nil {
@@ -360,7 +403,7 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 		if err != nil {
 			return nil, err
 		}
-		return &ir.BinaryExpression{Operator: lowerOperator(expr.Operator), Left: left, Right: right}, nil
+		return &ir.BinaryExpression{Operator: lowerOperator(expr.Operator), Left: left, Right: right, Kind: lowerBinaryResultKind(expr.Operator, inferIRKind(left), inferIRKind(right))}, nil
 	case *ast.NullishCoalesceExpression:
 		left, err := lowerExpression(expr.Left, symbols, functions)
 		if err != nil {
@@ -371,18 +414,55 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 			return nil, err
 		}
 		return &ir.NullishCoalesceExpression{Left: left, Right: right, Kind: ir.ValueDynamic}, nil
+	case *ast.CommaExpression:
+		left, err := lowerExpression(expr.Left, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		right, err := lowerExpression(expr.Right, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		return &ir.CommaExpression{Left: left, Right: right, Kind: inferIRKind(right)}, nil
+	case *ast.ConditionalExpression:
+		condition, err := lowerExpression(expr.Condition, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		consequent, err := lowerExpression(expr.Consequent, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		alternative, err := lowerExpression(expr.Alternative, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		return &ir.ConditionalExpression{Condition: condition, Consequent: consequent, Alternative: alternative, Kind: ir.ValueDynamic}, nil
 	case *ast.UnaryExpression:
 		right, err := lowerExpression(expr.Right, symbols, functions)
 		if err != nil {
 			return nil, err
 		}
-		return &ir.UnaryExpression{Operator: ir.OperatorNot, Right: right}, nil
+		return &ir.UnaryExpression{Operator: lowerUnaryOperator(expr.Operator), Right: right, Kind: lowerUnaryResultKind(expr.Operator, inferIRKind(right))}, nil
 	case *ast.TypeofExpression:
 		value, err := lowerExpression(expr.Value, symbols, functions)
 		if err != nil {
 			return nil, err
 		}
 		return &ir.TypeofExpression{Value: value}, nil
+	case *ast.TypeCheckExpression:
+		value, err := lowerExpression(expr.Value, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		return &ir.CallExpression{
+			Callee: "__jayess_type_is",
+			Arguments: []ir.Expression{
+				value,
+				&ir.StringLiteral{Value: typesys.Normalize(expr.TypeAnnotation)},
+			},
+			Kind: ir.ValueBoolean,
+		}, nil
 	case *ast.InstanceofExpression:
 		left, err := lowerExpression(expr.Left, symbols, functions)
 		if err != nil {
@@ -490,11 +570,11 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 			call.Kind = ir.ValueDynamic
 		case "__jayess_object_keys":
 			call.Kind = ir.ValueDynamic
-		case "__jayess_object_values", "__jayess_object_entries", "__jayess_object_assign", "__jayess_object_has_own", "__jayess_object_from_entries":
+		case "__jayess_object_values", "__jayess_object_entries", "__jayess_object_symbols", "__jayess_object_assign", "__jayess_object_has_own", "__jayess_object_from_entries":
 			call.Kind = ir.ValueDynamic
 		case "__jayess_object_rest":
 			call.Kind = ir.ValueDynamic
-		case "__jayess_std_map_new", "__jayess_std_set_new", "__jayess_std_date_new", "__jayess_std_regexp_new", "__jayess_std_date_now", "__jayess_std_json_stringify", "__jayess_std_json_parse", "__jayess_iter_values", "__jayess_std_error_new", "__jayess_std_aggregate_error_new", "__jayess_std_array_buffer_new", "__jayess_std_uint8_array_new", "__jayess_std_data_view_new", "__jayess_std_uint8_array_from_string", "__jayess_std_uint8_array_concat", "__jayess_std_iterator_from", "__jayess_std_promise_resolve", "__jayess_std_promise_reject", "__jayess_std_promise_all", "__jayess_std_promise_race", "__jayess_std_promise_all_settled", "__jayess_std_promise_any", "__jayess_timers_sleep", "__jayess_timers_set_timeout", "__jayess_timers_clear_timeout", "__jayess_await":
+		case "__jayess_std_map_new", "__jayess_std_set_new", "__jayess_std_weak_map_new", "__jayess_std_weak_set_new", "__jayess_std_symbol", "__jayess_std_symbol_for", "__jayess_std_symbol_key_for", "__jayess_std_symbol_iterator", "__jayess_std_symbol_async_iterator", "__jayess_std_symbol_to_string_tag", "__jayess_std_symbol_has_instance", "__jayess_std_symbol_species", "__jayess_std_symbol_match", "__jayess_std_symbol_replace", "__jayess_std_symbol_search", "__jayess_std_symbol_split", "__jayess_std_symbol_to_primitive", "__jayess_std_date_new", "__jayess_std_regexp_new", "__jayess_std_date_now", "__jayess_std_json_stringify", "__jayess_std_json_parse", "__jayess_iter_values", "__jayess_std_error_new", "__jayess_std_aggregate_error_new", "__jayess_std_array_buffer_new", "__jayess_shared_array_buffer_new", "__jayess_std_int8_array_new", "__jayess_std_uint8_array_new", "__jayess_std_uint16_array_new", "__jayess_std_int16_array_new", "__jayess_std_uint32_array_new", "__jayess_std_int32_array_new", "__jayess_std_float32_array_new", "__jayess_std_float64_array_new", "__jayess_std_data_view_new", "__jayess_std_uint8_array_from_string", "__jayess_std_uint8_array_concat", "__jayess_std_iterator_from", "__jayess_std_async_iterator_from", "__jayess_std_promise_resolve", "__jayess_std_promise_reject", "__jayess_std_promise_all", "__jayess_std_promise_race", "__jayess_std_promise_all_settled", "__jayess_std_promise_any", "__jayess_timers_sleep", "__jayess_timers_set_timeout", "__jayess_timers_clear_timeout", "__jayess_await":
 			call.Kind = ir.ValueDynamic
 		case "__jayess_std_uint8_array_equals":
 			call.Kind = ir.ValueDynamic
@@ -510,15 +590,17 @@ func lowerExpression(expr ast.Expression, symbols map[string]ir.ValueKind, funct
 			call.Kind = ir.ValueUndefined
 		case "__jayess_console_log", "__jayess_console_warn", "__jayess_console_error":
 			call.Kind = ir.ValueUndefined
-		case "__jayess_process_cwd", "__jayess_process_env", "__jayess_process_argv", "__jayess_process_exit", "__jayess_fs_read_file", "__jayess_fs_read_file_async", "__jayess_fs_write_file", "__jayess_fs_write_file_async", "__jayess_fs_create_read_stream", "__jayess_fs_create_write_stream", "__jayess_fs_exists", "__jayess_fs_read_dir", "__jayess_fs_stat", "__jayess_fs_mkdir", "__jayess_fs_remove", "__jayess_fs_copy_file", "__jayess_fs_rename", "__jayess_path_parse", "__jayess_path_is_absolute", "__jayess_url_parse", "__jayess_querystring_parse", "__jayess_dns_lookup", "__jayess_dns_lookup_all", "__jayess_dns_reverse", "__jayess_net_connect", "__jayess_net_listen", "__jayess_http_parse_request", "__jayess_http_parse_response", "__jayess_http_request", "__jayess_http_request_stream", "__jayess_http_request_stream_async", "__jayess_http_get", "__jayess_http_get_stream", "__jayess_http_get_stream_async", "__jayess_http_request_async", "__jayess_http_get_async", "__jayess_https_request", "__jayess_https_request_stream", "__jayess_https_request_stream_async", "__jayess_https_get", "__jayess_https_get_stream", "__jayess_https_get_stream_async", "__jayess_https_request_async", "__jayess_https_get_async":
+		case "__jayess_process_cwd", "__jayess_process_env", "__jayess_process_argv", "__jayess_process_exit", "__jayess_process_tmpdir", "__jayess_process_hostname", "__jayess_process_cpu_info", "__jayess_process_memory_info", "__jayess_process_user_info", "__jayess_process_on_signal", "__jayess_process_once_signal", "__jayess_process_off_signal", "__jayess_process_raise", "__jayess_fs_read_file", "__jayess_fs_read_file_async", "__jayess_fs_write_file", "__jayess_fs_append_file", "__jayess_fs_write_file_async", "__jayess_fs_create_read_stream", "__jayess_fs_create_write_stream", "__jayess_fs_exists", "__jayess_fs_read_dir", "__jayess_fs_stat", "__jayess_fs_mkdir", "__jayess_fs_remove", "__jayess_fs_copy_file", "__jayess_fs_rename", "__jayess_fs_symlink", "__jayess_fs_watch", "__jayess_path_parse", "__jayess_path_is_absolute", "__jayess_url_parse", "__jayess_querystring_parse", "__jayess_dns_lookup", "__jayess_dns_lookup_all", "__jayess_dns_reverse", "__jayess_child_process_exec", "__jayess_child_process_spawn", "__jayess_child_process_kill", "__jayess_worker_create", "__jayess_crypto_random_bytes", "__jayess_crypto_encrypt", "__jayess_crypto_decrypt", "__jayess_crypto_generate_key_pair", "__jayess_crypto_public_encrypt", "__jayess_crypto_private_decrypt", "__jayess_crypto_sign", "__jayess_crypto_verify", "__jayess_compression_gzip", "__jayess_compression_gunzip", "__jayess_compression_deflate", "__jayess_compression_inflate", "__jayess_compression_brotli", "__jayess_compression_unbrotli", "__jayess_compression_create_gzip_stream", "__jayess_compression_create_gunzip_stream", "__jayess_compression_create_deflate_stream", "__jayess_compression_create_inflate_stream", "__jayess_compression_create_brotli_stream", "__jayess_compression_create_unbrotli_stream", "__jayess_net_create_datagram_socket", "__jayess_net_connect", "__jayess_net_listen", "__jayess_http_parse_request", "__jayess_http_parse_response", "__jayess_http_request", "__jayess_http_create_server", "__jayess_http_request_stream", "__jayess_http_request_stream_async", "__jayess_http_get", "__jayess_http_get_stream", "__jayess_http_get_stream_async", "__jayess_http_request_async", "__jayess_http_get_async", "__jayess_https_request", "__jayess_https_request_stream", "__jayess_https_request_stream_async", "__jayess_https_get", "__jayess_https_get_stream", "__jayess_https_get_stream_async", "__jayess_https_request_async", "__jayess_https_get_async":
 			call.Kind = ir.ValueDynamic
-		case "__jayess_process_thread_pool_size":
+		case "__jayess_crypto_secure_compare":
+			call.Kind = ir.ValueDynamic
+		case "__jayess_process_thread_pool_size", "__jayess_process_uptime", "__jayess_process_hrtime", "__jayess_atomics_load", "__jayess_atomics_store", "__jayess_atomics_add", "__jayess_atomics_sub", "__jayess_atomics_and", "__jayess_atomics_or", "__jayess_atomics_xor", "__jayess_atomics_exchange", "__jayess_atomics_compareExchange":
 			call.Kind = ir.ValueNumber
 		case "__jayess_net_is_ip":
 			call.Kind = ir.ValueNumber
-		case "__jayess_tls_is_available", "__jayess_https_is_available", "__jayess_tls_connect":
+		case "__jayess_tls_is_available", "__jayess_https_is_available", "__jayess_tls_connect", "__jayess_tls_create_server", "__jayess_https_create_server":
 			call.Kind = ir.ValueDynamic
-		case "__jayess_process_platform", "__jayess_path_join", "__jayess_path_normalize", "__jayess_path_resolve", "__jayess_path_relative", "__jayess_path_format", "__jayess_path_basename", "__jayess_path_dirname", "__jayess_path_extname", "__jayess_url_format", "__jayess_querystring_stringify", "__jayess_http_format_request", "__jayess_http_format_response":
+		case "__jayess_process_platform", "__jayess_process_arch", "__jayess_path_join", "__jayess_path_normalize", "__jayess_path_resolve", "__jayess_path_relative", "__jayess_path_format", "__jayess_path_basename", "__jayess_path_dirname", "__jayess_path_extname", "__jayess_url_format", "__jayess_querystring_stringify", "__jayess_crypto_hash", "__jayess_crypto_hmac", "__jayess_http_format_request", "__jayess_http_format_response":
 			call.Kind = ir.ValueString
 		case "__jayess_tls_backend", "__jayess_https_backend":
 			call.Kind = ir.ValueString
@@ -551,18 +633,27 @@ func inferIRKind(expr ir.Expression) ir.ValueKind {
 	switch expr := expr.(type) {
 	case *ir.NumberLiteral:
 		return ir.ValueNumber
+	case *ir.BigIntLiteral:
+		return ir.ValueBigInt
 	case *ir.BinaryExpression:
 		if expr.Operator == ir.OperatorAdd && (inferIRKind(expr.Left) == ir.ValueString || inferIRKind(expr.Right) == ir.ValueString) {
 			return ir.ValueString
 		}
-		return ir.ValueNumber
+		return expr.Kind
 	case *ir.BooleanLiteral, *ir.ComparisonExpression:
 		return ir.ValueBoolean
 	case *ir.NullLiteral, *ir.UndefinedLiteral:
 		return ir.ValueDynamic
 	case *ir.UnaryExpression, *ir.LogicalExpression:
+		if unary, ok := expr.(*ir.UnaryExpression); ok {
+			return unary.Kind
+		}
 		return ir.ValueBoolean
 	case *ir.NullishCoalesceExpression:
+		return expr.Kind
+	case *ir.CommaExpression:
+		return expr.Kind
+	case *ir.ConditionalExpression:
 		return expr.Kind
 	case *ir.TypeofExpression:
 		return ir.ValueString
@@ -623,8 +714,75 @@ func lowerOperator(op ast.BinaryOperator) ir.BinaryOperator {
 		return ir.OperatorSub
 	case ast.OperatorMul:
 		return ir.OperatorMul
-	default:
+	case ast.OperatorDiv:
 		return ir.OperatorDiv
+	case ast.OperatorBitAnd:
+		return ir.OperatorBitAnd
+	case ast.OperatorBitOr:
+		return ir.OperatorBitOr
+	case ast.OperatorBitXor:
+		return ir.OperatorBitXor
+	case ast.OperatorShl:
+		return ir.OperatorShl
+	case ast.OperatorShr:
+		return ir.OperatorShr
+	default:
+		return ir.OperatorUShr
+	}
+}
+
+func lowerUnaryOperator(op ast.UnaryOperator) ir.UnaryOperator {
+	if op == ast.OperatorBitNot {
+		return ir.OperatorBitNot
+	}
+	return ir.OperatorNot
+}
+
+func lowerBinaryResultKind(op ast.BinaryOperator, left ir.ValueKind, right ir.ValueKind) ir.ValueKind {
+	switch op {
+	case ast.OperatorAdd:
+		if left == ir.ValueString || right == ir.ValueString {
+			return ir.ValueString
+		}
+		if left == ir.ValueDynamic || right == ir.ValueDynamic {
+			return ir.ValueDynamic
+		}
+		return ir.ValueNumber
+	case ast.OperatorSub, ast.OperatorMul, ast.OperatorDiv:
+		return ir.ValueNumber
+	case ast.OperatorBitAnd, ast.OperatorBitOr, ast.OperatorBitXor, ast.OperatorShl, ast.OperatorShr:
+		if left == ir.ValueBigInt && right == ir.ValueBigInt {
+			return ir.ValueBigInt
+		}
+		if left == ir.ValueDynamic || right == ir.ValueDynamic {
+			if left == ir.ValueBigInt || right == ir.ValueBigInt {
+				return ir.ValueDynamic
+			}
+			return ir.ValueNumber
+		}
+		return ir.ValueNumber
+	case ast.OperatorUShr:
+		if left == ir.ValueDynamic || right == ir.ValueDynamic {
+			return ir.ValueDynamic
+		}
+		return ir.ValueNumber
+	default:
+		return ir.ValueDynamic
+	}
+}
+
+func lowerUnaryResultKind(op ast.UnaryOperator, right ir.ValueKind) ir.ValueKind {
+	switch op {
+	case ast.OperatorBitNot:
+		if right == ir.ValueBigInt {
+			return ir.ValueBigInt
+		}
+		if right == ir.ValueDynamic {
+			return ir.ValueDynamic
+		}
+		return ir.ValueNumber
+	default:
+		return ir.ValueBoolean
 	}
 }
 
@@ -735,27 +893,26 @@ func lowerForInStatement(stmt *ast.ForInStatement, symbols map[string]ir.ValueKi
 }
 
 func lowerSwitchStatement(stmt *ast.SwitchStatement, symbols map[string]ir.ValueKind, functions map[string]bool) (ir.Statement, error) {
-	switchName := nextLowerTemp("switch")
-	var current ast.Statement = &ast.IfStatement{Condition: &ast.BooleanLiteral{Value: true}, Consequence: stmt.Default}
-	for i := len(stmt.Cases) - 1; i >= 0; i-- {
-		switchCase := stmt.Cases[i]
-		current = &ast.IfStatement{
-			Condition: &ast.ComparisonExpression{
-				Operator: ast.OperatorEq,
-				Left:     &ast.Identifier{Name: switchName},
-				Right:    switchCase.Test,
-			},
-			Consequence: switchCase.Consequent,
-			Alternative: []ast.Statement{current},
-		}
-	}
-	statements := []ast.Statement{
-		&ast.VariableDecl{Visibility: ast.VisibilityPublic, Kind: ast.DeclarationConst, Name: switchName, Value: stmt.Discriminant},
-		current,
-	}
-	lowered, err := lowerStatements(statements, symbols, functions)
+	discriminant, err := lowerExpression(stmt.Discriminant, symbols, functions)
 	if err != nil {
 		return nil, err
 	}
-	return &ir.IfStatement{Condition: &ir.BooleanLiteral{Value: true}, Consequence: lowered}, nil
+	out := &ir.SwitchStatement{Discriminant: discriminant}
+	for _, switchCase := range stmt.Cases {
+		test, err := lowerExpression(switchCase.Test, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		consequent, err := lowerStatements(switchCase.Consequent, symbols, functions)
+		if err != nil {
+			return nil, err
+		}
+		out.Cases = append(out.Cases, ir.SwitchCase{Test: test, Consequent: consequent})
+	}
+	defaultBody, err := lowerStatements(stmt.Default, symbols, functions)
+	if err != nil {
+		return nil, err
+	}
+	out.Default = defaultBody
+	return out, nil
 }

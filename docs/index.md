@@ -17,6 +17,7 @@ This docs folder covers the language and runtime surface currently implemented i
 - [Process](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/process.md)
 - [Networking Foundation](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/networking.md)
 - [Native Interop](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/native-interop.md)
+- [LLVM Backend](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/llvm-backend.md)
 - [Console](/C:/Users/ncksd/Documents/it/jayess/jayess-go/docs/console.md)
 
 ## Notes

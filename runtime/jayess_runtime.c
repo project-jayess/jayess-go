@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <time.h>
+#include <signal.h>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -21,8 +22,12 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <wincrypt.h>
+#include <bcrypt.h>
 #include <security.h>
 #include <schannel.h>
+#include <zlib.h>
+#include <brotli/encode.h>
+#include <brotli/decode.h>
 #else
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -30,15 +35,30 @@
 #include <netdb.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pwd.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/rsa.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
+#include <zlib.h>
+#include <brotli/encode.h>
+#include <brotli/decode.h>
+#endif
+
+#ifdef _WIN32
+#define JAYESS_THREAD_LOCAL __declspec(thread)
+#else
+#define JAYESS_THREAD_LOCAL __thread
 #endif
 
 typedef struct jayess_args {
@@ -50,11 +70,13 @@ typedef enum jayess_value_kind {
     JAYESS_VALUE_NULL = 0,
     JAYESS_VALUE_STRING = 1,
     JAYESS_VALUE_NUMBER = 2,
-    JAYESS_VALUE_BOOL = 3,
-    JAYESS_VALUE_OBJECT = 4,
-    JAYESS_VALUE_ARRAY = 5,
-    JAYESS_VALUE_UNDEFINED = 6,
-    JAYESS_VALUE_FUNCTION = 7
+    JAYESS_VALUE_BIGINT = 3,
+    JAYESS_VALUE_BOOL = 4,
+    JAYESS_VALUE_OBJECT = 5,
+    JAYESS_VALUE_ARRAY = 6,
+    JAYESS_VALUE_UNDEFINED = 7,
+    JAYESS_VALUE_FUNCTION = 8,
+    JAYESS_VALUE_SYMBOL = 9
 } jayess_value_kind;
 
 typedef struct jayess_value jayess_value;
@@ -64,6 +86,8 @@ typedef struct jayess_array jayess_array;
 typedef struct jayess_function jayess_function;
 typedef struct jayess_microtask jayess_microtask;
 typedef struct jayess_promise_dependent jayess_promise_dependent;
+typedef struct jayess_crypto_key_state jayess_crypto_key_state;
+typedef void (*jayess_native_handle_finalizer)(void *);
 
 #ifdef _WIN32
 typedef SOCKET jayess_socket_handle;
@@ -103,16 +127,28 @@ typedef struct jayess_tls_socket_state {
 
 struct jayess_object_entry {
     char *key;
+    jayess_value *key_value;
     jayess_value *value;
     jayess_object_entry *next;
 };
 
 struct jayess_object {
     jayess_object_entry *head;
+    jayess_object_entry *tail;
     jayess_promise_dependent *promise_dependents;
     FILE *stream_file;
     jayess_socket_handle socket_handle;
     void *native_handle;
+};
+
+struct jayess_crypto_key_state {
+#ifdef _WIN32
+    BCRYPT_KEY_HANDLE handle;
+#else
+    EVP_PKEY *pkey;
+#endif
+    int is_private;
+    char *type;
 };
 
 struct jayess_array {
@@ -137,9 +173,97 @@ typedef struct jayess_this_frame {
     struct jayess_this_frame *previous;
 } jayess_this_frame;
 
+typedef struct jayess_call_frame {
+    const char *name;
+    struct jayess_call_frame *previous;
+} jayess_call_frame;
+
+typedef struct jayess_worker_message {
+    jayess_value *value;
+    struct jayess_worker_message *next;
+} jayess_worker_message;
+
+typedef struct jayess_worker_state {
+    jayess_value *handler;
+    jayess_worker_message *inbound_head;
+    jayess_worker_message *inbound_tail;
+    jayess_worker_message *outbound_head;
+    jayess_worker_message *outbound_tail;
+    int terminate_requested;
+    int closed;
+#ifdef _WIN32
+    CRITICAL_SECTION lock;
+    CONDITION_VARIABLE inbound_available;
+    CONDITION_VARIABLE outbound_available;
+    HANDLE thread;
+#else
+    pthread_mutex_t lock;
+    pthread_cond_t inbound_available;
+    pthread_cond_t outbound_available;
+    pthread_t thread;
+#endif
+} jayess_worker_state;
+
+typedef struct jayess_shared_bytes_state {
+    jayess_array *bytes;
+#ifdef _WIN32
+    CRITICAL_SECTION lock;
+#else
+    pthread_mutex_t lock;
+#endif
+} jayess_shared_bytes_state;
+
+typedef struct jayess_managed_native_handle {
+    void *handle;
+    jayess_native_handle_finalizer finalizer;
+    int closed;
+} jayess_managed_native_handle;
+
+typedef struct jayess_fs_watch_state {
+    char *path;
+    int exists;
+    int is_dir;
+    double size;
+    double mtime_ms;
+    int closed;
+} jayess_fs_watch_state;
+
+typedef struct jayess_http_server_state {
+    jayess_value *handler;
+    jayess_value *tls_options;
+    jayess_value *backend_server;
+    int secure;
+    int http_mode;
+    int closed;
+} jayess_http_server_state;
+
+typedef struct jayess_http_response_state {
+    jayess_value *socket;
+    int headers_sent;
+    int finished;
+    int keep_alive;
+    int chunked;
+} jayess_http_response_state;
+
 typedef jayess_value *(*jayess_callback0)(void);
 typedef jayess_value *(*jayess_callback1)(jayess_value *);
 typedef jayess_value *(*jayess_callback2)(jayess_value *, jayess_value *);
+
+typedef struct jayess_bigint_words {
+    size_t length;
+    uint32_t *words;
+} jayess_bigint_words;
+
+typedef struct jayess_symbol {
+    uint64_t id;
+    char *description;
+} jayess_symbol;
+
+typedef struct jayess_symbol_registry_entry {
+    char *key;
+    jayess_value *symbol;
+    struct jayess_symbol_registry_entry *next;
+} jayess_symbol_registry_entry;
 
 typedef enum jayess_task_kind {
     JAYESS_TASK_PROMISE_CALLBACK = 0,
@@ -234,20 +358,25 @@ struct jayess_value {
     union {
         char *string_value;
         double number_value;
+        char *bigint_value;
         int bool_value;
         jayess_object *object_value;
         jayess_array *array_value;
         jayess_function *function_value;
+        jayess_symbol *symbol_value;
     } as;
 };
 
 char *jayess_value_stringify(jayess_value *value);
 double jayess_value_to_number(jayess_value *value);
+jayess_value *jayess_value_from_bigint(const char *value);
+jayess_value *jayess_value_from_symbol(const char *description);
 int jayess_value_eq(jayess_value *left, jayess_value *right);
 int jayess_value_is_nullish(jayess_value *value);
 const char *jayess_value_as_string(jayess_value *value);
 int jayess_value_as_bool(jayess_value *value);
 int jayess_string_eq(const char *left, const char *right);
+jayess_value *jayess_value_null(void);
 jayess_value *jayess_value_undefined(void);
 jayess_value *jayess_value_from_string(const char *value);
 jayess_value *jayess_value_from_number(double value);
@@ -257,14 +386,20 @@ jayess_value *jayess_value_from_array(jayess_array *value);
 jayess_value *jayess_value_from_args(jayess_args *args);
 jayess_value *jayess_value_from_function(void *callee, jayess_value *env, const char *name, const char *class_name, int param_count, int has_rest);
 jayess_value *jayess_value_get_member(jayess_value *target, const char *key);
+jayess_value *jayess_value_get_dynamic_index(jayess_value *target, jayess_value *index);
 jayess_object *jayess_value_as_object(jayess_value *value);
 jayess_value *jayess_value_array_includes(jayess_value *target, jayess_value *value);
 jayess_value *jayess_value_array_join(jayess_value *target, jayess_value *separator);
+jayess_value *jayess_value_object_symbols(jayess_value *target);
+int jayess_value_array_length(jayess_value *target);
 jayess_value *jayess_std_path_dirname(jayess_value *path);
 jayess_value *jayess_std_path_extname(jayess_value *path);
 jayess_value *jayess_std_error_new(jayess_value *name, jayess_value *message);
 jayess_value *jayess_std_fs_read_file(jayess_value *path, jayess_value *encoding);
 jayess_value *jayess_std_fs_write_file(jayess_value *path, jayess_value *content);
+jayess_value *jayess_std_fs_append_file(jayess_value *path, jayess_value *content);
+jayess_value *jayess_std_fs_symlink(jayess_value *target, jayess_value *path);
+jayess_value *jayess_std_fs_watch(jayess_value *path);
 jayess_object *jayess_object_new(void);
 void jayess_object_set_value(jayess_object *object, const char *key, jayess_value *value);
 jayess_value *jayess_object_get(jayess_object *object, const char *key);
@@ -276,6 +411,8 @@ jayess_value *jayess_array_get(jayess_array *array, int index);
 jayess_value *jayess_value_iterable_values(jayess_value *target);
 void jayess_push_this(jayess_value *value);
 void jayess_pop_this(void);
+void jayess_push_call_frame(const char *name);
+void jayess_pop_call_frame(void);
 void jayess_throw(jayess_value *value);
 int jayess_has_exception(void);
 jayess_value *jayess_take_exception(void);
@@ -286,19 +423,69 @@ void jayess_throw_not_function(void);
 
 static jayess_value jayess_null_singleton = {JAYESS_VALUE_NULL, {0}};
 static jayess_value jayess_undefined_singleton = {JAYESS_VALUE_UNDEFINED, {0}};
-static jayess_this_frame *jayess_this_stack = NULL;
-static jayess_value *jayess_current_exception = NULL;
-static jayess_args *jayess_current_args = NULL;
-static jayess_scheduler jayess_runtime_scheduler = {{NULL, NULL}, {NULL, NULL}, {NULL, NULL}, {NULL, NULL}};
+static JAYESS_THREAD_LOCAL jayess_this_frame *jayess_this_stack = NULL;
+static JAYESS_THREAD_LOCAL jayess_call_frame *jayess_call_stack = NULL;
+static JAYESS_THREAD_LOCAL jayess_value *jayess_current_exception = NULL;
+static JAYESS_THREAD_LOCAL jayess_args *jayess_current_args = NULL;
+static JAYESS_THREAD_LOCAL jayess_scheduler jayess_runtime_scheduler = {{NULL, NULL}, {NULL, NULL}, {NULL, NULL}, {NULL, NULL}};
 static jayess_io_worker_pool jayess_runtime_io_pool = {0};
-static int jayess_next_timer_id = 1;
+static JAYESS_THREAD_LOCAL int jayess_next_timer_id = 1;
+static uint64_t jayess_next_symbol_id = 1;
+static jayess_symbol_registry_entry *jayess_symbol_registry = NULL;
+static jayess_value *jayess_symbol_iterator_singleton = NULL;
+static jayess_value *jayess_symbol_async_iterator_singleton = NULL;
+static jayess_value *jayess_symbol_to_string_tag_singleton = NULL;
+static jayess_value *jayess_symbol_has_instance_singleton = NULL;
+static jayess_value *jayess_symbol_species_singleton = NULL;
+static jayess_value *jayess_symbol_match_singleton = NULL;
+static jayess_value *jayess_symbol_replace_singleton = NULL;
+static jayess_value *jayess_symbol_search_singleton = NULL;
+static jayess_value *jayess_symbol_split_singleton = NULL;
+static jayess_value *jayess_symbol_to_primitive_singleton = NULL;
+static jayess_value *jayess_process_signal_bus = NULL;
+#define JAYESS_SIGNAL_MAX 32
+static volatile sig_atomic_t jayess_pending_signals[JAYESS_SIGNAL_MAX] = {0};
+static sig_atomic_t jayess_installed_signals[JAYESS_SIGNAL_MAX] = {0};
 
 static jayess_value *jayess_std_promise_pending(void);
 static void jayess_enqueue_microtask(jayess_value *source, jayess_value *result, jayess_value *on_fulfilled, jayess_value *on_rejected);
 static void jayess_enqueue_promise_task(jayess_value *source, jayess_value *result, jayess_value *on_fulfilled, jayess_value *on_rejected, jayess_promise_action action);
 static void jayess_requeue_microtask(jayess_microtask *task);
 static void jayess_append_microtask(jayess_microtask *task);
+static int jayess_object_entry_is_symbol(jayess_object_entry *entry);
+static int jayess_object_entry_matches_string(jayess_object_entry *entry, const char *key);
+static int jayess_object_entry_matches_value(jayess_object_entry *entry, jayess_value *key);
+static jayess_object_entry *jayess_object_find_value(jayess_object *object, jayess_value *key);
+static void jayess_object_set_key_value(jayess_object *object, jayess_value *key, jayess_value *value);
+static jayess_value *jayess_object_get_key_value(jayess_object *object, jayess_value *key);
+static void jayess_object_delete_key_value(jayess_object *object, jayess_value *key);
+static void jayess_print_property_key_inline(jayess_object_entry *entry);
+static jayess_value *jayess_value_to_property_key(jayess_value *key);
+static jayess_value *jayess_std_symbol_to_string_method(jayess_value *env);
+static jayess_symbol_registry_entry *jayess_symbol_registry_find(const char *key);
+static jayess_value *jayess_symbol_singleton(jayess_value **slot, const char *description);
+static jayess_value *jayess_std_async_iterator_next_method(jayess_value *env);
+static jayess_value *jayess_std_async_iterator_identity_method(jayess_value *env);
+static jayess_value *jayess_std_iterator_protocol_values(jayess_value *iterator);
+static jayess_value *jayess_std_iterable_protocol_values(jayess_value *target);
 static jayess_array *jayess_std_bytes_slot(jayess_value *target);
+static const char *jayess_std_typed_array_kind(jayess_value *target);
+static int jayess_std_typed_array_element_size(const char *kind);
+static int jayess_std_is_typed_array_kind(const char *kind);
+static int jayess_std_is_typed_array(jayess_value *target);
+static int jayess_std_typed_array_length_from_bytes(jayess_array *bytes, const char *kind);
+static jayess_value *jayess_std_uint8_array_from_bytes(const unsigned char *bytes, size_t length);
+static double jayess_std_typed_array_get_number(jayess_value *target, int index);
+static void jayess_std_typed_array_set_number(jayess_value *target, int index, double number);
+static jayess_value *jayess_std_typed_array_new(const char *kind, jayess_value *source);
+static jayess_value *jayess_std_typed_array_fill_method(jayess_value *env, jayess_value *value);
+static jayess_value *jayess_std_typed_array_includes_method(jayess_value *env, jayess_value *value);
+static jayess_value *jayess_std_typed_array_index_of_method(jayess_value *env, jayess_value *needle);
+static jayess_value *jayess_std_typed_array_set_method(jayess_value *env, jayess_value *source, jayess_value *offset_value);
+static jayess_value *jayess_std_typed_array_slice_method(jayess_value *env, jayess_value *start_value, jayess_value *end_value);
+static jayess_value *jayess_std_typed_array_slice_values(jayess_value *env, int start, int end, int has_end);
+static jayess_value *jayess_std_uint8_index_of_method(jayess_value *env, jayess_value *needle);
+static int jayess_std_uint8_clamped_index(jayess_value *value, int length, int default_value);
 static jayess_value *jayess_std_socket_read_method(jayess_value *env, jayess_value *size_value);
 static jayess_value *jayess_std_socket_read_bytes_method(jayess_value *env, jayess_value *size_value);
 static jayess_value *jayess_std_socket_write_method(jayess_value *env, jayess_value *value);
@@ -313,6 +500,13 @@ static jayess_value *jayess_std_socket_once_method(jayess_value *env, jayess_val
 static jayess_value *jayess_std_socket_address_method(jayess_value *env);
 static jayess_value *jayess_std_socket_remote_method(jayess_value *env);
 static jayess_value *jayess_std_socket_get_peer_certificate_method(jayess_value *env);
+static jayess_value *jayess_std_datagram_socket_send_method(jayess_value *env, jayess_value *value, jayess_value *port_value, jayess_value *host_value);
+static jayess_value *jayess_std_datagram_socket_receive_method(jayess_value *env, jayess_value *size_value);
+static jayess_value *jayess_std_datagram_socket_set_broadcast_method(jayess_value *env, jayess_value *enabled);
+static jayess_value *jayess_std_datagram_socket_join_group_method(jayess_value *env, jayess_value *group_value, jayess_value *interface_value);
+static jayess_value *jayess_std_datagram_socket_leave_group_method(jayess_value *env, jayess_value *group_value, jayess_value *interface_value);
+static jayess_value *jayess_std_datagram_socket_set_multicast_interface_method(jayess_value *env, jayess_value *interface_value);
+static jayess_value *jayess_std_datagram_socket_set_multicast_loopback_method(jayess_value *env, jayess_value *enabled);
 static jayess_value *jayess_std_server_on_method(jayess_value *env, jayess_value *event, jayess_value *callback);
 static jayess_value *jayess_std_server_once_method(jayess_value *env, jayess_value *event, jayess_value *callback);
 static jayess_value *jayess_std_server_accept_method(jayess_value *env);
@@ -322,11 +516,19 @@ static jayess_value *jayess_std_server_set_timeout_method(jayess_value *env, jay
 static jayess_value *jayess_std_server_accept_async_method(jayess_value *env);
 static void jayess_std_stream_emit(jayess_value *env, const char *event, jayess_value *argument);
 static int jayess_std_socket_configure_timeout(jayess_socket_handle handle, int timeout);
+static jayess_value *jayess_std_http_server_listen_method(jayess_value *env, jayess_value *port_value, jayess_value *host_value);
+static jayess_value *jayess_std_http_server_close_method(jayess_value *env);
+static jayess_value *jayess_std_http_response_set_header_method(jayess_value *env, jayess_value *name, jayess_value *value);
+static jayess_value *jayess_std_http_response_write_method(jayess_value *env, jayess_value *chunk);
+static jayess_value *jayess_std_http_response_end_method(jayess_value *env, jayess_value *chunk);
+jayess_value *jayess_std_https_create_server(jayess_value *options, jayess_value *handler);
+jayess_value *jayess_std_tls_create_server(jayess_value *options, jayess_value *handler);
 jayess_value *jayess_std_http_parse_request(jayess_value *input);
 jayess_value *jayess_std_http_format_request(jayess_value *parts);
 jayess_value *jayess_std_http_parse_response(jayess_value *input);
 jayess_value *jayess_std_http_format_response(jayess_value *parts);
 jayess_value *jayess_std_url_parse(jayess_value *input);
+jayess_value *jayess_std_net_listen(jayess_value *options);
 jayess_value *jayess_std_http_request(jayess_value *options);
 jayess_value *jayess_std_http_get(jayess_value *input);
 jayess_value *jayess_std_http_request_stream(jayess_value *options);
@@ -348,6 +550,66 @@ jayess_value *jayess_std_tls_backend(void);
 jayess_value *jayess_std_tls_connect(jayess_value *options);
 jayess_value *jayess_std_https_is_available(void);
 jayess_value *jayess_std_https_backend(void);
+static int jayess_spawn_shell_command(const char *command, const char *stdin_path, const char *stdout_path, const char *stderr_path, int *process_id);
+static int jayess_spawn_process_argv(const char *file, jayess_array *args, const char *stdin_path, const char *stdout_path, const char *stderr_path, int *process_id);
+static jayess_value *jayess_std_child_process_result(int status, int pid, const char *stdout_text, const char *stderr_text);
+static int jayess_std_child_process_signal_number(const char *signal_name);
+static const char *jayess_std_process_signal_name(int signal_number);
+static jayess_value *jayess_std_process_signal_bus_value(void);
+static int jayess_std_process_install_signal(int signal_number);
+static void jayess_runtime_note_signal(int signal_number);
+static void jayess_runtime_dispatch_pending_signals(void);
+static jayess_shared_bytes_state *jayess_std_shared_bytes_state(jayess_value *target);
+static jayess_array *jayess_std_bytes_slot(jayess_value *target);
+static int jayess_std_byte_length(jayess_value *target);
+static int jayess_std_byte_read(jayess_value *target, int offset);
+static void jayess_std_byte_write(jayess_value *target, int offset, int value);
+static unsigned int jayess_std_data_view_read_u32_target(jayess_value *target, int offset, int little_endian);
+static void jayess_std_data_view_write_u32_target(jayess_value *target, int offset, unsigned int number, int little_endian);
+static unsigned long long jayess_std_data_view_read_u64_target(jayess_value *target, int offset, int little_endian);
+static void jayess_std_data_view_write_u64_target(jayess_value *target, int offset, unsigned long long number, int little_endian);
+static jayess_value *jayess_worker_clone_value(jayess_value *value, int depth, int *ok);
+static jayess_value *jayess_std_worker_post_message_method(jayess_value *env, jayess_value *message);
+static jayess_value *jayess_std_worker_receive_method(jayess_value *env, jayess_value *timeout);
+static jayess_value *jayess_std_worker_terminate_method(jayess_value *env);
+static jayess_worker_message *jayess_worker_message_new(jayess_value *value);
+static void jayess_worker_queue_push(jayess_worker_message **head, jayess_worker_message **tail, jayess_worker_message *message);
+static jayess_worker_message *jayess_worker_queue_pop(jayess_worker_message **head, jayess_worker_message **tail);
+static void jayess_worker_queue_free(jayess_worker_message **head, jayess_worker_message **tail);
+static jayess_value *jayess_worker_make_envelope(int ok, jayess_value *value, jayess_value *error);
+static int jayess_worker_wait_outbound(jayess_worker_state *state, double timeout_ms);
+static void jayess_worker_execute_message(jayess_worker_state *state, jayess_value *message);
+#ifdef _WIN32
+static DWORD WINAPI jayess_worker_thread_main(LPVOID raw);
+#else
+static void *jayess_worker_thread_main(void *raw);
+#endif
+static int jayess_std_crypto_copy_bytes(jayess_value *value, unsigned char **out_bytes, size_t *out_length);
+static char *jayess_std_crypto_hex_encode(const unsigned char *bytes, size_t length);
+static int jayess_std_crypto_equal_name(const char *left, const char *right);
+static void jayess_std_crypto_normalize_name(char *text);
+static int jayess_std_crypto_cipher_key_length(const char *algorithm);
+static int jayess_std_crypto_option_bytes(jayess_value *options, const char *key, unsigned char **out_bytes, size_t *out_length, int required);
+static jayess_value *jayess_std_crypto_key_value(const char *type, int is_private);
+static jayess_crypto_key_state *jayess_std_crypto_key_state_from_value(jayess_value *value);
+static jayess_value *jayess_std_compression_transform(jayess_value *value, int window_bits, int mode);
+jayess_value *jayess_std_compression_gzip(jayess_value *value);
+jayess_value *jayess_std_compression_gunzip(jayess_value *value);
+jayess_value *jayess_std_compression_deflate(jayess_value *value);
+jayess_value *jayess_std_compression_inflate(jayess_value *value);
+jayess_value *jayess_std_compression_brotli(jayess_value *value);
+jayess_value *jayess_std_compression_unbrotli(jayess_value *value);
+static jayess_value *jayess_std_compression_stream_new(const char *mode);
+static jayess_value *jayess_std_compression_stream_write_method(jayess_value *env, jayess_value *value);
+static jayess_value *jayess_std_compression_stream_end_method(jayess_value *env);
+static jayess_value *jayess_std_compression_stream_read_method(jayess_value *env, jayess_value *size_value);
+static jayess_value *jayess_std_compression_stream_read_bytes_method(jayess_value *env, jayess_value *size_value);
+static jayess_value *jayess_std_compression_stream_pipe_method(jayess_value *env, jayess_value *destination);
+static jayess_value *jayess_std_compression_stream_on_method(jayess_value *env, jayess_value *event, jayess_value *callback);
+static jayess_value *jayess_std_compression_stream_once_method(jayess_value *env, jayess_value *event, jayess_value *callback);
+static void jayess_std_compression_stream_mark_ended(jayess_value *env);
+static jayess_value *jayess_std_writable_write(jayess_value *destination, jayess_value *chunk);
+static jayess_value *jayess_std_writable_end(jayess_value *destination);
 static int jayess_std_socket_runtime_ready(void);
 static jayess_value *jayess_std_read_stream_read_method(jayess_value *env, jayess_value *size_value);
 static jayess_value *jayess_std_read_stream_read_bytes_method(jayess_value *env, jayess_value *size_value);
@@ -363,9 +625,19 @@ static jayess_value *jayess_std_write_stream_on_method(jayess_value *env, jayess
 static jayess_value *jayess_std_write_stream_once_method(jayess_value *env, jayess_value *event, jayess_value *callback);
 static jayess_value *jayess_std_write_stream_end_method(jayess_value *env);
 static int jayess_std_stream_requested_size(jayess_value *size_value, int default_size);
+static int jayess_std_kind_is(jayess_value *target, const char *kind);
 static void jayess_std_stream_emit_error(jayess_value *env, const char *message);
+static void jayess_std_stream_register_error_handler(jayess_value *env, jayess_value *callback);
+static void jayess_std_stream_register_error_once(jayess_value *env, jayess_value *callback);
+static jayess_value *jayess_std_fs_watch_poll_method(jayess_value *env);
+static jayess_value *jayess_std_fs_watch_poll_async_method(jayess_value *env, jayess_value *timeout_ms);
+static jayess_value *jayess_std_fs_watch_poll_async_tick(jayess_value *env);
+static jayess_value *jayess_std_fs_watch_close_method(jayess_value *env);
+static jayess_value *jayess_std_fs_watch_on_method(jayess_value *env, jayess_value *event, jayess_value *callback);
+static jayess_value *jayess_std_fs_watch_once_method(jayess_value *env, jayess_value *event, jayess_value *callback);
 static int jayess_std_socket_close_handle(jayess_socket_handle handle);
 static jayess_value *jayess_std_socket_value_from_handle(jayess_socket_handle handle, const char *remote_address, int remote_port);
+static jayess_value *jayess_std_datagram_socket_value_from_handle(jayess_socket_handle handle);
 static void jayess_std_socket_set_local_endpoint(jayess_value *socket_value, jayess_socket_handle handle);
 static void jayess_std_socket_set_remote_family(jayess_value *socket_value, int family);
 static jayess_socket_handle jayess_std_socket_handle(jayess_value *env);
@@ -384,18 +656,21 @@ static void jayess_http_body_stream_close_socket(jayess_value *env);
 static void jayess_http_body_stream_close_native(jayess_value *env);
 static jayess_value *jayess_http_body_stream_read_chunk(jayess_value *env, jayess_value *size_value, int as_bytes);
 static int jayess_http_text_eq_ci(const char *left, const char *right);
+static jayess_value *jayess_std_tls_normalize_alpn_protocols(jayess_value *value);
+static int jayess_std_tls_build_alpn_wire(jayess_value *protocols_value, unsigned char **out_buffer, size_t *out_length);
+static jayess_value *jayess_std_tls_subject_alt_names(jayess_value *env);
 
 #ifdef _WIN32
 static jayess_tls_socket_state *jayess_std_tls_state(jayess_value *env);
+static LPCWSTR jayess_std_crypto_algorithm_id(const char *name);
+static int jayess_std_crypto_sha256_bytes(const unsigned char *input, size_t input_length, unsigned char *output, DWORD *output_length);
 static int jayess_std_tls_send_all(jayess_socket_handle handle, const unsigned char *buffer, size_t length);
 static int jayess_std_tls_state_free(jayess_tls_socket_state *state, int close_handle);
 static int jayess_std_tls_read_bytes(jayess_value *env, unsigned char *buffer, int max_count, int *did_timeout);
 static int jayess_std_tls_write_bytes(jayess_value *env, const unsigned char *buffer, int length, int *did_timeout);
 static jayess_value *jayess_std_tls_connect_socket(jayess_value *options);
-static jayess_value *jayess_std_tls_normalize_alpn_protocols(jayess_value *value);
-static int jayess_std_tls_build_alpn_wire(jayess_value *protocols_value, unsigned char **out_buffer, size_t *out_length);
+static jayess_value *jayess_std_tls_accept_socket(jayess_value *socket_value, jayess_value *options);
 static void jayess_std_https_copy_tls_request_settings(jayess_object *target, jayess_object *source);
-static jayess_value *jayess_std_tls_subject_alt_names(jayess_value *env);
 #ifdef _WIN32
 static int jayess_std_windows_load_certificates_from_file(HCERTSTORE store, const char *path);
 static int jayess_std_windows_load_certificates_from_path(HCERTSTORE store, const char *path);
@@ -831,6 +1106,67 @@ static double jayess_path_modified_time_ms_text(const char *path_text) {
 #endif
 }
 
+static void jayess_fs_watch_snapshot_text(const char *path_text, int *exists, int *is_dir, double *size, double *mtime_ms) {
+    int found = jayess_path_exists_text(path_text);
+    int dir = 0;
+    double current_size = 0.0;
+    double current_mtime = 0.0;
+    if (found) {
+        dir = jayess_path_is_dir_text(path_text);
+        current_size = jayess_path_file_size_text(path_text);
+        current_mtime = jayess_path_modified_time_ms_text(path_text);
+    }
+    if (exists != NULL) {
+        *exists = found;
+    }
+    if (is_dir != NULL) {
+        *is_dir = dir;
+    }
+    if (size != NULL) {
+        *size = current_size;
+    }
+    if (mtime_ms != NULL) {
+        *mtime_ms = current_mtime;
+    }
+}
+
+static jayess_fs_watch_state *jayess_std_fs_watch_state(jayess_value *env) {
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL || !jayess_std_kind_is(env, "Watcher")) {
+        return NULL;
+    }
+    return (jayess_fs_watch_state *)env->as.object_value->native_handle;
+}
+
+static void jayess_std_fs_watch_apply_snapshot(jayess_value *env, int exists, int is_dir, double size, double mtime_ms) {
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return;
+    }
+    jayess_object_set_value(env->as.object_value, "exists", jayess_value_from_bool(exists));
+    jayess_object_set_value(env->as.object_value, "isDir", jayess_value_from_bool(is_dir));
+    jayess_object_set_value(env->as.object_value, "isFile", jayess_value_from_bool(exists && !is_dir));
+    jayess_object_set_value(env->as.object_value, "size", jayess_value_from_number(size));
+    jayess_object_set_value(env->as.object_value, "mtimeMs", jayess_value_from_number(mtime_ms));
+}
+
+static jayess_value *jayess_std_fs_watch_event_value(jayess_fs_watch_state *state) {
+    jayess_object *event;
+    if (state == NULL) {
+        return jayess_value_null();
+    }
+    event = jayess_object_new();
+    if (event == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(event, "type", jayess_value_from_string("change"));
+    jayess_object_set_value(event, "path", jayess_value_from_string(state->path != NULL ? state->path : ""));
+    jayess_object_set_value(event, "exists", jayess_value_from_bool(state->exists));
+    jayess_object_set_value(event, "isDir", jayess_value_from_bool(state->is_dir));
+    jayess_object_set_value(event, "isFile", jayess_value_from_bool(state->exists && !state->is_dir));
+    jayess_object_set_value(event, "size", jayess_value_from_number(state->size));
+    jayess_object_set_value(event, "mtimeMs", jayess_value_from_number(state->mtime_ms));
+    return jayess_value_from_object(event);
+}
+
 static const char *jayess_path_permissions_text(const char *path_text) {
 #ifdef _WIN32
     (void)path_text;
@@ -995,7 +1331,7 @@ void jayess_print_object(jayess_object *object) {
         if (!first) {
             fputs(", ", stdout);
         }
-        fputs(current->key, stdout);
+        jayess_print_property_key_inline(current);
         fputs(": ", stdout);
         jayess_print_value_inline(current->value);
         first = 0;
@@ -1094,8 +1430,25 @@ char *jayess_value_stringify(jayess_value *value) {
         return jayess_strdup(value->as.string_value != NULL ? value->as.string_value : "");
     case JAYESS_VALUE_NUMBER:
         return jayess_number_to_string(value->as.number_value);
+    case JAYESS_VALUE_BIGINT:
+        return jayess_strdup(value->as.bigint_value != NULL ? value->as.bigint_value : "0");
     case JAYESS_VALUE_BOOL:
         return jayess_strdup(value->as.bool_value ? "true" : "false");
+    case JAYESS_VALUE_SYMBOL: {
+        const char *description = NULL;
+        size_t length;
+        char *out;
+        if (value->as.symbol_value != NULL) {
+            description = value->as.symbol_value->description;
+        }
+        length = strlen("Symbol(") + (description != NULL ? strlen(description) : 0) + strlen(")") + 1;
+        out = (char *)malloc(length);
+        if (out == NULL) {
+            return NULL;
+        }
+        snprintf(out, length, "Symbol(%s)", description != NULL ? description : "");
+        return out;
+    }
     case JAYESS_VALUE_FUNCTION:
         if (value->as.function_value != NULL && value->as.function_value->name != NULL) {
             size_t length = strlen(value->as.function_value->name) + 12;
@@ -1219,6 +1572,16 @@ char *jayess_concat_values(jayess_value *left, jayess_value *right) {
     return result;
 }
 
+jayess_value *jayess_value_add(jayess_value *left, jayess_value *right) {
+    if ((left != NULL && left->kind == JAYESS_VALUE_STRING) || (right != NULL && right->kind == JAYESS_VALUE_STRING)) {
+        char *text = jayess_concat_values(left, right);
+        jayess_value *result = jayess_value_from_string(text != NULL ? text : "");
+        free(text);
+        return result;
+    }
+    return jayess_value_from_number(jayess_value_to_number(left) + jayess_value_to_number(right));
+}
+
 static void jayess_print_value_inline(jayess_value *value) {
     if (value == NULL) {
         fputs("null", stdout);
@@ -1235,8 +1598,19 @@ static void jayess_print_value_inline(jayess_value *value) {
     case JAYESS_VALUE_NUMBER:
         printf("%g", value->as.number_value);
         break;
+    case JAYESS_VALUE_BIGINT:
+        fputs(value->as.bigint_value != NULL ? value->as.bigint_value : "0", stdout);
+        fputc('n', stdout);
+        break;
     case JAYESS_VALUE_BOOL:
         fputs(value->as.bool_value ? "true" : "false", stdout);
+        break;
+    case JAYESS_VALUE_SYMBOL:
+        if (value->as.symbol_value != NULL && value->as.symbol_value->description != NULL) {
+            printf("Symbol(%s)", value->as.symbol_value->description);
+        } else {
+            fputs("Symbol()", stdout);
+        }
         break;
     case JAYESS_VALUE_OBJECT:
         if (value->as.object_value == NULL) {
@@ -1249,7 +1623,7 @@ static void jayess_print_value_inline(jayess_value *value) {
                 if (!first) {
                     fputs(", ", stdout);
                 }
-                fputs(current->key, stdout);
+                jayess_print_property_key_inline(current);
                 fputs(": ", stdout);
                 jayess_print_value_inline(current->value);
                 first = 0;
@@ -1375,14 +1749,26 @@ char *jayess_read_key(const char *prompt) {
 }
 
 void jayess_sleep_ms(int milliseconds) {
+    int remaining;
     if (milliseconds <= 0) {
+        jayess_runtime_dispatch_pending_signals();
         return;
     }
+    remaining = milliseconds;
+    while (remaining > 0) {
+        int step = remaining > 10 ? 10 : remaining;
+        jayess_runtime_dispatch_pending_signals();
 #ifdef _WIN32
-    Sleep((DWORD)milliseconds);
+        Sleep((DWORD)step);
 #else
-    usleep((useconds_t)milliseconds * 1000);
+        usleep((useconds_t)step * 1000);
 #endif
+        jayess_runtime_dispatch_pending_signals();
+        if (jayess_has_exception()) {
+            return;
+        }
+        remaining -= step;
+    }
 }
 
 jayess_args *jayess_make_args(int argc, char **argv) {
@@ -1430,6 +1816,7 @@ jayess_object *jayess_object_new(void) {
         return NULL;
     }
     object->head = NULL;
+    object->tail = NULL;
     object->promise_dependents = NULL;
     object->stream_file = NULL;
     object->socket_handle = JAYESS_INVALID_SOCKET;
@@ -1440,7 +1827,7 @@ jayess_object *jayess_object_new(void) {
 static jayess_object_entry *jayess_object_find(jayess_object *object, const char *key) {
     jayess_object_entry *current = object != NULL ? object->head : NULL;
     while (current != NULL) {
-        if (strcmp(current->key, key) == 0) {
+        if (jayess_object_entry_matches_string(current, key)) {
             return current;
         }
         current = current->next;
@@ -1449,65 +1836,35 @@ static jayess_object_entry *jayess_object_find(jayess_object *object, const char
 }
 
 void jayess_object_set_value(jayess_object *object, const char *key, jayess_value *value) {
-    jayess_object_entry *entry;
+    jayess_value temp_key;
 
     if (object == NULL || key == NULL || value == NULL) {
         return;
     }
-
-    entry = jayess_object_find(object, key);
-    if (entry == NULL) {
-        entry = (jayess_object_entry *)malloc(sizeof(jayess_object_entry));
-        if (entry == NULL) {
-            return;
-        }
-        entry->key = jayess_strdup(key);
-        entry->value = NULL;
-        entry->next = object->head;
-        object->head = entry;
-    }
-    entry->value = value;
+    temp_key.kind = JAYESS_VALUE_STRING;
+    temp_key.as.string_value = (char *)key;
+    jayess_object_set_key_value(object, &temp_key, value);
 }
 
 jayess_value *jayess_object_get(jayess_object *object, const char *key) {
-    jayess_object_entry *entry;
+    jayess_value temp_key;
 
     if (object == NULL || key == NULL) {
         return NULL;
     }
-
-    entry = jayess_object_find(object, key);
-    if (entry == NULL) {
-        return NULL;
-    }
-
-    return entry->value;
+    temp_key.kind = JAYESS_VALUE_STRING;
+    temp_key.as.string_value = (char *)key;
+    return jayess_object_get_key_value(object, &temp_key);
 }
 
 void jayess_object_delete(jayess_object *object, const char *key) {
-    jayess_object_entry *current;
-    jayess_object_entry *previous;
-
+    jayess_value temp_key;
     if (object == NULL || key == NULL) {
         return;
     }
-
-    previous = NULL;
-    current = object->head;
-    while (current != NULL) {
-        if (strcmp(current->key, key) == 0) {
-            if (previous == NULL) {
-                object->head = current->next;
-            } else {
-                previous->next = current->next;
-            }
-            free(current->key);
-            free(current);
-            return;
-        }
-        previous = current;
-        current = current->next;
-    }
+    temp_key.kind = JAYESS_VALUE_STRING;
+    temp_key.as.string_value = (char *)key;
+    jayess_object_delete_key_value(object, &temp_key);
 }
 
 jayess_array *jayess_object_keys(jayess_object *object) {
@@ -1519,10 +1876,95 @@ jayess_array *jayess_object_keys(jayess_object *object) {
     }
     current = object->head;
     while (current != NULL) {
-        jayess_array_set_value(keys, index++, jayess_value_from_string(current->key));
+        if (current->key != NULL && strncmp(current->key, "__jayess_", 10) != 0) {
+            jayess_array_set_value(keys, index++, jayess_value_from_string(current->key));
+        }
         current = current->next;
     }
     return keys;
+}
+
+static char *jayess_accessor_key(const char *prefix, const char *key) {
+    size_t prefix_len;
+    size_t key_len;
+    char *out;
+    if (prefix == NULL || key == NULL) {
+        return NULL;
+    }
+    prefix_len = strlen(prefix);
+    key_len = strlen(key);
+    out = (char *)malloc(prefix_len + key_len + 1);
+    if (out == NULL) {
+        return NULL;
+    }
+    memcpy(out, prefix, prefix_len);
+    memcpy(out + prefix_len, key, key_len + 1);
+    return out;
+}
+
+static jayess_value *jayess_value_call_with_this(jayess_value *callback, jayess_value *this_value, jayess_value *argument, int argument_count) {
+    jayess_function *fn;
+    jayess_value *result = NULL;
+    jayess_value *bound_this = NULL;
+    if (callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION || callback->as.function_value == NULL) {
+        return jayess_value_undefined();
+    }
+    fn = callback->as.function_value;
+    if (fn->callee == NULL) {
+        return jayess_value_undefined();
+    }
+    if (fn->bound_this != NULL && fn->bound_this->kind != JAYESS_VALUE_UNDEFINED) {
+        bound_this = fn->bound_this;
+    }
+    jayess_push_this(bound_this != NULL ? bound_this : (this_value != NULL ? this_value : jayess_value_undefined()));
+    if (fn->env != NULL) {
+        if (argument_count <= 0) {
+            result = ((jayess_callback1)fn->callee)(fn->env);
+        } else {
+            result = ((jayess_callback2)fn->callee)(fn->env, argument != NULL ? argument : jayess_value_undefined());
+        }
+    } else if (argument_count <= 0) {
+        result = ((jayess_callback0)fn->callee)();
+    } else {
+        result = ((jayess_callback1)fn->callee)(argument != NULL ? argument : jayess_value_undefined());
+    }
+    jayess_pop_this();
+    return result != NULL ? result : jayess_value_undefined();
+}
+
+static jayess_value *jayess_value_call_two_with_this(jayess_value *callback, jayess_value *this_value, jayess_value *first, jayess_value *second) {
+    jayess_function *fn;
+    jayess_value *result = NULL;
+    jayess_value *bound_this = NULL;
+    typedef jayess_value *(*jayess_callback3)(jayess_value *, jayess_value *, jayess_value *);
+    if (callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION || callback->as.function_value == NULL) {
+        return jayess_value_undefined();
+    }
+    fn = callback->as.function_value;
+    if (fn->callee == NULL) {
+        return jayess_value_undefined();
+    }
+    if (fn->bound_this != NULL && fn->bound_this->kind != JAYESS_VALUE_UNDEFINED) {
+        bound_this = fn->bound_this;
+    }
+    jayess_push_this(bound_this != NULL ? bound_this : (this_value != NULL ? this_value : jayess_value_undefined()));
+    if (fn->env != NULL) {
+        if (fn->param_count <= 0) {
+            result = ((jayess_callback1)fn->callee)(fn->env);
+        } else if (fn->param_count == 1) {
+            result = ((jayess_callback2)fn->callee)(fn->env, first != NULL ? first : jayess_value_undefined());
+        } else {
+            result = ((jayess_callback3)fn->callee)(fn->env, first != NULL ? first : jayess_value_undefined(), second != NULL ? second : jayess_value_undefined());
+        }
+    } else if (fn->param_count <= 0) {
+        result = ((jayess_callback0)fn->callee)();
+    } else if (fn->param_count == 1) {
+        result = ((jayess_callback1)fn->callee)(first != NULL ? first : jayess_value_undefined());
+    } else {
+        result = ((jayess_callback2)fn->callee)(first != NULL ? first : jayess_value_undefined(), second != NULL ? second : jayess_value_undefined());
+    }
+    jayess_pop_this();
+    return result != NULL ? result : jayess_value_undefined();
 }
 
 static int jayess_std_kind_is(jayess_value *target, const char *kind) {
@@ -1532,6 +1974,161 @@ static int jayess_std_kind_is(jayess_value *target, const char *kind) {
     }
     kind_value = jayess_object_get(target->as.object_value, "__jayess_std_kind");
     return kind_value != NULL && kind_value->kind == JAYESS_VALUE_STRING && strcmp(kind_value->as.string_value, kind) == 0;
+}
+
+static int jayess_object_entry_is_symbol(jayess_object_entry *entry) {
+    return entry != NULL && entry->key == NULL && entry->key_value != NULL && entry->key_value->kind == JAYESS_VALUE_SYMBOL;
+}
+
+static int jayess_object_entry_matches_string(jayess_object_entry *entry, const char *key) {
+    return entry != NULL && entry->key != NULL && key != NULL && strcmp(entry->key, key) == 0;
+}
+
+static int jayess_object_entry_matches_value(jayess_object_entry *entry, jayess_value *key) {
+    if (entry == NULL || key == NULL) {
+        return 0;
+    }
+    if (key->kind == JAYESS_VALUE_STRING) {
+        return jayess_object_entry_matches_string(entry, key->as.string_value);
+    }
+    if (key->kind == JAYESS_VALUE_SYMBOL) {
+        return jayess_object_entry_is_symbol(entry) && jayess_value_eq(entry->key_value, key);
+    }
+    return 0;
+}
+
+static jayess_object_entry *jayess_object_find_value(jayess_object *object, jayess_value *key) {
+    jayess_object_entry *current = object != NULL ? object->head : NULL;
+    while (current != NULL) {
+        if (jayess_object_entry_matches_value(current, key)) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+static void jayess_object_set_key_value(jayess_object *object, jayess_value *key, jayess_value *value) {
+    jayess_object_entry *entry;
+    if (object == NULL || key == NULL || value == NULL) {
+        return;
+    }
+    if (key->kind != JAYESS_VALUE_STRING && key->kind != JAYESS_VALUE_SYMBOL) {
+        return;
+    }
+    entry = jayess_object_find_value(object, key);
+    if (entry == NULL) {
+        entry = (jayess_object_entry *)malloc(sizeof(jayess_object_entry));
+        if (entry == NULL) {
+            return;
+        }
+        entry->key = NULL;
+        entry->key_value = NULL;
+        entry->value = NULL;
+        entry->next = NULL;
+        if (key->kind == JAYESS_VALUE_STRING) {
+            entry->key = jayess_strdup(key->as.string_value != NULL ? key->as.string_value : "");
+        } else {
+            entry->key_value = key;
+        }
+        if (object->tail != NULL) {
+            object->tail->next = entry;
+        } else {
+            object->head = entry;
+        }
+        object->tail = entry;
+    }
+    entry->value = value;
+}
+
+static jayess_value *jayess_object_get_key_value(jayess_object *object, jayess_value *key) {
+    jayess_object_entry *entry = jayess_object_find_value(object, key);
+    if (entry == NULL) {
+        return NULL;
+    }
+    return entry->value;
+}
+
+static void jayess_object_delete_key_value(jayess_object *object, jayess_value *key) {
+    jayess_object_entry *current;
+    jayess_object_entry *previous;
+    if (object == NULL || key == NULL) {
+        return;
+    }
+    previous = NULL;
+    current = object->head;
+    while (current != NULL) {
+        if (jayess_object_entry_matches_value(current, key)) {
+            if (previous == NULL) {
+                object->head = current->next;
+            } else {
+                previous->next = current->next;
+            }
+            if (object->tail == current) {
+                object->tail = previous;
+            }
+            free(current->key);
+            free(current);
+            return;
+        }
+        previous = current;
+        current = current->next;
+    }
+}
+
+static void jayess_print_property_key_inline(jayess_object_entry *entry) {
+    if (entry == NULL) {
+        return;
+    }
+    if (entry->key != NULL) {
+        fputs(entry->key, stdout);
+        return;
+    }
+    if (entry->key_value != NULL) {
+        putchar('[');
+        jayess_print_value_inline(entry->key_value);
+        putchar(']');
+    }
+}
+
+static jayess_value *jayess_value_to_property_key(jayess_value *key) {
+    char *text;
+    jayess_value *property_key;
+    if (key == NULL) {
+        return NULL;
+    }
+    if (key->kind == JAYESS_VALUE_SYMBOL) {
+        return key;
+    }
+    text = jayess_value_stringify(key);
+    if (text == NULL) {
+        return NULL;
+    }
+    property_key = jayess_value_from_string(text);
+    free(text);
+    return property_key;
+}
+
+static jayess_symbol_registry_entry *jayess_symbol_registry_find(const char *key) {
+    jayess_symbol_registry_entry *current = jayess_symbol_registry;
+    const char *text = key != NULL ? key : "";
+    while (current != NULL) {
+        if (current->key != NULL && strcmp(current->key, text) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+static jayess_value *jayess_symbol_singleton(jayess_value **slot, const char *description) {
+    if (slot == NULL) {
+        return jayess_value_undefined();
+    }
+    if (*slot == NULL) {
+        *slot = jayess_value_from_symbol(description);
+    }
+    return *slot != NULL ? *slot : jayess_value_undefined();
 }
 
 static jayess_array *jayess_std_array_slot(jayess_value *target, const char *key) {
@@ -1568,6 +2165,41 @@ static int jayess_std_set_index_of(jayess_value *target, jayess_value *value) {
     }
     for (i = 0; i < values->count; i++) {
         if (jayess_value_eq(values->values[i], value)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int jayess_std_weak_key_valid(jayess_value *key) {
+    if (key == NULL) {
+        return 0;
+    }
+    return key->kind == JAYESS_VALUE_OBJECT || key->kind == JAYESS_VALUE_FUNCTION;
+}
+
+static int jayess_std_weak_map_index_of(jayess_value *target, jayess_value *key) {
+    jayess_array *keys = jayess_std_array_slot(target, "__jayess_weak_map_keys");
+    int i;
+    if (keys == NULL || !jayess_std_weak_key_valid(key)) {
+        return -1;
+    }
+    for (i = 0; i < keys->count; i++) {
+        if (keys->values[i] == key) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int jayess_std_weak_set_index_of(jayess_value *target, jayess_value *value) {
+    jayess_array *values = jayess_std_array_slot(target, "__jayess_weak_set_values");
+    int i;
+    if (values == NULL || !jayess_std_weak_key_valid(value)) {
+        return -1;
+    }
+    for (i = 0; i < values->count; i++) {
+        if (values->values[i] == value) {
             return i;
         }
     }
@@ -1614,6 +2246,118 @@ jayess_value *jayess_std_set_new(void) {
     jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("Set"));
     jayess_object_set_value(object, "__jayess_set_values", jayess_value_from_array(jayess_array_new()));
     return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_std_weak_map_new(void) {
+    jayess_object *object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_from_object(NULL);
+    }
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("WeakMap"));
+    jayess_object_set_value(object, "__jayess_weak_map_keys", jayess_value_from_array(jayess_array_new()));
+    jayess_object_set_value(object, "__jayess_weak_map_values", jayess_value_from_array(jayess_array_new()));
+    return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_std_weak_set_new(void) {
+    jayess_object *object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_from_object(NULL);
+    }
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("WeakSet"));
+    jayess_object_set_value(object, "__jayess_weak_set_values", jayess_value_from_array(jayess_array_new()));
+    return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_std_symbol(jayess_value *description) {
+    char *text = NULL;
+    if (description != NULL && description->kind != JAYESS_VALUE_UNDEFINED) {
+        text = jayess_value_stringify(description);
+    }
+    return jayess_value_from_symbol(text);
+}
+
+jayess_value *jayess_std_symbol_for(jayess_value *key) {
+    char *text;
+    jayess_symbol_registry_entry *entry;
+    if (key == NULL) {
+        text = jayess_strdup("");
+    } else {
+        text = jayess_value_stringify(key);
+    }
+    if (text == NULL) {
+        return jayess_value_undefined();
+    }
+    entry = jayess_symbol_registry_find(text);
+    if (entry != NULL) {
+        free(text);
+        return entry->symbol != NULL ? entry->symbol : jayess_value_undefined();
+    }
+    entry = (jayess_symbol_registry_entry *)malloc(sizeof(jayess_symbol_registry_entry));
+    if (entry == NULL) {
+        free(text);
+        return jayess_value_undefined();
+    }
+    entry->key = text;
+    entry->symbol = jayess_value_from_symbol(text);
+    entry->next = jayess_symbol_registry;
+    jayess_symbol_registry = entry;
+    return entry->symbol != NULL ? entry->symbol : jayess_value_undefined();
+}
+
+jayess_value *jayess_std_symbol_key_for(jayess_value *symbol) {
+    jayess_symbol_registry_entry *current;
+    if (symbol == NULL || symbol->kind != JAYESS_VALUE_SYMBOL) {
+        return jayess_value_undefined();
+    }
+    current = jayess_symbol_registry;
+    while (current != NULL) {
+        if (current->symbol != NULL && jayess_value_eq(current->symbol, symbol)) {
+            return jayess_value_from_string(current->key != NULL ? current->key : "");
+        }
+        current = current->next;
+    }
+    return jayess_value_undefined();
+}
+
+jayess_value *jayess_std_symbol_iterator(void) {
+    return jayess_symbol_singleton(&jayess_symbol_iterator_singleton, "Symbol.iterator");
+}
+
+jayess_value *jayess_std_symbol_async_iterator(void) {
+    return jayess_symbol_singleton(&jayess_symbol_async_iterator_singleton, "Symbol.asyncIterator");
+}
+
+jayess_value *jayess_std_symbol_to_string_tag(void) {
+    return jayess_symbol_singleton(&jayess_symbol_to_string_tag_singleton, "Symbol.toStringTag");
+}
+
+jayess_value *jayess_std_symbol_has_instance(void) {
+    return jayess_symbol_singleton(&jayess_symbol_has_instance_singleton, "Symbol.hasInstance");
+}
+
+jayess_value *jayess_std_symbol_species(void) {
+    return jayess_symbol_singleton(&jayess_symbol_species_singleton, "Symbol.species");
+}
+
+jayess_value *jayess_std_symbol_match(void) {
+    return jayess_symbol_singleton(&jayess_symbol_match_singleton, "Symbol.match");
+}
+
+jayess_value *jayess_std_symbol_replace(void) {
+    return jayess_symbol_singleton(&jayess_symbol_replace_singleton, "Symbol.replace");
+}
+
+jayess_value *jayess_std_symbol_search(void) {
+    return jayess_symbol_singleton(&jayess_symbol_search_singleton, "Symbol.search");
+}
+
+jayess_value *jayess_std_symbol_split(void) {
+    return jayess_symbol_singleton(&jayess_symbol_split_singleton, "Symbol.split");
+}
+
+jayess_value *jayess_std_symbol_to_primitive(void) {
+    return jayess_symbol_singleton(&jayess_symbol_to_primitive_singleton, "Symbol.toPrimitive");
 }
 
 jayess_value *jayess_std_date_new(jayess_value *value) {
@@ -1700,6 +2444,736 @@ static jayess_value *jayess_type_error_value(const char *message) {
     return jayess_std_error_new(jayess_value_from_string("TypeError"), jayess_value_from_string(message != NULL ? message : ""));
 }
 
+jayess_value *jayess_error_value(const char *name, const char *message) {
+    return jayess_std_error_new(jayess_value_from_string(name != NULL ? name : "Error"), jayess_value_from_string(message != NULL ? message : ""));
+}
+
+static jayess_bigint_words jayess_bigint_words_new(size_t length) {
+    jayess_bigint_words value;
+    value.length = length;
+    value.words = length > 0 ? (uint32_t *)calloc(length, sizeof(uint32_t)) : NULL;
+    return value;
+}
+
+static void jayess_bigint_words_free(jayess_bigint_words value) {
+    free(value.words);
+}
+
+static size_t jayess_bigint_words_trimmed_length(jayess_bigint_words value) {
+    size_t length = value.length;
+    while (length > 0 && value.words[length-1] == 0) {
+        length--;
+    }
+    return length;
+}
+
+static int jayess_bigint_words_is_zero(jayess_bigint_words value) {
+    return jayess_bigint_words_trimmed_length(value) == 0;
+}
+
+static jayess_bigint_words jayess_bigint_words_clone(jayess_bigint_words value) {
+    jayess_bigint_words copy = jayess_bigint_words_new(value.length);
+    if (copy.words != NULL && value.words != NULL && value.length > 0) {
+        memcpy(copy.words, value.words, value.length * sizeof(uint32_t));
+    }
+    return copy;
+}
+
+static jayess_bigint_words jayess_bigint_words_resized(jayess_bigint_words value, size_t length) {
+    jayess_bigint_words resized = jayess_bigint_words_new(length);
+    size_t copy_count = value.length < length ? value.length : length;
+    if (resized.words != NULL && value.words != NULL && copy_count > 0) {
+        memcpy(resized.words, value.words, copy_count * sizeof(uint32_t));
+    }
+    return resized;
+}
+
+static jayess_bigint_words jayess_bigint_words_from_u32(uint32_t value) {
+    jayess_bigint_words out;
+    if (value == 0) {
+        out.length = 0;
+        out.words = NULL;
+        return out;
+    }
+    out = jayess_bigint_words_new(1);
+    if (out.words != NULL) {
+        out.words[0] = value;
+    }
+    return out;
+}
+
+static void jayess_bigint_words_mul_small(jayess_bigint_words *value, uint32_t factor) {
+    size_t i;
+    uint64_t carry = 0;
+    if (factor == 0 || value == NULL || value->length == 0 || value->words == NULL) {
+        if (value != NULL && factor == 0) {
+            free(value->words);
+            value->words = NULL;
+            value->length = 0;
+        }
+        return;
+    }
+    for (i = 0; i < value->length; i++) {
+        uint64_t product = (uint64_t)value->words[i] * factor + carry;
+        value->words[i] = (uint32_t)product;
+        carry = product >> 32;
+    }
+    if (carry != 0) {
+        uint32_t *grown = (uint32_t *)realloc(value->words, (value->length + 1) * sizeof(uint32_t));
+        if (grown == NULL) {
+            return;
+        }
+        value->words = grown;
+        value->words[value->length] = (uint32_t)carry;
+        value->length++;
+    }
+}
+
+static void jayess_bigint_words_add_small(jayess_bigint_words *value, uint32_t addend) {
+    size_t i = 0;
+    uint64_t carry = addend;
+    if (value == NULL || carry == 0) {
+        return;
+    }
+    if (value->length == 0 || value->words == NULL) {
+        *value = jayess_bigint_words_from_u32(addend);
+        return;
+    }
+    while (carry != 0 && i < value->length) {
+        uint64_t sum = (uint64_t)value->words[i] + carry;
+        value->words[i] = (uint32_t)sum;
+        carry = sum >> 32;
+        i++;
+    }
+    if (carry != 0) {
+        uint32_t *grown = (uint32_t *)realloc(value->words, (value->length + 1) * sizeof(uint32_t));
+        if (grown == NULL) {
+            return;
+        }
+        value->words = grown;
+        value->words[value->length] = (uint32_t)carry;
+        value->length++;
+    }
+}
+
+static int jayess_bigint_words_sub_small(jayess_bigint_words *value, uint32_t subtrahend) {
+    size_t i = 0;
+    uint64_t borrow = subtrahend;
+    if (value == NULL || value->length == 0 || value->words == NULL) {
+        return 0;
+    }
+    while (borrow != 0 && i < value->length) {
+        uint64_t current = value->words[i];
+        if (current >= borrow) {
+            value->words[i] = (uint32_t)(current - borrow);
+            borrow = 0;
+        } else {
+            value->words[i] = (uint32_t)((UINT64_C(1) << 32) + current - borrow);
+            borrow = 1;
+        }
+        i++;
+    }
+    return borrow == 0;
+}
+
+static int jayess_bigint_words_cmp(jayess_bigint_words left, jayess_bigint_words right) {
+    size_t left_len = jayess_bigint_words_trimmed_length(left);
+    size_t right_len = jayess_bigint_words_trimmed_length(right);
+    size_t i;
+    if (left_len != right_len) {
+        return left_len > right_len ? 1 : -1;
+    }
+    for (i = left_len; i > 0; i--) {
+        uint32_t lhs = left.words[i-1];
+        uint32_t rhs = right.words[i-1];
+        if (lhs != rhs) {
+            return lhs > rhs ? 1 : -1;
+        }
+    }
+    return 0;
+}
+
+static void jayess_bigint_words_add_words(jayess_bigint_words *left, jayess_bigint_words right) {
+    size_t max_len;
+    size_t i;
+    uint64_t carry = 0;
+    if (right.length == 0 || right.words == NULL || left == NULL) {
+        return;
+    }
+    if (left->length < right.length) {
+        uint32_t *grown = (uint32_t *)realloc(left->words, right.length * sizeof(uint32_t));
+        if (grown == NULL) {
+            return;
+        }
+        memset(grown + left->length, 0, (right.length - left->length) * sizeof(uint32_t));
+        left->words = grown;
+        left->length = right.length;
+    }
+    max_len = left->length > right.length ? left->length : right.length;
+    for (i = 0; i < max_len; i++) {
+        uint64_t lhs = i < left->length ? left->words[i] : 0;
+        uint64_t rhs = i < right.length ? right.words[i] : 0;
+        uint64_t sum = lhs + rhs + carry;
+        if (i < left->length) {
+            left->words[i] = (uint32_t)sum;
+        }
+        carry = sum >> 32;
+    }
+    if (carry != 0) {
+        uint32_t *grown = (uint32_t *)realloc(left->words, (left->length + 1) * sizeof(uint32_t));
+        if (grown == NULL) {
+            return;
+        }
+        left->words = grown;
+        left->words[left->length] = (uint32_t)carry;
+        left->length++;
+    }
+}
+
+static int jayess_bigint_words_divmod_small(jayess_bigint_words *value, uint32_t divisor, uint32_t *remainder) {
+    size_t i;
+    uint64_t rem = 0;
+    if (value == NULL || divisor == 0 || value->length == 0 || value->words == NULL) {
+        if (remainder != NULL) {
+            *remainder = 0;
+        }
+        return 0;
+    }
+    for (i = value->length; i > 0; i--) {
+        uint64_t current = (rem << 32) | value->words[i-1];
+        value->words[i-1] = (uint32_t)(current / divisor);
+        rem = current % divisor;
+    }
+    if (remainder != NULL) {
+        *remainder = (uint32_t)rem;
+    }
+    return 1;
+}
+
+static size_t jayess_bigint_words_bit_length(jayess_bigint_words value) {
+    size_t length = jayess_bigint_words_trimmed_length(value);
+    uint32_t top;
+    size_t bits = 0;
+    if (length == 0) {
+        return 0;
+    }
+    top = value.words[length-1];
+    while (top != 0) {
+        bits++;
+        top >>= 1;
+    }
+    return (length - 1) * 32 + bits;
+}
+
+static jayess_bigint_words jayess_bigint_parse_magnitude(const char *text) {
+    const char *cursor = text;
+    jayess_bigint_words value = {0, NULL};
+    if (cursor == NULL) {
+        return value;
+    }
+    if (*cursor == '+' || *cursor == '-') {
+        cursor++;
+    }
+    while (*cursor == '0') {
+        cursor++;
+    }
+    for (; *cursor != '\0'; cursor++) {
+        if (*cursor < '0' || *cursor > '9') {
+            jayess_bigint_words_free(value);
+            value.length = 0;
+            value.words = NULL;
+            return value;
+        }
+        jayess_bigint_words_mul_small(&value, 10);
+        jayess_bigint_words_add_small(&value, (uint32_t)(*cursor - '0'));
+    }
+    return value;
+}
+
+static int jayess_bigint_is_negative_text(const char *text) {
+    return text != NULL && text[0] == '-';
+}
+
+static size_t jayess_bigint_signed_bit_length(const char *text) {
+    jayess_bigint_words magnitude = jayess_bigint_parse_magnitude(text);
+    size_t bits = 1;
+    if (!jayess_bigint_words_is_zero(magnitude)) {
+        if (jayess_bigint_is_negative_text(text)) {
+            jayess_bigint_words adjusted = jayess_bigint_words_clone(magnitude);
+            jayess_bigint_words_sub_small(&adjusted, 1);
+            bits = jayess_bigint_words_bit_length(adjusted) + 1;
+            jayess_bigint_words_free(adjusted);
+        } else {
+            bits = jayess_bigint_words_bit_length(magnitude) + 1;
+        }
+    }
+    jayess_bigint_words_free(magnitude);
+    return bits;
+}
+
+static jayess_bigint_words jayess_bigint_to_twos_complement(const char *text, size_t width_bits) {
+    size_t word_count = (width_bits + 31) / 32;
+    size_t i;
+    jayess_bigint_words magnitude = jayess_bigint_parse_magnitude(text);
+    jayess_bigint_words words = jayess_bigint_words_resized(magnitude, word_count);
+    jayess_bigint_words_free(magnitude);
+    if (jayess_bigint_is_negative_text(text) && word_count > 0) {
+        uint64_t carry = 1;
+        for (i = 0; i < word_count; i++) {
+            uint64_t value = (uint64_t)(~words.words[i]) + carry;
+            words.words[i] = (uint32_t)value;
+            carry = value >> 32;
+        }
+    }
+    if (word_count > 0 && (width_bits % 32) != 0) {
+        uint32_t mask = (uint32_t)((UINT64_C(1) << (width_bits % 32)) - 1);
+        words.words[word_count-1] &= mask;
+    }
+    return words;
+}
+
+static char *jayess_bigint_from_twos_complement(jayess_bigint_words words, size_t width_bits) {
+    size_t word_count = (width_bits + 31) / 32;
+    int negative;
+    size_t bit_index;
+    if (word_count == 0 || jayess_bigint_words_is_zero(words)) {
+        return jayess_strdup("0");
+    }
+    bit_index = width_bits - 1;
+    negative = ((words.words[bit_index / 32] >> (bit_index % 32)) & 1U) != 0;
+    if (!negative) {
+        jayess_bigint_words magnitude = jayess_bigint_words_resized(words, word_count);
+        if ((width_bits % 32) != 0) {
+            uint32_t mask = (uint32_t)((UINT64_C(1) << (width_bits % 32)) - 1);
+            magnitude.words[word_count-1] &= mask;
+        }
+        if (jayess_bigint_words_is_zero(magnitude)) {
+            jayess_bigint_words_free(magnitude);
+            return jayess_strdup("0");
+        }
+        {
+            static const uint32_t base = 1000000000U;
+            uint32_t parts[256];
+            size_t part_count = 0;
+            char *out;
+            size_t capacity;
+            jayess_bigint_words work = jayess_bigint_words_clone(magnitude);
+            jayess_bigint_words_free(magnitude);
+            while (!jayess_bigint_words_is_zero(work) && part_count < (sizeof(parts) / sizeof(parts[0]))) {
+                uint32_t remainder = 0;
+                jayess_bigint_words_divmod_small(&work, base, &remainder);
+                part_count++;
+                parts[part_count-1] = remainder;
+            }
+            capacity = part_count * 10 + 2;
+            out = (char *)malloc(capacity);
+            if (out == NULL) {
+                jayess_bigint_words_free(work);
+                return jayess_strdup("0");
+            }
+            snprintf(out, capacity, "%u", parts[part_count-1]);
+            while (part_count > 1) {
+                char chunk[16];
+                part_count--;
+                snprintf(chunk, sizeof(chunk), "%09u", parts[part_count-1]);
+                strcat(out, chunk);
+            }
+            jayess_bigint_words_free(work);
+            return out;
+        }
+    }
+    {
+        size_t i;
+        jayess_bigint_words magnitude = jayess_bigint_words_resized(words, word_count);
+        uint64_t carry = 1;
+        char *positive;
+        char *out;
+        if ((width_bits % 32) != 0) {
+            uint32_t mask = (uint32_t)((UINT64_C(1) << (width_bits % 32)) - 1);
+            magnitude.words[word_count-1] &= mask;
+        }
+        for (i = 0; i < word_count; i++) {
+            uint64_t value = (uint64_t)(~magnitude.words[i]) + carry;
+            magnitude.words[i] = (uint32_t)value;
+            carry = value >> 32;
+        }
+        positive = jayess_bigint_from_twos_complement(magnitude, width_bits);
+        jayess_bigint_words_free(magnitude);
+        if (positive == NULL || strcmp(positive, "0") == 0) {
+            free(positive);
+            return jayess_strdup("0");
+        }
+        out = (char *)malloc(strlen(positive) + 2);
+        if (out == NULL) {
+            free(positive);
+            return jayess_strdup("0");
+        }
+        out[0] = '-';
+        strcpy(out + 1, positive);
+        free(positive);
+        return out;
+    }
+}
+
+static jayess_bigint_words jayess_bigint_shift_left_words(jayess_bigint_words value, size_t shift) {
+    size_t word_shift = shift / 32;
+    size_t bit_shift = shift % 32;
+    size_t i;
+    jayess_bigint_words out;
+    if (jayess_bigint_words_is_zero(value)) {
+        out.length = 0;
+        out.words = NULL;
+        return out;
+    }
+    out = jayess_bigint_words_new(value.length + word_shift + 1);
+    for (i = 0; i < value.length; i++) {
+        uint64_t current = (uint64_t)value.words[i] << bit_shift;
+        out.words[i + word_shift] |= (uint32_t)current;
+        out.words[i + word_shift + 1] |= (uint32_t)(current >> 32);
+    }
+    return out;
+}
+
+static jayess_bigint_words jayess_bigint_shift_right_words(jayess_bigint_words value, size_t shift) {
+    size_t word_shift = shift / 32;
+    size_t bit_shift = shift % 32;
+    size_t i;
+    jayess_bigint_words out;
+    if (word_shift >= value.length || jayess_bigint_words_is_zero(value)) {
+        out.length = 0;
+        out.words = NULL;
+        return out;
+    }
+    out = jayess_bigint_words_new(value.length - word_shift);
+    for (i = value.length; i > word_shift; i--) {
+        uint32_t current = value.words[i-1];
+        size_t target = i - 1 - word_shift;
+        out.words[target] |= bit_shift == 0 ? current : (current >> bit_shift);
+        if (bit_shift != 0 && i - 1 > word_shift) {
+            out.words[target] |= value.words[i-2] << (32 - bit_shift);
+        }
+    }
+    return out;
+}
+
+static int jayess_bigint_parse_shift_count(const char *text, int *negative, size_t *count) {
+    const char *cursor = text;
+    size_t value = 0;
+    if (negative != NULL) {
+        *negative = 0;
+    }
+    if (count != NULL) {
+        *count = 0;
+    }
+    if (cursor == NULL) {
+        return 0;
+    }
+    if (*cursor == '+' || *cursor == '-') {
+        if (*cursor == '-' && negative != NULL) {
+            *negative = 1;
+        }
+        cursor++;
+    }
+    while (*cursor == '0') {
+        cursor++;
+    }
+    for (; *cursor != '\0'; cursor++) {
+        if (*cursor < '0' || *cursor > '9') {
+            return 0;
+        }
+        if (value > (SIZE_MAX - (size_t)(*cursor - '0')) / 10) {
+            return 0;
+        }
+        value = value * 10 + (size_t)(*cursor - '0');
+    }
+    if (count != NULL) {
+        *count = value;
+    }
+    return 1;
+}
+
+static char *jayess_bigint_bitwise_unary_not(const char *text) {
+    jayess_bigint_words magnitude = jayess_bigint_parse_magnitude(text);
+    char *out;
+    if (jayess_bigint_is_negative_text(text)) {
+        jayess_bigint_words_sub_small(&magnitude, 1);
+        out = jayess_bigint_from_twos_complement(magnitude, jayess_bigint_words_bit_length(magnitude) + 1);
+        jayess_bigint_words_free(magnitude);
+        return out;
+    }
+    jayess_bigint_words_add_small(&magnitude, 1);
+    out = jayess_bigint_from_twos_complement(magnitude, jayess_bigint_words_bit_length(magnitude) + 1);
+    jayess_bigint_words_free(magnitude);
+    if (strcmp(out, "0") == 0) {
+        free(out);
+        return jayess_strdup("-1");
+    }
+    {
+        char *negative = (char *)malloc(strlen(out) + 2);
+        if (negative == NULL) {
+            free(out);
+            return jayess_strdup("-1");
+        }
+        negative[0] = '-';
+        strcpy(negative + 1, out);
+        free(out);
+        return negative;
+    }
+}
+
+static char *jayess_bigint_bitwise_binary(const char *left_text, const char *right_text, char op) {
+    size_t width = jayess_bigint_signed_bit_length(left_text);
+    size_t right_width = jayess_bigint_signed_bit_length(right_text);
+    size_t word_count;
+    size_t i;
+    jayess_bigint_words left_words;
+    jayess_bigint_words right_words;
+    if (right_width > width) {
+        width = right_width;
+    }
+    word_count = (width + 31) / 32;
+    left_words = jayess_bigint_to_twos_complement(left_text, width);
+    right_words = jayess_bigint_to_twos_complement(right_text, width);
+    for (i = 0; i < word_count; i++) {
+        switch (op) {
+        case '&':
+            left_words.words[i] &= right_words.words[i];
+            break;
+        case '|':
+            left_words.words[i] |= right_words.words[i];
+            break;
+        default:
+            left_words.words[i] ^= right_words.words[i];
+            break;
+        }
+    }
+    jayess_bigint_words_free(right_words);
+    {
+        char *out = jayess_bigint_from_twos_complement(left_words, width);
+        jayess_bigint_words_free(left_words);
+        return out;
+    }
+}
+
+static char *jayess_bigint_shift_left_text(const char *value_text, const char *shift_text) {
+    jayess_bigint_words magnitude = jayess_bigint_parse_magnitude(value_text);
+    int negative_shift = 0;
+    size_t shift = 0;
+    char *out;
+    if (!jayess_bigint_parse_shift_count(shift_text, &negative_shift, &shift)) {
+        jayess_bigint_words_free(magnitude);
+        return NULL;
+    }
+    if (negative_shift) {
+        jayess_bigint_words_free(magnitude);
+        return NULL;
+    }
+    magnitude = jayess_bigint_shift_left_words(magnitude, shift);
+    out = jayess_bigint_from_twos_complement(magnitude, jayess_bigint_words_bit_length(magnitude) + 1);
+    jayess_bigint_words_free(magnitude);
+    if (jayess_bigint_is_negative_text(value_text) && strcmp(out, "0") != 0) {
+        char *negative = (char *)malloc(strlen(out) + 2);
+        if (negative == NULL) {
+            free(out);
+            return jayess_strdup("0");
+        }
+        negative[0] = '-';
+        strcpy(negative + 1, out);
+        free(out);
+        return negative;
+    }
+    return out;
+}
+
+static char *jayess_bigint_shift_right_text(const char *value_text, const char *shift_text) {
+    jayess_bigint_words magnitude = jayess_bigint_parse_magnitude(value_text);
+    int negative_shift = 0;
+    size_t shift = 0;
+    char *out;
+    if (!jayess_bigint_parse_shift_count(shift_text, &negative_shift, &shift)) {
+        jayess_bigint_words_free(magnitude);
+        return NULL;
+    }
+    if (negative_shift) {
+        jayess_bigint_words_free(magnitude);
+        return NULL;
+    }
+    if (!jayess_bigint_is_negative_text(value_text)) {
+        magnitude = jayess_bigint_shift_right_words(magnitude, shift);
+        out = jayess_bigint_from_twos_complement(magnitude, jayess_bigint_words_bit_length(magnitude) + 1);
+        jayess_bigint_words_free(magnitude);
+        return out;
+    }
+    if (jayess_bigint_words_is_zero(magnitude)) {
+        jayess_bigint_words_free(magnitude);
+        return jayess_strdup("0");
+    }
+    jayess_bigint_words_sub_small(&magnitude, 1);
+    magnitude = jayess_bigint_shift_right_words(magnitude, shift);
+    jayess_bigint_words_add_small(&magnitude, 1);
+    out = jayess_bigint_from_twos_complement(magnitude, jayess_bigint_words_bit_length(magnitude) + 1);
+    jayess_bigint_words_free(magnitude);
+    if (strcmp(out, "0") == 0) {
+        free(out);
+        return jayess_strdup("-1");
+    }
+    {
+        char *negative = (char *)malloc(strlen(out) + 2);
+        if (negative == NULL) {
+            free(out);
+            return jayess_strdup("-1");
+        }
+        negative[0] = '-';
+        strcpy(negative + 1, out);
+        free(out);
+        return negative;
+    }
+}
+
+static uint32_t jayess_number_to_uint32(double value) {
+    if (!isfinite(value) || value == 0.0) {
+        return 0;
+    }
+    {
+        double integer = trunc(value);
+        double modulo = fmod(integer, 4294967296.0);
+        if (modulo < 0.0) {
+            modulo += 4294967296.0;
+        }
+        return (uint32_t)modulo;
+    }
+}
+
+static int32_t jayess_number_to_int32(double value) {
+    uint32_t uint_value = jayess_number_to_uint32(value);
+    if (uint_value >= 2147483648U) {
+        return (int32_t)(uint_value - 4294967296U);
+    }
+    return (int32_t)uint_value;
+}
+
+static jayess_value *jayess_bitwise_type_error(const char *message) {
+    jayess_throw(jayess_type_error_value(message));
+    return jayess_value_undefined();
+}
+
+static jayess_value *jayess_value_bitwise_number_binary(jayess_value *left, jayess_value *right, char op) {
+    int32_t lhs = jayess_number_to_int32(jayess_value_to_number(left));
+    uint32_t rhs_u32 = jayess_number_to_uint32(jayess_value_to_number(right));
+    int32_t rhs = (int32_t)rhs_u32;
+    int32_t result = 0;
+    switch (op) {
+    case '&':
+        result = lhs & rhs;
+        break;
+    case '|':
+        result = lhs | rhs;
+        break;
+    case '^':
+        result = lhs ^ rhs;
+        break;
+    case '<':
+        result = lhs << (rhs_u32 & 31U);
+        break;
+    case '>':
+        result = lhs >> (rhs_u32 & 31U);
+        break;
+    default:
+        return jayess_value_from_number((double)(jayess_number_to_uint32(jayess_value_to_number(left)) >> (rhs_u32 & 31U)));
+    }
+    return jayess_value_from_number((double)result);
+}
+
+jayess_value *jayess_value_bitwise_not(jayess_value *value) {
+    if (value != NULL && value->kind == JAYESS_VALUE_BIGINT) {
+        char *result_text = jayess_bigint_bitwise_unary_not(value->as.bigint_value != NULL ? value->as.bigint_value : "0");
+        jayess_value *result = jayess_value_from_bigint(result_text != NULL ? result_text : "0");
+        free(result_text);
+        return result;
+    }
+    return jayess_value_from_number((double)(~jayess_number_to_int32(jayess_value_to_number(value))));
+}
+
+static jayess_value *jayess_value_bitwise_binary(jayess_value *left, jayess_value *right, char op) {
+    int left_is_bigint = left != NULL && left->kind == JAYESS_VALUE_BIGINT;
+    int right_is_bigint = right != NULL && right->kind == JAYESS_VALUE_BIGINT;
+    if (left_is_bigint || right_is_bigint) {
+        char *result_text;
+        jayess_value *result;
+        if (!left_is_bigint || !right_is_bigint) {
+            return jayess_bitwise_type_error("cannot mix number and bigint in bitwise expressions");
+        }
+        result_text = jayess_bigint_bitwise_binary(left->as.bigint_value != NULL ? left->as.bigint_value : "0",
+                                                   right->as.bigint_value != NULL ? right->as.bigint_value : "0",
+                                                   op);
+        result = jayess_value_from_bigint(result_text != NULL ? result_text : "0");
+        free(result_text);
+        return result;
+    }
+    return jayess_value_bitwise_number_binary(left, right, op);
+}
+
+jayess_value *jayess_value_bitwise_and(jayess_value *left, jayess_value *right) {
+    return jayess_value_bitwise_binary(left, right, '&');
+}
+
+jayess_value *jayess_value_bitwise_or(jayess_value *left, jayess_value *right) {
+    return jayess_value_bitwise_binary(left, right, '|');
+}
+
+jayess_value *jayess_value_bitwise_xor(jayess_value *left, jayess_value *right) {
+    return jayess_value_bitwise_binary(left, right, '^');
+}
+
+jayess_value *jayess_value_bitwise_shl(jayess_value *left, jayess_value *right) {
+    int left_is_bigint = left != NULL && left->kind == JAYESS_VALUE_BIGINT;
+    int right_is_bigint = right != NULL && right->kind == JAYESS_VALUE_BIGINT;
+    if (left_is_bigint || right_is_bigint) {
+        char *result_text;
+        jayess_value *result;
+        if (!left_is_bigint || !right_is_bigint) {
+            return jayess_bitwise_type_error("cannot mix number and bigint in bitwise expressions");
+        }
+        result_text = jayess_bigint_shift_left_text(left->as.bigint_value != NULL ? left->as.bigint_value : "0",
+                                                    right->as.bigint_value != NULL ? right->as.bigint_value : "0");
+        if (result_text == NULL) {
+            return jayess_bitwise_type_error("bigint shift count must be a non-negative bigint within runtime limits");
+        }
+        result = jayess_value_from_bigint(result_text);
+        free(result_text);
+        return result;
+    }
+    return jayess_value_bitwise_number_binary(left, right, '<');
+}
+
+jayess_value *jayess_value_bitwise_shr(jayess_value *left, jayess_value *right) {
+    int left_is_bigint = left != NULL && left->kind == JAYESS_VALUE_BIGINT;
+    int right_is_bigint = right != NULL && right->kind == JAYESS_VALUE_BIGINT;
+    if (left_is_bigint || right_is_bigint) {
+        char *result_text;
+        jayess_value *result;
+        if (!left_is_bigint || !right_is_bigint) {
+            return jayess_bitwise_type_error("cannot mix number and bigint in bitwise expressions");
+        }
+        result_text = jayess_bigint_shift_right_text(left->as.bigint_value != NULL ? left->as.bigint_value : "0",
+                                                     right->as.bigint_value != NULL ? right->as.bigint_value : "0");
+        if (result_text == NULL) {
+            return jayess_bitwise_type_error("bigint shift count must be a non-negative bigint within runtime limits");
+        }
+        result = jayess_value_from_bigint(result_text);
+        free(result_text);
+        return result;
+    }
+    return jayess_value_bitwise_number_binary(left, right, '>');
+}
+
+jayess_value *jayess_value_bitwise_ushr(jayess_value *left, jayess_value *right) {
+    if ((left != NULL && left->kind == JAYESS_VALUE_BIGINT) || (right != NULL && right->kind == JAYESS_VALUE_BIGINT)) {
+        return jayess_bitwise_type_error("operator >>> does not support bigint operands");
+    }
+    return jayess_value_bitwise_number_binary(left, right, 'u');
+}
+
 jayess_value *jayess_std_array_buffer_new(jayess_value *length_value) {
     jayess_object *object = jayess_object_new();
     jayess_array *bytes = jayess_array_new();
@@ -1719,45 +3193,163 @@ jayess_value *jayess_std_array_buffer_new(jayess_value *length_value) {
     return jayess_value_from_object(object);
 }
 
-jayess_value *jayess_std_uint8_array_new(jayess_value *source) {
-	jayess_object *object = jayess_object_new();
-	jayess_value *buffer = NULL;
-    jayess_array *bytes = NULL;
-    if (source != NULL && source->kind == JAYESS_VALUE_OBJECT && jayess_std_kind_is(source, "ArrayBuffer")) {
-        buffer = source;
-        jayess_value *stored = jayess_object_get(source->as.object_value, "__jayess_bytes");
-        if (stored != NULL && stored->kind == JAYESS_VALUE_ARRAY) {
-            bytes = stored->as.array_value;
-        }
+jayess_value *jayess_std_shared_array_buffer_new(jayess_value *length_value) {
+    jayess_object *object = jayess_object_new();
+    jayess_array *bytes = jayess_array_new();
+    jayess_shared_bytes_state *state;
+    int length = (int)jayess_value_to_number(length_value);
+    int i;
+    if (length < 0) {
+        length = 0;
     }
-    if (bytes == NULL) {
-        int length = (int)jayess_value_to_number(source);
+    for (i = 0; i < length; i++) {
+        jayess_array_push_value(bytes, jayess_value_from_number(0));
+    }
+    if (object == NULL) {
+        return jayess_value_from_object(NULL);
+    }
+    state = (jayess_shared_bytes_state *)calloc(1, sizeof(jayess_shared_bytes_state));
+    if (state == NULL) {
+        return jayess_value_from_object(NULL);
+    }
+    state->bytes = bytes;
+#ifdef _WIN32
+    InitializeCriticalSection(&state->lock);
+#else
+    pthread_mutex_init(&state->lock, NULL);
+#endif
+    object->native_handle = state;
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("SharedArrayBuffer"));
+    jayess_object_set_value(object, "__jayess_bytes", jayess_value_from_array(bytes));
+    return jayess_value_from_object(object);
+}
+
+static int jayess_std_is_typed_array_kind(const char *kind) {
+    return kind != NULL && (
+        strcmp(kind, "Uint8Array") == 0 ||
+        strcmp(kind, "Int8Array") == 0 ||
+        strcmp(kind, "Uint16Array") == 0 ||
+        strcmp(kind, "Int16Array") == 0 ||
+        strcmp(kind, "Uint32Array") == 0 ||
+        strcmp(kind, "Int32Array") == 0 ||
+        strcmp(kind, "Float32Array") == 0 ||
+        strcmp(kind, "Float64Array") == 0
+    );
+}
+
+static const char *jayess_std_typed_array_kind(jayess_value *target) {
+    jayess_value *kind_value;
+    if (target == NULL || target->kind != JAYESS_VALUE_OBJECT || target->as.object_value == NULL) {
+        return NULL;
+    }
+    kind_value = jayess_object_get(target->as.object_value, "__jayess_std_kind");
+    if (kind_value == NULL || kind_value->kind != JAYESS_VALUE_STRING) {
+        return NULL;
+    }
+    return jayess_std_is_typed_array_kind(kind_value->as.string_value) ? kind_value->as.string_value : NULL;
+}
+
+static int jayess_std_is_typed_array(jayess_value *target) {
+    return jayess_std_typed_array_kind(target) != NULL;
+}
+
+static int jayess_std_typed_array_element_size(const char *kind) {
+    if (kind == NULL) {
+        return 0;
+    }
+    if (strcmp(kind, "Uint8Array") == 0 || strcmp(kind, "Int8Array") == 0) {
+        return 1;
+    }
+    if (strcmp(kind, "Uint16Array") == 0 || strcmp(kind, "Int16Array") == 0) {
+        return 2;
+    }
+    if (strcmp(kind, "Uint32Array") == 0 || strcmp(kind, "Int32Array") == 0 || strcmp(kind, "Float32Array") == 0) {
+        return 4;
+    }
+    if (strcmp(kind, "Float64Array") == 0) {
+        return 8;
+    }
+    return 0;
+}
+
+static int jayess_std_typed_array_length_from_bytes(jayess_array *bytes, const char *kind) {
+    int size = jayess_std_typed_array_element_size(kind);
+    if (bytes == NULL || size <= 0) {
+        return 0;
+    }
+    return bytes->count / size;
+}
+
+static jayess_value *jayess_std_typed_array_new(const char *kind, jayess_value *source) {
+    jayess_object *object = jayess_object_new();
+    jayess_value *buffer = NULL;
+    jayess_array *bytes = NULL;
+    int element_size = jayess_std_typed_array_element_size(kind);
+    int length = 0;
+    int i;
+    if (element_size <= 0) {
+        return jayess_value_from_object(NULL);
+    }
+    if (source != NULL && source->kind == JAYESS_VALUE_OBJECT && (jayess_std_kind_is(source, "ArrayBuffer") || jayess_std_kind_is(source, "SharedArrayBuffer"))) {
+        buffer = source;
+        bytes = jayess_std_bytes_slot(source);
+        length = jayess_std_typed_array_length_from_bytes(bytes, kind);
+    } else if (jayess_std_is_typed_array(source)) {
+        int source_length = jayess_value_array_length(source);
+        buffer = jayess_std_array_buffer_new(jayess_value_from_number((double)(source_length * element_size)));
+        if (buffer != NULL && buffer->kind == JAYESS_VALUE_OBJECT) {
+            bytes = jayess_std_bytes_slot(buffer);
+            length = source_length;
+        }
+    } else if (source != NULL && source->kind == JAYESS_VALUE_ARRAY && source->as.array_value != NULL) {
+        length = source->as.array_value->count;
+        buffer = jayess_std_array_buffer_new(jayess_value_from_number((double)(length * element_size)));
+        if (buffer != NULL && buffer->kind == JAYESS_VALUE_OBJECT) {
+            bytes = jayess_std_bytes_slot(buffer);
+        }
+    } else {
+        length = (int)jayess_value_to_number(source);
         if (length < 0) {
             length = 0;
         }
-        buffer = jayess_std_array_buffer_new(jayess_value_from_number((double)length));
+        buffer = jayess_std_array_buffer_new(jayess_value_from_number((double)(length * element_size)));
         if (buffer != NULL && buffer->kind == JAYESS_VALUE_OBJECT) {
-            jayess_value *stored = jayess_object_get(buffer->as.object_value, "__jayess_bytes");
-            if (stored != NULL && stored->kind == JAYESS_VALUE_ARRAY) {
-                bytes = stored->as.array_value;
-            }
+            bytes = jayess_std_bytes_slot(buffer);
         }
     }
     if (object == NULL) {
         return jayess_value_from_object(NULL);
     }
-    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("Uint8Array"));
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string(kind));
     jayess_object_set_value(object, "__jayess_bytes", jayess_value_from_array(bytes));
-    jayess_object_set_value(object, "buffer", buffer != NULL ? buffer : jayess_std_array_buffer_new(jayess_value_from_number((double)(bytes != NULL ? bytes->count : 0))));
-    jayess_object_set_value(object, "length", jayess_value_from_number((double)(bytes != NULL ? bytes->count : 0)));
-	jayess_object_set_value(object, "byteLength", jayess_value_from_number((double)(bytes != NULL ? bytes->count : 0)));
-	return jayess_value_from_object(object);
+    jayess_object_set_value(object, "buffer", buffer != NULL ? buffer : jayess_std_array_buffer_new(jayess_value_from_number((double)(length * element_size))));
+    jayess_object_set_value(object, "length", jayess_value_from_number((double)length));
+    jayess_object_set_value(object, "byteLength", jayess_value_from_number((double)(length * element_size)));
+    if (source != NULL && jayess_std_is_typed_array(source)) {
+        for (i = 0; i < length; i++) {
+            jayess_std_typed_array_set_number(jayess_value_from_object(object), i, jayess_std_typed_array_get_number(source, i));
+        }
+    } else if (source != NULL && source->kind == JAYESS_VALUE_ARRAY && source->as.array_value != NULL) {
+        for (i = 0; i < length; i++) {
+            jayess_std_typed_array_set_number(jayess_value_from_object(object), i, jayess_value_to_number(jayess_array_get(source->as.array_value, i)));
+        }
+    }
+    return jayess_value_from_object(object);
 }
+
+jayess_value *jayess_std_int8_array_new(jayess_value *source) { return jayess_std_typed_array_new("Int8Array", source); }
+jayess_value *jayess_std_uint8_array_new(jayess_value *source) { return jayess_std_typed_array_new("Uint8Array", source); }
+jayess_value *jayess_std_uint16_array_new(jayess_value *source) { return jayess_std_typed_array_new("Uint16Array", source); }
+jayess_value *jayess_std_int16_array_new(jayess_value *source) { return jayess_std_typed_array_new("Int16Array", source); }
+jayess_value *jayess_std_uint32_array_new(jayess_value *source) { return jayess_std_typed_array_new("Uint32Array", source); }
+jayess_value *jayess_std_int32_array_new(jayess_value *source) { return jayess_std_typed_array_new("Int32Array", source); }
+jayess_value *jayess_std_float32_array_new(jayess_value *source) { return jayess_std_typed_array_new("Float32Array", source); }
+jayess_value *jayess_std_float64_array_new(jayess_value *source) { return jayess_std_typed_array_new("Float64Array", source); }
 
 jayess_value *jayess_std_data_view_new(jayess_value *buffer) {
 	jayess_object *object = jayess_object_new();
 	jayess_array *bytes = NULL;
-	if (buffer != NULL && buffer->kind == JAYESS_VALUE_OBJECT && jayess_std_kind_is(buffer, "ArrayBuffer")) {
+	if (buffer != NULL && buffer->kind == JAYESS_VALUE_OBJECT && (jayess_std_kind_is(buffer, "ArrayBuffer") || jayess_std_kind_is(buffer, "SharedArrayBuffer"))) {
 		jayess_value *stored = jayess_object_get(buffer->as.object_value, "__jayess_bytes");
 		if (stored != NULL && stored->kind == JAYESS_VALUE_ARRAY) {
 			bytes = stored->as.array_value;
@@ -1794,6 +3386,153 @@ static jayess_value *jayess_std_uint8_array_from_bytes(const unsigned char *byte
         jayess_array_set_value(out, (int)i, jayess_value_from_number((double)bytes[i]));
     }
     return view;
+}
+
+static void jayess_std_crypto_normalize_name(char *text) {
+    size_t i;
+    if (text == NULL) {
+        return;
+    }
+    for (i = 0; text[i] != '\0'; i++) {
+        text[i] = (char)tolower((unsigned char)text[i]);
+    }
+}
+
+static int jayess_std_crypto_equal_name(const char *left, const char *right) {
+    if (left == NULL || right == NULL) {
+        return 0;
+    }
+    while (*left != '\0' && *right != '\0') {
+        if (tolower((unsigned char)*left) != tolower((unsigned char)*right)) {
+            return 0;
+        }
+        left++;
+        right++;
+    }
+    return *left == '\0' && *right == '\0';
+}
+
+static char *jayess_std_crypto_hex_encode(const unsigned char *bytes, size_t length) {
+    static const char *hex = "0123456789abcdef";
+    char *out;
+    size_t i;
+    out = (char *)malloc((length * 2) + 1);
+    if (out == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < length; i++) {
+        out[i * 2] = hex[(bytes[i] >> 4) & 15];
+        out[(i * 2) + 1] = hex[bytes[i] & 15];
+    }
+    out[length * 2] = '\0';
+    return out;
+}
+
+static int jayess_std_crypto_copy_bytes(jayess_value *value, unsigned char **out_bytes, size_t *out_length) {
+    jayess_array *bytes = jayess_std_bytes_slot(value);
+    unsigned char *buffer = NULL;
+    size_t length = 0;
+    size_t i;
+    if (out_bytes == NULL || out_length == NULL) {
+        return 0;
+    }
+    *out_bytes = NULL;
+    *out_length = 0;
+    if (bytes != NULL) {
+        length = (size_t)bytes->count;
+        buffer = (unsigned char *)malloc(length > 0 ? length : 1);
+        if (buffer == NULL) {
+            return 0;
+        }
+        for (i = 0; i < length; i++) {
+            buffer[i] = (unsigned char)((int)jayess_value_to_number(jayess_array_get(bytes, (int)i)) & 255);
+        }
+        *out_bytes = buffer;
+        *out_length = length;
+        return 1;
+    }
+    {
+        char *text = jayess_value_stringify(value);
+        if (text == NULL) {
+            buffer = (unsigned char *)malloc(1);
+            if (buffer == NULL) {
+                return 0;
+            }
+            *out_bytes = buffer;
+            *out_length = 0;
+            return 1;
+        }
+        length = strlen(text);
+        buffer = (unsigned char *)malloc(length > 0 ? length : 1);
+        if (buffer == NULL) {
+            free(text);
+            return 0;
+        }
+        if (length > 0) {
+            memcpy(buffer, text, length);
+        }
+        free(text);
+        *out_bytes = buffer;
+        *out_length = length;
+        return 1;
+    }
+}
+
+static int jayess_std_crypto_cipher_key_length(const char *algorithm) {
+    if (jayess_std_crypto_equal_name(algorithm, "aes-128-gcm")) {
+        return 16;
+    }
+    if (jayess_std_crypto_equal_name(algorithm, "aes-192-gcm")) {
+        return 24;
+    }
+    if (jayess_std_crypto_equal_name(algorithm, "aes-256-gcm")) {
+        return 32;
+    }
+    return 0;
+}
+
+static int jayess_std_crypto_option_bytes(jayess_value *options, const char *key, unsigned char **out_bytes, size_t *out_length, int required) {
+    jayess_object *object = jayess_value_as_object(options);
+    jayess_value *value;
+    if (out_bytes == NULL || out_length == NULL) {
+        return 0;
+    }
+    *out_bytes = NULL;
+    *out_length = 0;
+    if (object == NULL) {
+        return required ? 0 : 1;
+    }
+    value = jayess_object_get(object, key);
+    if (value == NULL || jayess_value_is_nullish(value)) {
+        return required ? 0 : 1;
+    }
+    return jayess_std_crypto_copy_bytes(value, out_bytes, out_length);
+}
+
+static jayess_value *jayess_std_crypto_key_value(const char *type, int is_private) {
+    jayess_object *object = jayess_object_new();
+    jayess_crypto_key_state *state;
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    state = (jayess_crypto_key_state *)calloc(1, sizeof(jayess_crypto_key_state));
+    if (state == NULL) {
+        return jayess_value_undefined();
+    }
+    state->is_private = is_private ? 1 : 0;
+    state->type = jayess_strdup(type != NULL ? type : "");
+    object->native_handle = state;
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("CryptoKey"));
+    jayess_object_set_value(object, "type", jayess_value_from_string(type != NULL ? type : ""));
+    jayess_object_set_value(object, "private", jayess_value_from_bool(is_private));
+    return jayess_value_from_object(object);
+}
+
+static jayess_crypto_key_state *jayess_std_crypto_key_state_from_value(jayess_value *value) {
+    if (value == NULL || value->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(value, "CryptoKey") || value->as.object_value == NULL) {
+        return NULL;
+    }
+    return (jayess_crypto_key_state *)value->as.object_value->native_handle;
 }
 
 static int jayess_std_bytes_encoding_is_hex(jayess_value *encoding) {
@@ -1990,6 +3729,20 @@ jayess_value *jayess_std_iterator_from(jayess_value *target) {
     jayess_object_set_value(object, "__jayess_iterator_values", jayess_value_iterable_values(target));
     jayess_object_set_value(object, "__jayess_iterator_index", jayess_value_from_number(0));
     return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_std_async_iterator_from(jayess_value *target) {
+    jayess_object *object = jayess_object_new();
+    jayess_value *boxed;
+    if (object == NULL) {
+        return jayess_value_from_object(NULL);
+    }
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("AsyncIterator"));
+    jayess_object_set_value(object, "__jayess_iterator_values", jayess_value_iterable_values(target));
+    jayess_object_set_value(object, "__jayess_iterator_index", jayess_value_from_number(0));
+    boxed = jayess_value_from_object(object);
+    jayess_object_set_key_value(object, jayess_std_symbol_async_iterator(), jayess_value_from_function((void *)jayess_std_async_iterator_identity_method, boxed, "[Symbol.asyncIterator]", NULL, 0, 0));
+    return boxed;
 }
 
 jayess_value *jayess_std_promise_resolve(jayess_value *value) {
@@ -3427,6 +5180,10 @@ static int jayess_run_microtask(jayess_microtask *task) {
 void jayess_run_microtasks(void) {
     int guard = 0;
     while (jayess_scheduler_has_tasks() && guard < 100000) {
+        jayess_runtime_dispatch_pending_signals();
+        if (jayess_has_exception()) {
+            return;
+        }
         jayess_microtask *task = jayess_dequeue_microtask();
         if (task == NULL) {
             jayess_sleep_ms(jayess_scheduler_next_timer_delay_ms());
@@ -3439,6 +5196,9 @@ void jayess_run_microtasks(void) {
             } else {
                 free(task);
             }
+        }
+        if (jayess_has_exception()) {
+            return;
         }
         guard++;
     }
@@ -3868,16 +5628,31 @@ jayess_value *jayess_std_json_parse(jayess_value *value) {
 }
 
 void jayess_value_set_member(jayess_value *target, const char *key, jayess_value *value) {
+    jayess_object *properties = NULL;
+    jayess_value *setter = NULL;
+    char *setter_key;
     if (target == NULL) {
         return;
     }
     if (target->kind == JAYESS_VALUE_OBJECT) {
-        jayess_object_set_value(target->as.object_value, key, value);
+        properties = target->as.object_value;
+    } else if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
+        properties = target->as.function_value->properties;
+    }
+    if (properties == NULL) {
         return;
     }
-    if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
-        jayess_object_set_value(target->as.function_value->properties, key, value);
+    setter_key = jayess_accessor_key("__jayess_set_", key);
+    if (setter_key != NULL) {
+        setter = jayess_object_get(properties, setter_key);
     }
+    if (setter != NULL && setter->kind == JAYESS_VALUE_FUNCTION) {
+        (void)jayess_value_call_with_this(setter, target, value, 1);
+        free(setter_key);
+        return;
+    }
+    free(setter_key);
+    jayess_object_set_value(properties, key, value);
 }
 
 static jayess_value *jayess_std_map_get_method(jayess_value *env, jayess_value *key) {
@@ -4023,6 +5798,108 @@ static jayess_value *jayess_std_set_delete_method(jayess_value *env, jayess_valu
     return jayess_value_from_bool(1);
 }
 
+static jayess_value *jayess_std_weak_map_get_method(jayess_value *env, jayess_value *key) {
+    int index;
+    jayess_array *values;
+    if (!jayess_std_weak_key_valid(key)) {
+        jayess_throw(jayess_type_error_value("WeakMap keys must be objects or functions"));
+        return jayess_value_undefined();
+    }
+    index = jayess_std_weak_map_index_of(env, key);
+    values = jayess_std_array_slot(env, "__jayess_weak_map_values");
+    if (index < 0 || values == NULL || index >= values->count) {
+        return jayess_value_undefined();
+    }
+    return values->values[index] != NULL ? values->values[index] : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_weak_map_set_method(jayess_value *env, jayess_value *key, jayess_value *value) {
+    jayess_array *keys;
+    jayess_array *values;
+    int index;
+    if (!jayess_std_weak_key_valid(key)) {
+        jayess_throw(jayess_type_error_value("WeakMap keys must be objects or functions"));
+        return jayess_value_undefined();
+    }
+    keys = jayess_std_array_slot(env, "__jayess_weak_map_keys");
+    values = jayess_std_array_slot(env, "__jayess_weak_map_values");
+    index = jayess_std_weak_map_index_of(env, key);
+    if (keys == NULL || values == NULL) {
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (index < 0) {
+        jayess_array_push_value(keys, key);
+        jayess_array_push_value(values, value);
+    } else {
+        values->values[index] = value;
+    }
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_weak_map_has_method(jayess_value *env, jayess_value *key) {
+    if (!jayess_std_weak_key_valid(key)) {
+        jayess_throw(jayess_type_error_value("WeakMap keys must be objects or functions"));
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_bool(jayess_std_weak_map_index_of(env, key) >= 0);
+}
+
+static jayess_value *jayess_std_weak_map_delete_method(jayess_value *env, jayess_value *key) {
+    jayess_array *keys;
+    jayess_array *values;
+    int index;
+    if (!jayess_std_weak_key_valid(key)) {
+        jayess_throw(jayess_type_error_value("WeakMap keys must be objects or functions"));
+        return jayess_value_undefined();
+    }
+    keys = jayess_std_array_slot(env, "__jayess_weak_map_keys");
+    values = jayess_std_array_slot(env, "__jayess_weak_map_values");
+    index = jayess_std_weak_map_index_of(env, key);
+    if (index < 0 || keys == NULL || values == NULL) {
+        return jayess_value_from_bool(0);
+    }
+    jayess_array_remove_at(keys, index);
+    jayess_array_remove_at(values, index);
+    return jayess_value_from_bool(1);
+}
+
+static jayess_value *jayess_std_weak_set_add_method(jayess_value *env, jayess_value *value) {
+    jayess_array *values;
+    if (!jayess_std_weak_key_valid(value)) {
+        jayess_throw(jayess_type_error_value("WeakSet values must be objects or functions"));
+        return jayess_value_undefined();
+    }
+    values = jayess_std_array_slot(env, "__jayess_weak_set_values");
+    if (values != NULL && jayess_std_weak_set_index_of(env, value) < 0) {
+        jayess_array_push_value(values, value);
+    }
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_weak_set_has_method(jayess_value *env, jayess_value *value) {
+    if (!jayess_std_weak_key_valid(value)) {
+        jayess_throw(jayess_type_error_value("WeakSet values must be objects or functions"));
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_bool(jayess_std_weak_set_index_of(env, value) >= 0);
+}
+
+static jayess_value *jayess_std_weak_set_delete_method(jayess_value *env, jayess_value *value) {
+    jayess_array *values;
+    int index;
+    if (!jayess_std_weak_key_valid(value)) {
+        jayess_throw(jayess_type_error_value("WeakSet values must be objects or functions"));
+        return jayess_value_undefined();
+    }
+    values = jayess_std_array_slot(env, "__jayess_weak_set_values");
+    index = jayess_std_weak_set_index_of(env, value);
+    if (index < 0 || values == NULL) {
+        return jayess_value_from_bool(0);
+    }
+    jayess_array_remove_at(values, index);
+    return jayess_value_from_bool(1);
+}
+
 static jayess_value *jayess_std_date_get_time_method(jayess_value *env) {
     if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
         return jayess_value_undefined();
@@ -4160,6 +6037,25 @@ static void jayess_std_data_view_write_u64(jayess_array *bytes, int offset, unsi
 	}
 }
 
+static jayess_shared_bytes_state *jayess_std_shared_bytes_state(jayess_value *target) {
+    if (target == NULL || target->kind != JAYESS_VALUE_OBJECT || target->as.object_value == NULL) {
+        return NULL;
+    }
+    if (!(jayess_std_kind_is(target, "SharedArrayBuffer") || (jayess_std_is_typed_array(target) && target->as.object_value != NULL && jayess_std_kind_is(jayess_object_get(target->as.object_value, "buffer"), "SharedArrayBuffer")) || (jayess_std_kind_is(target, "DataView") && target->as.object_value != NULL && jayess_std_kind_is(jayess_object_get(target->as.object_value, "buffer"), "SharedArrayBuffer")))) {
+        return NULL;
+    }
+    if (jayess_std_kind_is(target, "SharedArrayBuffer")) {
+        return (jayess_shared_bytes_state *)target->as.object_value->native_handle;
+    }
+    if (target->as.object_value != NULL) {
+        jayess_value *buffer = jayess_object_get(target->as.object_value, "buffer");
+        if (buffer != NULL && buffer->kind == JAYESS_VALUE_OBJECT && buffer->as.object_value != NULL && jayess_std_kind_is(buffer, "SharedArrayBuffer")) {
+            return (jayess_shared_bytes_state *)buffer->as.object_value->native_handle;
+        }
+    }
+    return NULL;
+}
+
 static jayess_array *jayess_std_bytes_slot(jayess_value *target) {
 	jayess_value *stored;
 	if (target == NULL || target->kind != JAYESS_VALUE_OBJECT || target->as.object_value == NULL) {
@@ -4172,24 +6068,124 @@ static jayess_array *jayess_std_bytes_slot(jayess_value *target) {
 	return stored->as.array_value;
 }
 
+static int jayess_std_byte_length(jayess_value *target) {
+    jayess_array *bytes = jayess_std_bytes_slot(target);
+    return bytes != NULL ? bytes->count : 0;
+}
+
+static int jayess_std_byte_read(jayess_value *target, int offset) {
+    jayess_shared_bytes_state *shared = jayess_std_shared_bytes_state(target);
+    jayess_array *bytes = jayess_std_bytes_slot(target);
+    int value = 0;
+    if (bytes == NULL || offset < 0 || offset >= bytes->count) {
+        return 0;
+    }
+    if (shared != NULL) {
+#ifdef _WIN32
+        EnterCriticalSection(&shared->lock);
+#else
+        pthread_mutex_lock(&shared->lock);
+#endif
+    }
+    value = (int)jayess_value_to_number(jayess_array_get(bytes, offset)) & 255;
+    if (shared != NULL) {
+#ifdef _WIN32
+        LeaveCriticalSection(&shared->lock);
+#else
+        pthread_mutex_unlock(&shared->lock);
+#endif
+    }
+    return value;
+}
+
+static void jayess_std_byte_write(jayess_value *target, int offset, int value) {
+    jayess_shared_bytes_state *shared = jayess_std_shared_bytes_state(target);
+    jayess_array *bytes = jayess_std_bytes_slot(target);
+    if (bytes == NULL || offset < 0 || offset >= bytes->count) {
+        return;
+    }
+    if (shared != NULL) {
+#ifdef _WIN32
+        EnterCriticalSection(&shared->lock);
+#else
+        pthread_mutex_lock(&shared->lock);
+#endif
+    }
+    jayess_array_set_value(bytes, offset, jayess_value_from_number((double)(value & 255)));
+    if (shared != NULL) {
+#ifdef _WIN32
+        LeaveCriticalSection(&shared->lock);
+#else
+        pthread_mutex_unlock(&shared->lock);
+#endif
+    }
+}
+
+static unsigned int jayess_std_data_view_read_u32_target(jayess_value *target, int offset, int little_endian) {
+	unsigned int b0 = (unsigned int)jayess_std_byte_read(target, offset);
+	unsigned int b1 = (unsigned int)jayess_std_byte_read(target, offset + 1);
+	unsigned int b2 = (unsigned int)jayess_std_byte_read(target, offset + 2);
+	unsigned int b3 = (unsigned int)jayess_std_byte_read(target, offset + 3);
+	return little_endian ? (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) : ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3);
+}
+
+static void jayess_std_data_view_write_u32_target(jayess_value *target, int offset, unsigned int number, int little_endian) {
+	if (little_endian) {
+		jayess_std_byte_write(target, offset, (int)(number & 255));
+		jayess_std_byte_write(target, offset+1, (int)((number >> 8) & 255));
+		jayess_std_byte_write(target, offset+2, (int)((number >> 16) & 255));
+		jayess_std_byte_write(target, offset+3, (int)((number >> 24) & 255));
+	} else {
+		jayess_std_byte_write(target, offset, (int)((number >> 24) & 255));
+		jayess_std_byte_write(target, offset+1, (int)((number >> 16) & 255));
+		jayess_std_byte_write(target, offset+2, (int)((number >> 8) & 255));
+		jayess_std_byte_write(target, offset+3, (int)(number & 255));
+	}
+}
+
+static unsigned long long jayess_std_data_view_read_u64_target(jayess_value *target, int offset, int little_endian) {
+	unsigned long long value = 0;
+	int i;
+	if (little_endian) {
+		for (i = 7; i >= 0; i--) {
+			value = (value << 8) | (unsigned long long)jayess_std_byte_read(target, offset+i);
+		}
+	} else {
+		for (i = 0; i < 8; i++) {
+			value = (value << 8) | (unsigned long long)jayess_std_byte_read(target, offset+i);
+		}
+	}
+	return value;
+}
+
+static void jayess_std_data_view_write_u64_target(jayess_value *target, int offset, unsigned long long number, int little_endian) {
+	int i;
+	if (little_endian) {
+		for (i = 0; i < 8; i++) {
+			jayess_std_byte_write(target, offset+i, (int)((number >> (i * 8)) & 255ULL));
+		}
+	} else {
+		for (i = 0; i < 8; i++) {
+			jayess_std_byte_write(target, offset+i, (int)((number >> ((7 - i) * 8)) & 255ULL));
+		}
+	}
+}
+
 static jayess_value *jayess_std_data_view_get_uint8_method(jayess_value *env, jayess_value *offset_value) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
-	return jayess_value_from_number((double)jayess_std_bytes_read(bytes, offset));
+	return jayess_value_from_number((double)jayess_std_byte_read(env, offset));
 }
 
 static jayess_value *jayess_std_data_view_set_uint8_method(jayess_value *env, jayess_value *offset_value, jayess_value *value) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
 	int byte_value = (int)jayess_value_to_number(value) & 255;
-	jayess_std_bytes_write(bytes, offset, byte_value);
+	jayess_std_byte_write(env, offset, byte_value);
 	return jayess_value_undefined();
 }
 
 static jayess_value *jayess_std_data_view_get_int8_method(jayess_value *env, jayess_value *offset_value) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
-	int value = jayess_std_bytes_read(bytes, offset);
+	int value = jayess_std_byte_read(env, offset);
 	if (value >= 128) {
 		value -= 256;
 	}
@@ -4197,41 +6193,37 @@ static jayess_value *jayess_std_data_view_get_int8_method(jayess_value *env, jay
 }
 
 static jayess_value *jayess_std_data_view_set_int8_method(jayess_value *env, jayess_value *offset_value, jayess_value *value) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
 	int byte_value = (int)jayess_value_to_number(value);
-	jayess_std_bytes_write(bytes, offset, byte_value);
+	jayess_std_byte_write(env, offset, byte_value);
 	return jayess_value_undefined();
 }
 
 static jayess_value *jayess_std_data_view_get_uint16_method(jayess_value *env, jayess_value *offset_value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
-	int b0 = jayess_std_bytes_read(bytes, offset);
-	int b1 = jayess_std_bytes_read(bytes, offset + 1);
+	int b0 = jayess_std_byte_read(env, offset);
+	int b1 = jayess_std_byte_read(env, offset + 1);
 	int value = jayess_value_as_bool(little_endian) ? (b0 | (b1 << 8)) : ((b0 << 8) | b1);
 	return jayess_value_from_number((double)value);
 }
 
 static jayess_value *jayess_std_data_view_set_uint16_method(jayess_value *env, jayess_value *offset_value, jayess_value *value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
 	int number = (int)jayess_value_to_number(value) & 65535;
 	if (jayess_value_as_bool(little_endian)) {
-		jayess_std_bytes_write(bytes, offset, number & 255);
-		jayess_std_bytes_write(bytes, offset+1, (number >> 8) & 255);
+		jayess_std_byte_write(env, offset, number & 255);
+		jayess_std_byte_write(env, offset+1, (number >> 8) & 255);
 	} else {
-		jayess_std_bytes_write(bytes, offset, (number >> 8) & 255);
-		jayess_std_bytes_write(bytes, offset+1, number & 255);
+		jayess_std_byte_write(env, offset, (number >> 8) & 255);
+		jayess_std_byte_write(env, offset+1, number & 255);
 	}
 	return jayess_value_undefined();
 }
 
 static jayess_value *jayess_std_data_view_get_int16_method(jayess_value *env, jayess_value *offset_value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
-	int b0 = jayess_std_bytes_read(bytes, offset);
-	int b1 = jayess_std_bytes_read(bytes, offset + 1);
+	int b0 = jayess_std_byte_read(env, offset);
+	int b1 = jayess_std_byte_read(env, offset + 1);
 	int value = jayess_value_as_bool(little_endian) ? (b0 | (b1 << 8)) : ((b0 << 8) | b1);
 	if (value >= 32768) {
 		value -= 65536;
@@ -4240,87 +6232,274 @@ static jayess_value *jayess_std_data_view_get_int16_method(jayess_value *env, ja
 }
 
 static jayess_value *jayess_std_data_view_set_int16_method(jayess_value *env, jayess_value *offset_value, jayess_value *value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
 	int number = (int)jayess_value_to_number(value) & 65535;
 	if (jayess_value_as_bool(little_endian)) {
-		jayess_std_bytes_write(bytes, offset, number & 255);
-		jayess_std_bytes_write(bytes, offset+1, (number >> 8) & 255);
+		jayess_std_byte_write(env, offset, number & 255);
+		jayess_std_byte_write(env, offset+1, (number >> 8) & 255);
 	} else {
-		jayess_std_bytes_write(bytes, offset, (number >> 8) & 255);
-		jayess_std_bytes_write(bytes, offset+1, number & 255);
+		jayess_std_byte_write(env, offset, (number >> 8) & 255);
+		jayess_std_byte_write(env, offset+1, number & 255);
 	}
 	return jayess_value_undefined();
 }
 
 static jayess_value *jayess_std_data_view_get_uint32_method(jayess_value *env, jayess_value *offset_value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
-	unsigned int value = jayess_std_data_view_read_u32(bytes, offset, jayess_value_as_bool(little_endian));
+	unsigned int value = jayess_std_data_view_read_u32_target(env, offset, jayess_value_as_bool(little_endian));
 	return jayess_value_from_number((double)value);
 }
 
 static jayess_value *jayess_std_data_view_set_uint32_method(jayess_value *env, jayess_value *offset_value, jayess_value *value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
 	unsigned int number = (unsigned int)jayess_value_to_number(value);
-	jayess_std_data_view_write_u32(bytes, offset, number, jayess_value_as_bool(little_endian));
+	jayess_std_data_view_write_u32_target(env, offset, number, jayess_value_as_bool(little_endian));
 	return jayess_value_undefined();
 }
 
 static jayess_value *jayess_std_data_view_get_int32_method(jayess_value *env, jayess_value *offset_value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
-	unsigned int value = jayess_std_data_view_read_u32(bytes, offset, jayess_value_as_bool(little_endian));
+	unsigned int value = jayess_std_data_view_read_u32_target(env, offset, jayess_value_as_bool(little_endian));
 	long long signed_value = value >= 2147483648U ? (long long)value - 4294967296LL : (long long)value;
 	return jayess_value_from_number((double)signed_value);
 }
 
 static jayess_value *jayess_std_data_view_set_int32_method(jayess_value *env, jayess_value *offset_value, jayess_value *value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
 	int signed_number = (int)jayess_value_to_number(value);
 	unsigned int number = (unsigned int)signed_number;
-	jayess_std_data_view_write_u32(bytes, offset, number, jayess_value_as_bool(little_endian));
+	jayess_std_data_view_write_u32_target(env, offset, number, jayess_value_as_bool(little_endian));
 	return jayess_value_undefined();
 }
 
 static jayess_value *jayess_std_data_view_get_float32_method(jayess_value *env, jayess_value *offset_value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
-	unsigned int bits = jayess_std_data_view_read_u32(bytes, offset, jayess_value_as_bool(little_endian));
+	unsigned int bits = jayess_std_data_view_read_u32_target(env, offset, jayess_value_as_bool(little_endian));
 	float value = 0.0f;
 	memcpy(&value, &bits, sizeof(value));
 	return jayess_value_from_number((double)value);
 }
 
 static jayess_value *jayess_std_data_view_set_float32_method(jayess_value *env, jayess_value *offset_value, jayess_value *value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
 	float number = (float)jayess_value_to_number(value);
 	unsigned int bits = 0;
 	memcpy(&bits, &number, sizeof(bits));
-	jayess_std_data_view_write_u32(bytes, offset, bits, jayess_value_as_bool(little_endian));
+	jayess_std_data_view_write_u32_target(env, offset, bits, jayess_value_as_bool(little_endian));
 	return jayess_value_undefined();
 }
 
 static jayess_value *jayess_std_data_view_get_float64_method(jayess_value *env, jayess_value *offset_value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
-	unsigned long long bits = jayess_std_data_view_read_u64(bytes, offset, jayess_value_as_bool(little_endian));
+	unsigned long long bits = jayess_std_data_view_read_u64_target(env, offset, jayess_value_as_bool(little_endian));
 	double value = 0.0;
 	memcpy(&value, &bits, sizeof(value));
 	return jayess_value_from_number(value);
 }
 
 static jayess_value *jayess_std_data_view_set_float64_method(jayess_value *env, jayess_value *offset_value, jayess_value *value, jayess_value *little_endian) {
-	jayess_array *bytes = jayess_std_bytes_slot(env);
 	int offset = (int)jayess_value_to_number(offset_value);
 	double number = jayess_value_to_number(value);
 	unsigned long long bits = 0;
 	memcpy(&bits, &number, sizeof(bits));
-	jayess_std_data_view_write_u64(bytes, offset, bits, jayess_value_as_bool(little_endian));
+	jayess_std_data_view_write_u64_target(env, offset, bits, jayess_value_as_bool(little_endian));
 	return jayess_value_undefined();
+}
+
+static double jayess_std_typed_array_get_number(jayess_value *target, int index) {
+    const char *kind = jayess_std_typed_array_kind(target);
+    int size = jayess_std_typed_array_element_size(kind);
+    int offset;
+    if (size <= 0 || index < 0 || index >= jayess_value_array_length(target)) {
+        return 0.0;
+    }
+    offset = index * size;
+    if (strcmp(kind, "Uint8Array") == 0) {
+        return (double)jayess_std_byte_read(target, offset);
+    }
+    if (strcmp(kind, "Int8Array") == 0) {
+        int value = jayess_std_byte_read(target, offset);
+        return (double)(value >= 128 ? value - 256 : value);
+    }
+    if (strcmp(kind, "Uint16Array") == 0) {
+        int b0 = jayess_std_byte_read(target, offset);
+        int b1 = jayess_std_byte_read(target, offset + 1);
+        return (double)(b0 | (b1 << 8));
+    }
+    if (strcmp(kind, "Int16Array") == 0) {
+        int value = jayess_std_byte_read(target, offset) | (jayess_std_byte_read(target, offset + 1) << 8);
+        if (value >= 32768) {
+            value -= 65536;
+        }
+        return (double)value;
+    }
+    if (strcmp(kind, "Uint32Array") == 0) {
+        return (double)jayess_std_data_view_read_u32_target(target, offset, 1);
+    }
+    if (strcmp(kind, "Int32Array") == 0) {
+        unsigned int value = jayess_std_data_view_read_u32_target(target, offset, 1);
+        long long signed_value = value >= 2147483648U ? (long long)value - 4294967296LL : (long long)value;
+        return (double)signed_value;
+    }
+    if (strcmp(kind, "Float32Array") == 0) {
+        unsigned int bits = jayess_std_data_view_read_u32_target(target, offset, 1);
+        float value = 0.0f;
+        memcpy(&value, &bits, sizeof(value));
+        return (double)value;
+    }
+    if (strcmp(kind, "Float64Array") == 0) {
+        unsigned long long bits = jayess_std_data_view_read_u64_target(target, offset, 1);
+        double value = 0.0;
+        memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+    return 0.0;
+}
+
+static void jayess_std_typed_array_set_number(jayess_value *target, int index, double number) {
+    const char *kind = jayess_std_typed_array_kind(target);
+    int size = jayess_std_typed_array_element_size(kind);
+    int offset;
+    if (size <= 0 || index < 0 || index >= jayess_value_array_length(target)) {
+        return;
+    }
+    offset = index * size;
+    if (strcmp(kind, "Uint8Array") == 0) {
+        jayess_std_byte_write(target, offset, (int)number & 255);
+        return;
+    }
+    if (strcmp(kind, "Int8Array") == 0) {
+        jayess_std_byte_write(target, offset, (int)number);
+        return;
+    }
+    if (strcmp(kind, "Uint16Array") == 0 || strcmp(kind, "Int16Array") == 0) {
+        int value = (int)number;
+        jayess_std_byte_write(target, offset, value & 255);
+        jayess_std_byte_write(target, offset + 1, (value >> 8) & 255);
+        return;
+    }
+    if (strcmp(kind, "Uint32Array") == 0) {
+        jayess_std_data_view_write_u32_target(target, offset, (unsigned int)number, 1);
+        return;
+    }
+    if (strcmp(kind, "Int32Array") == 0) {
+        jayess_std_data_view_write_u32_target(target, offset, (unsigned int)((int)number), 1);
+        return;
+    }
+    if (strcmp(kind, "Float32Array") == 0) {
+        float value = (float)number;
+        unsigned int bits = 0;
+        memcpy(&bits, &value, sizeof(bits));
+        jayess_std_data_view_write_u32_target(target, offset, bits, 1);
+        return;
+    }
+    if (strcmp(kind, "Float64Array") == 0) {
+        unsigned long long bits = 0;
+        memcpy(&bits, &number, sizeof(bits));
+        jayess_std_data_view_write_u64_target(target, offset, bits, 1);
+    }
+}
+
+static jayess_value *jayess_std_typed_array_fill_method(jayess_value *env, jayess_value *value) {
+    int length = jayess_value_array_length(env);
+    int i;
+    double number = jayess_value_to_number(value);
+    for (i = 0; i < length; i++) {
+        jayess_std_typed_array_set_number(env, i, number);
+    }
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_typed_array_includes_method(jayess_value *env, jayess_value *value) {
+    int length = jayess_value_array_length(env);
+    double needle = jayess_value_to_number(value);
+    int i;
+    for (i = 0; i < length; i++) {
+        if (jayess_std_typed_array_get_number(env, i) == needle) {
+            return jayess_value_from_bool(1);
+        }
+    }
+    return jayess_value_from_bool(0);
+}
+
+static jayess_value *jayess_std_typed_array_index_of_method(jayess_value *env, jayess_value *needle) {
+    int length = jayess_value_array_length(env);
+    double value = jayess_value_to_number(needle);
+    int i;
+    for (i = 0; i < length; i++) {
+        if (jayess_std_typed_array_get_number(env, i) == value) {
+            return jayess_value_from_number((double)i);
+        }
+    }
+    return jayess_value_from_number(-1);
+}
+
+static jayess_value *jayess_std_typed_array_set_method(jayess_value *env, jayess_value *source, jayess_value *offset_value) {
+    int length = jayess_value_array_length(env);
+    int offset = jayess_std_uint8_clamped_index(offset_value, length, 0);
+    int count = 0;
+    int i;
+    if (source == NULL) {
+        return jayess_value_undefined();
+    }
+    if (jayess_std_is_typed_array(source)) {
+        count = jayess_value_array_length(source);
+        if (count > length - offset) {
+            count = length - offset;
+        }
+        for (i = 0; i < count; i++) {
+            jayess_std_typed_array_set_number(env, offset+i, jayess_std_typed_array_get_number(source, i));
+        }
+        return jayess_value_undefined();
+    }
+    if (source->kind == JAYESS_VALUE_ARRAY && source->as.array_value != NULL) {
+        count = source->as.array_value->count;
+        if (count > length - offset) {
+            count = length - offset;
+        }
+        for (i = 0; i < count; i++) {
+            jayess_std_typed_array_set_number(env, offset+i, jayess_value_to_number(jayess_array_get(source->as.array_value, i)));
+        }
+    }
+    return jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_typed_array_slice_values(jayess_value *env, int start, int end, int has_end) {
+    int length = jayess_value_array_length(env);
+    jayess_array *values = jayess_array_new();
+    const char *kind = jayess_std_typed_array_kind(env);
+    int i;
+    if (start < 0) {
+        start = length + start;
+    }
+    if (start < 0) {
+        start = 0;
+    }
+    if (start > length) {
+        start = length;
+    }
+    if (!has_end) {
+        end = length;
+    } else if (end < 0) {
+        end = length + end;
+    }
+    if (end < start) {
+        end = start;
+    }
+    if (end > length) {
+        end = length;
+    }
+    for (i = start; i < end; i++) {
+        jayess_array_push_value(values, jayess_value_from_number(jayess_std_typed_array_get_number(env, i)));
+    }
+    return jayess_std_typed_array_new(kind != NULL ? kind : "Uint8Array", jayess_value_from_array(values));
+}
+
+static jayess_value *jayess_std_typed_array_slice_method(jayess_value *env, jayess_value *start_value, jayess_value *end_value) {
+    int length = jayess_value_array_length(env);
+    int start = jayess_std_uint8_clamped_index(start_value, length, 0);
+    int end = jayess_std_uint8_clamped_index(end_value, length, length);
+    return jayess_std_typed_array_slice_values(env, start, end, 1);
 }
 
 static jayess_value *jayess_std_uint8_fill_method(jayess_value *env, jayess_value *value) {
@@ -4776,6 +6955,71 @@ static jayess_value *jayess_std_iterator_next_method(jayess_value *env) {
     return jayess_value_from_object(result);
 }
 
+static jayess_value *jayess_std_async_iterator_next_method(jayess_value *env) {
+    return jayess_std_promise_resolve(jayess_std_iterator_next_method(env));
+}
+
+static jayess_value *jayess_std_async_iterator_identity_method(jayess_value *env) {
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_iterator_protocol_values(jayess_value *iterator) {
+    jayess_array *values = jayess_array_new();
+    int guard = 0;
+    if (iterator == NULL) {
+        return jayess_value_from_array(values);
+    }
+    while (guard++ < 1000000) {
+        jayess_value *next_method = jayess_value_get_member(iterator, "next");
+        jayess_value *step;
+        jayess_value *done;
+        jayess_value *value;
+        if (next_method == NULL || next_method->kind != JAYESS_VALUE_FUNCTION) {
+            break;
+        }
+        step = jayess_value_call_with_this(next_method, iterator, NULL, 0);
+        if (step == NULL || step->kind != JAYESS_VALUE_OBJECT) {
+            break;
+        }
+        done = jayess_value_get_member(step, "done");
+        if (jayess_value_as_bool(done)) {
+            break;
+        }
+        value = jayess_value_get_member(step, "value");
+        jayess_array_push_value(values, value != NULL ? value : jayess_value_undefined());
+    }
+    return jayess_value_from_array(values);
+}
+
+static jayess_value *jayess_std_iterable_protocol_values(jayess_value *target) {
+    jayess_value *iterator_symbol;
+    jayess_value *iterator_method;
+    jayess_value *iterator;
+    if (target == NULL) {
+        return jayess_value_from_array(jayess_array_new());
+    }
+    if (target->kind == JAYESS_VALUE_STRING && target->as.string_value != NULL) {
+        jayess_array *values = jayess_array_new();
+        const char *text = target->as.string_value;
+        int i;
+        for (i = 0; text[i] != '\0'; i++) {
+            char piece[2] = {text[i], '\0'};
+            jayess_array_push_value(values, jayess_value_from_string(piece));
+        }
+        return jayess_value_from_array(values);
+    }
+    iterator_symbol = jayess_std_symbol_iterator();
+    iterator_method = jayess_value_get_dynamic_index(target, iterator_symbol);
+    if (iterator_method != NULL && iterator_method->kind == JAYESS_VALUE_FUNCTION) {
+        iterator = jayess_value_call_with_this(iterator_method, target, NULL, 0);
+        return jayess_std_iterator_protocol_values(iterator);
+    }
+    if (jayess_value_get_member(target, "next") != NULL) {
+        return jayess_std_iterator_protocol_values(target);
+    }
+    return jayess_value_from_array(jayess_array_new());
+}
+
 static const char *jayess_string_env(jayess_value *env) {
     if (env == NULL || env->kind != JAYESS_VALUE_STRING || env->as.string_value == NULL) {
         return "";
@@ -5002,9 +7246,30 @@ static jayess_value *jayess_std_string_regex_split_method(jayess_value *env, jay
     return jayess_value_from_array(parts);
 }
 
+static jayess_value *jayess_std_symbol_to_string_method(jayess_value *env) {
+    char *text = jayess_value_stringify(env);
+    jayess_value *result = jayess_value_from_string(text != NULL ? text : "");
+    free(text);
+    return result;
+}
+
 jayess_value *jayess_value_get_member(jayess_value *target, const char *key) {
+    jayess_object *properties = NULL;
+    jayess_value *getter = NULL;
+    char *getter_key;
     if (target == NULL) {
         return NULL;
+    }
+    if (target->kind == JAYESS_VALUE_SYMBOL) {
+        if (strcmp(key, "description") == 0) {
+            if (target->as.symbol_value != NULL && target->as.symbol_value->description != NULL) {
+                return jayess_value_from_string(target->as.symbol_value->description);
+            }
+            return jayess_value_undefined();
+        }
+        if (strcmp(key, "toString") == 0) {
+            return jayess_value_from_function((void *)jayess_std_symbol_to_string_method, target, "toString", NULL, 0, 0);
+        }
     }
     if (target->kind == JAYESS_VALUE_STRING) {
         if (strcmp(key, "length") == 0) {
@@ -5107,6 +7372,31 @@ jayess_value *jayess_value_get_member(jayess_value *target, const char *key) {
                 return jayess_value_from_function((void *)jayess_std_set_clear_method, target, "clear", NULL, 0, 0);
             }
         }
+        if (jayess_std_kind_is(target, "WeakMap")) {
+            if (strcmp(key, "get") == 0) {
+                return jayess_value_from_function((void *)jayess_std_weak_map_get_method, target, "get", NULL, 1, 0);
+            }
+            if (strcmp(key, "set") == 0) {
+                return jayess_value_from_function((void *)jayess_std_weak_map_set_method, target, "set", NULL, 2, 0);
+            }
+            if (strcmp(key, "has") == 0) {
+                return jayess_value_from_function((void *)jayess_std_weak_map_has_method, target, "has", NULL, 1, 0);
+            }
+            if (strcmp(key, "delete") == 0) {
+                return jayess_value_from_function((void *)jayess_std_weak_map_delete_method, target, "delete", NULL, 1, 0);
+            }
+        }
+        if (jayess_std_kind_is(target, "WeakSet")) {
+            if (strcmp(key, "add") == 0) {
+                return jayess_value_from_function((void *)jayess_std_weak_set_add_method, target, "add", NULL, 1, 0);
+            }
+            if (strcmp(key, "has") == 0) {
+                return jayess_value_from_function((void *)jayess_std_weak_set_has_method, target, "has", NULL, 1, 0);
+            }
+            if (strcmp(key, "delete") == 0) {
+                return jayess_value_from_function((void *)jayess_std_weak_set_delete_method, target, "delete", NULL, 1, 0);
+            }
+        }
         if (jayess_std_kind_is(target, "Date")) {
             if (strcmp(key, "getTime") == 0) {
                 return jayess_value_from_function((void *)jayess_std_date_get_time_method, target, "getTime", NULL, 0, 0);
@@ -5134,10 +7424,9 @@ jayess_value *jayess_value_get_member(jayess_value *target, const char *key) {
                 return jayess_value_from_function((void *)jayess_std_error_to_string_method, target, "toString", NULL, 0, 0);
             }
         }
-		if (jayess_std_kind_is(target, "ArrayBuffer")) {
+		if (jayess_std_kind_is(target, "ArrayBuffer") || jayess_std_kind_is(target, "SharedArrayBuffer")) {
 			if (strcmp(key, "byteLength") == 0) {
-				jayess_array *bytes = jayess_std_bytes_slot(target);
-				return jayess_value_from_number((double)(bytes != NULL ? bytes->count : 0));
+				return jayess_value_from_number((double)jayess_std_byte_length(target));
 			}
 		}
 		if (jayess_std_kind_is(target, "DataView")) {
@@ -5194,34 +7483,44 @@ jayess_value *jayess_value_get_member(jayess_value *target, const char *key) {
 				return jayess_value_from_function((void *)jayess_std_data_view_set_float64_method, target, "setFloat64", NULL, 3, 0);
 			}
 		}
-		if (jayess_std_kind_is(target, "Uint8Array")) {
+		if (jayess_std_is_typed_array(target)) {
             if (strcmp(key, "length") == 0 || strcmp(key, "byteLength") == 0) {
-                jayess_array *bytes = jayess_std_bytes_slot(target);
-                return jayess_value_from_number((double)(bytes != NULL ? bytes->count : 0));
+                if (strcmp(key, "length") == 0) {
+                    return jayess_value_from_number((double)jayess_value_array_length(target));
+                }
+                {
+                    jayess_array *bytes = jayess_std_bytes_slot(target);
+                    return jayess_value_from_number((double)(bytes != NULL ? bytes->count : 0));
+                }
             }
             if (strcmp(key, "fill") == 0) {
-                return jayess_value_from_function((void *)jayess_std_uint8_fill_method, target, "fill", NULL, 1, 0);
+                return jayess_value_from_function((void *)jayess_std_typed_array_fill_method, target, "fill", NULL, 1, 0);
             }
 			if (strcmp(key, "includes") == 0) {
-				return jayess_value_from_function((void *)jayess_std_uint8_includes_method, target, "includes", NULL, 1, 0);
+				return jayess_value_from_function((void *)jayess_std_typed_array_includes_method, target, "includes", NULL, 1, 0);
 			}
 			if (strcmp(key, "indexOf") == 0) {
-				return jayess_value_from_function((void *)jayess_std_uint8_index_of_method, target, "indexOf", NULL, 1, 0);
+				if (jayess_std_kind_is(target, "Uint8Array")) {
+					return jayess_value_from_function((void *)jayess_std_uint8_index_of_method, target, "indexOf", NULL, 1, 0);
+				}
+				return jayess_value_from_function((void *)jayess_std_typed_array_index_of_method, target, "indexOf", NULL, 1, 0);
 			}
+			if (strcmp(key, "set") == 0) {
+				return jayess_value_from_function((void *)jayess_std_typed_array_set_method, target, "set", NULL, 2, 0);
+			}
+			if (strcmp(key, "slice") == 0) {
+				return jayess_value_from_function((void *)jayess_std_typed_array_slice_method, target, "slice", NULL, 2, 0);
+			}
+        }
+		if (jayess_std_kind_is(target, "Uint8Array")) {
 			if (strcmp(key, "startsWith") == 0) {
 				return jayess_value_from_function((void *)jayess_std_uint8_starts_with_method, target, "startsWith", NULL, 1, 0);
 			}
 			if (strcmp(key, "endsWith") == 0) {
 				return jayess_value_from_function((void *)jayess_std_uint8_ends_with_method, target, "endsWith", NULL, 1, 0);
 			}
-			if (strcmp(key, "set") == 0) {
-				return jayess_value_from_function((void *)jayess_std_uint8_set_method, target, "set", NULL, 2, 0);
-			}
 			if (strcmp(key, "copyWithin") == 0) {
 				return jayess_value_from_function((void *)jayess_std_uint8_copy_within_method, target, "copyWithin", NULL, 3, 0);
-			}
-			if (strcmp(key, "slice") == 0) {
-				return jayess_value_from_function((void *)jayess_std_uint8_slice_method, target, "slice", NULL, 2, 0);
 			}
             if (strcmp(key, "toString") == 0) {
                 return jayess_value_from_function((void *)jayess_std_uint8_to_string_method, target, "toString", NULL, 1, 0);
@@ -5239,6 +7538,11 @@ jayess_value *jayess_value_get_member(jayess_value *target, const char *key) {
         if (jayess_std_kind_is(target, "Iterator")) {
             if (strcmp(key, "next") == 0) {
                 return jayess_value_from_function((void *)jayess_std_iterator_next_method, target, "next", NULL, 0, 0);
+            }
+        }
+        if (jayess_std_kind_is(target, "AsyncIterator")) {
+            if (strcmp(key, "next") == 0) {
+                return jayess_value_from_function((void *)jayess_std_async_iterator_next_method, target, "next", NULL, 0, 0);
             }
         }
         if (jayess_std_kind_is(target, "Promise")) {
@@ -5348,6 +7652,84 @@ jayess_value *jayess_value_get_member(jayess_value *target, const char *key) {
                 return jayess_value_from_function((void *)jayess_std_write_stream_end_method, target, key, NULL, 0, 0);
             }
         }
+        if (jayess_std_kind_is(target, "CompressionStream")) {
+            if (strcmp(key, "readableEnded") == 0 || strcmp(key, "writableEnded") == 0 || strcmp(key, "errored") == 0 || strcmp(key, "error") == 0) {
+                return jayess_object_get(target->as.object_value, key);
+            }
+            if (strcmp(key, "read") == 0) {
+                return jayess_value_from_function((void *)jayess_std_compression_stream_read_method, target, "read", NULL, 1, 0);
+            }
+            if (strcmp(key, "readBytes") == 0) {
+                return jayess_value_from_function((void *)jayess_std_compression_stream_read_bytes_method, target, "readBytes", NULL, 1, 0);
+            }
+            if (strcmp(key, "write") == 0) {
+                return jayess_value_from_function((void *)jayess_std_compression_stream_write_method, target, "write", NULL, 1, 0);
+            }
+            if (strcmp(key, "end") == 0 || strcmp(key, "close") == 0 || strcmp(key, "destroy") == 0) {
+                return jayess_value_from_function((void *)jayess_std_compression_stream_end_method, target, key, NULL, 0, 0);
+            }
+            if (strcmp(key, "pipe") == 0) {
+                return jayess_value_from_function((void *)jayess_std_compression_stream_pipe_method, target, "pipe", NULL, 1, 0);
+            }
+            if (strcmp(key, "on") == 0) {
+                return jayess_value_from_function((void *)jayess_std_compression_stream_on_method, target, "on", NULL, 2, 0);
+            }
+            if (strcmp(key, "once") == 0) {
+                return jayess_value_from_function((void *)jayess_std_compression_stream_once_method, target, "once", NULL, 2, 0);
+            }
+            if (strcmp(key, "off") == 0 || strcmp(key, "removeListener") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_off_method, target, key, NULL, 2, 0);
+            }
+            if (strcmp(key, "listenerCount") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_listener_count_method, target, "listenerCount", NULL, 1, 0);
+            }
+            if (strcmp(key, "eventNames") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_event_names_method, target, "eventNames", NULL, 0, 0);
+            }
+        }
+        if (jayess_std_kind_is(target, "Worker")) {
+            if (strcmp(key, "closed") == 0) {
+                return jayess_object_get(target->as.object_value, "closed");
+            }
+            if (strcmp(key, "postMessage") == 0) {
+                return jayess_value_from_function((void *)jayess_std_worker_post_message_method, target, "postMessage", NULL, 1, 0);
+            }
+            if (strcmp(key, "receive") == 0) {
+                return jayess_value_from_function((void *)jayess_std_worker_receive_method, target, "receive", NULL, 1, 0);
+            }
+            if (strcmp(key, "terminate") == 0 || strcmp(key, "close") == 0) {
+                return jayess_value_from_function((void *)jayess_std_worker_terminate_method, target, key, NULL, 0, 0);
+            }
+        }
+        if (jayess_std_kind_is(target, "Watcher")) {
+            if (strcmp(key, "path") == 0 || strcmp(key, "exists") == 0 || strcmp(key, "isDir") == 0 || strcmp(key, "isFile") == 0 || strcmp(key, "size") == 0 || strcmp(key, "mtimeMs") == 0 || strcmp(key, "closed") == 0 || strcmp(key, "errored") == 0 || strcmp(key, "error") == 0) {
+                return jayess_object_get(target->as.object_value, key);
+            }
+            if (strcmp(key, "poll") == 0) {
+                return jayess_value_from_function((void *)jayess_std_fs_watch_poll_method, target, "poll", NULL, 0, 0);
+            }
+            if (strcmp(key, "pollAsync") == 0) {
+                return jayess_value_from_function((void *)jayess_std_fs_watch_poll_async_method, target, "pollAsync", NULL, 1, 0);
+            }
+            if (strcmp(key, "on") == 0) {
+                return jayess_value_from_function((void *)jayess_std_fs_watch_on_method, target, "on", NULL, 2, 0);
+            }
+            if (strcmp(key, "once") == 0) {
+                return jayess_value_from_function((void *)jayess_std_fs_watch_once_method, target, "once", NULL, 2, 0);
+            }
+            if (strcmp(key, "off") == 0 || strcmp(key, "removeListener") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_off_method, target, key, NULL, 2, 0);
+            }
+            if (strcmp(key, "listenerCount") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_listener_count_method, target, "listenerCount", NULL, 1, 0);
+            }
+            if (strcmp(key, "eventNames") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_event_names_method, target, "eventNames", NULL, 0, 0);
+            }
+            if (strcmp(key, "close") == 0 || strcmp(key, "destroy") == 0) {
+                return jayess_value_from_function((void *)jayess_std_fs_watch_close_method, target, key, NULL, 0, 0);
+            }
+        }
         if (jayess_std_kind_is(target, "Socket")) {
             if (strcmp(key, "connected") == 0 || strcmp(key, "closed") == 0 || strcmp(key, "readable") == 0 || strcmp(key, "writable") == 0 || strcmp(key, "timeout") == 0 || strcmp(key, "remoteAddress") == 0 || strcmp(key, "remotePort") == 0 || strcmp(key, "remoteFamily") == 0 || strcmp(key, "localAddress") == 0 || strcmp(key, "localPort") == 0 || strcmp(key, "localFamily") == 0 || strcmp(key, "bytesRead") == 0 || strcmp(key, "bytesWritten") == 0 || strcmp(key, "errored") == 0 || strcmp(key, "error") == 0 || strcmp(key, "secure") == 0 || strcmp(key, "authorized") == 0 || strcmp(key, "backend") == 0 || strcmp(key, "protocol") == 0 || strcmp(key, "alpnProtocol") == 0 || strcmp(key, "alpnProtocols") == 0) {
                 return jayess_object_get(target->as.object_value, key);
@@ -5404,8 +7786,58 @@ jayess_value *jayess_value_get_member(jayess_value *target, const char *key) {
                 return jayess_value_from_function((void *)jayess_std_socket_close_method, target, key, NULL, 0, 0);
             }
         }
+        if (jayess_std_kind_is(target, "DatagramSocket")) {
+            if (strcmp(key, "closed") == 0 || strcmp(key, "timeout") == 0 || strcmp(key, "localAddress") == 0 || strcmp(key, "localPort") == 0 || strcmp(key, "localFamily") == 0 || strcmp(key, "bytesRead") == 0 || strcmp(key, "bytesWritten") == 0 || strcmp(key, "errored") == 0 || strcmp(key, "error") == 0 || strcmp(key, "backend") == 0 || strcmp(key, "protocol") == 0 || strcmp(key, "broadcast") == 0 || strcmp(key, "multicastLoopback") == 0 || strcmp(key, "multicastInterface") == 0) {
+                return jayess_object_get(target->as.object_value, key);
+            }
+            if (strcmp(key, "address") == 0) {
+                return jayess_value_from_function((void *)jayess_std_socket_address_method, target, "address", NULL, 0, 0);
+            }
+            if (strcmp(key, "send") == 0) {
+                return jayess_value_from_function((void *)jayess_std_datagram_socket_send_method, target, "send", NULL, 3, 0);
+            }
+            if (strcmp(key, "receive") == 0) {
+                return jayess_value_from_function((void *)jayess_std_datagram_socket_receive_method, target, "receive", NULL, 1, 0);
+            }
+            if (strcmp(key, "setBroadcast") == 0) {
+                return jayess_value_from_function((void *)jayess_std_datagram_socket_set_broadcast_method, target, "setBroadcast", NULL, 1, 0);
+            }
+            if (strcmp(key, "joinGroup") == 0) {
+                return jayess_value_from_function((void *)jayess_std_datagram_socket_join_group_method, target, "joinGroup", NULL, 2, 0);
+            }
+            if (strcmp(key, "leaveGroup") == 0) {
+                return jayess_value_from_function((void *)jayess_std_datagram_socket_leave_group_method, target, "leaveGroup", NULL, 2, 0);
+            }
+            if (strcmp(key, "setMulticastInterface") == 0) {
+                return jayess_value_from_function((void *)jayess_std_datagram_socket_set_multicast_interface_method, target, "setMulticastInterface", NULL, 1, 0);
+            }
+            if (strcmp(key, "setMulticastLoopback") == 0) {
+                return jayess_value_from_function((void *)jayess_std_datagram_socket_set_multicast_loopback_method, target, "setMulticastLoopback", NULL, 1, 0);
+            }
+            if (strcmp(key, "setTimeout") == 0) {
+                return jayess_value_from_function((void *)jayess_std_socket_set_timeout_method, target, "setTimeout", NULL, 1, 0);
+            }
+            if (strcmp(key, "on") == 0) {
+                return jayess_value_from_function((void *)jayess_std_socket_on_method, target, "on", NULL, 2, 0);
+            }
+            if (strcmp(key, "once") == 0) {
+                return jayess_value_from_function((void *)jayess_std_socket_once_method, target, "once", NULL, 2, 0);
+            }
+            if (strcmp(key, "off") == 0 || strcmp(key, "removeListener") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_off_method, target, key, NULL, 2, 0);
+            }
+            if (strcmp(key, "listenerCount") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_listener_count_method, target, "listenerCount", NULL, 1, 0);
+            }
+            if (strcmp(key, "eventNames") == 0) {
+                return jayess_value_from_function((void *)jayess_std_stream_event_names_method, target, "eventNames", NULL, 0, 0);
+            }
+            if (strcmp(key, "close") == 0 || strcmp(key, "destroy") == 0) {
+                return jayess_value_from_function((void *)jayess_std_socket_close_method, target, key, NULL, 0, 0);
+            }
+        }
         if (jayess_std_kind_is(target, "Server")) {
-            if (strcmp(key, "listening") == 0 || strcmp(key, "closed") == 0 || strcmp(key, "host") == 0 || strcmp(key, "port") == 0 || strcmp(key, "timeout") == 0 || strcmp(key, "connectionsAccepted") == 0) {
+            if (strcmp(key, "listening") == 0 || strcmp(key, "closed") == 0 || strcmp(key, "host") == 0 || strcmp(key, "port") == 0 || strcmp(key, "timeout") == 0 || strcmp(key, "connectionsAccepted") == 0 || strcmp(key, "errored") == 0 || strcmp(key, "error") == 0) {
                 return jayess_object_get(target->as.object_value, key);
             }
             if (strcmp(key, "address") == 0) {
@@ -5439,10 +7871,22 @@ jayess_value *jayess_value_get_member(jayess_value *target, const char *key) {
                 return jayess_value_from_function((void *)jayess_std_stream_event_names_method, target, "eventNames", NULL, 0, 0);
             }
         }
-        return jayess_object_get(target->as.object_value, key);
+        properties = target->as.object_value;
+    } else if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
+        properties = target->as.function_value->properties;
     }
-    if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
-        return jayess_object_get(target->as.function_value->properties, key);
+    if (properties != NULL) {
+        getter_key = jayess_accessor_key("__jayess_get_", key);
+        if (getter_key != NULL) {
+            getter = jayess_object_get(properties, getter_key);
+        }
+        if (getter != NULL && getter->kind == JAYESS_VALUE_FUNCTION) {
+            free(getter_key);
+            return jayess_value_call_with_this(getter, target, NULL, 0);
+        }
+        free(getter_key);
+        getter = jayess_object_get(properties, key);
+        return getter != NULL ? getter : jayess_value_undefined();
     }
     return NULL;
 }
@@ -5473,44 +7917,77 @@ jayess_value *jayess_value_object_keys(jayess_value *target) {
     return jayess_value_from_array(jayess_array_new());
 }
 
+jayess_value *jayess_value_object_symbols(jayess_value *target) {
+    jayess_object *properties = NULL;
+    jayess_array *symbols = jayess_array_new();
+    jayess_object_entry *current;
+    if (target == NULL) {
+        return jayess_value_from_array(symbols);
+    }
+    if (target->kind == JAYESS_VALUE_OBJECT) {
+        properties = target->as.object_value;
+    } else if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
+        properties = target->as.function_value->properties;
+    }
+    if (properties == NULL) {
+        return jayess_value_from_array(symbols);
+    }
+    for (current = properties->head; current != NULL; current = current->next) {
+        if (jayess_object_entry_is_symbol(current)) {
+            jayess_array_push_value(symbols, current->key_value);
+        }
+    }
+    return jayess_value_from_array(symbols);
+}
+
 jayess_value *jayess_value_object_rest(jayess_value *target, jayess_value *excluded_keys) {
     jayess_object *source;
-    jayess_array *keys;
     jayess_object *copy;
-    int i;
+    jayess_object_entry *current;
 
     if (target == NULL || target->kind != JAYESS_VALUE_OBJECT || target->as.object_value == NULL) {
         return jayess_value_from_object(jayess_object_new());
     }
 
     source = target->as.object_value;
-    keys = jayess_object_keys(source);
     copy = jayess_object_new();
     if (copy == NULL) {
         return jayess_value_from_object(NULL);
     }
 
-    for (i = 0; keys != NULL && i < keys->count; i++) {
-        jayess_value *key_value = keys->values[i];
+    for (current = source->head; current != NULL; current = current->next) {
+        jayess_value *key_value;
         const char *key;
         int skip = 0;
         int j;
 
-        if (key_value == NULL || key_value->kind != JAYESS_VALUE_STRING) {
+        if (current->key != NULL && strncmp(current->key, "__jayess_", 10) == 0) {
             continue;
         }
-        key = key_value->as.string_value;
+        if (current->key != NULL) {
+            key_value = jayess_value_from_string(current->key);
+        } else {
+            key_value = current->key_value;
+        }
+        if (key_value == NULL) {
+            continue;
+        }
+        key = key_value->kind == JAYESS_VALUE_STRING ? key_value->as.string_value : NULL;
         if (excluded_keys != NULL && excluded_keys->kind == JAYESS_VALUE_ARRAY && excluded_keys->as.array_value != NULL) {
             for (j = 0; j < excluded_keys->as.array_value->count; j++) {
                 jayess_value *excluded = excluded_keys->as.array_value->values[j];
-                if (excluded != NULL && excluded->kind == JAYESS_VALUE_STRING && jayess_string_eq(key, excluded->as.string_value)) {
+                if (excluded != NULL && jayess_value_eq(key_value, excluded)) {
                     skip = 1;
                     break;
                 }
             }
         }
         if (!skip) {
-            jayess_object_set_value(copy, key, jayess_object_get(source, key));
+            if (key != NULL) {
+                jayess_object_set_value(copy, key, current->value);
+            } else {
+                jayess_object_set_key_value(copy, key_value, current->value);
+            }
         }
     }
 
@@ -5524,6 +8001,9 @@ jayess_value *jayess_value_iterable_values(jayess_value *target) {
     if (target->kind == JAYESS_VALUE_ARRAY) {
         return jayess_value_from_array(jayess_array_clone(target->as.array_value));
     }
+    if (target->kind == JAYESS_VALUE_STRING) {
+        return jayess_std_iterable_protocol_values(target);
+    }
     if (target->kind == JAYESS_VALUE_OBJECT) {
         if (jayess_std_kind_is(target, "Map")) {
             return jayess_std_map_entries_method(target);
@@ -5531,9 +8011,14 @@ jayess_value *jayess_value_iterable_values(jayess_value *target) {
         if (jayess_std_kind_is(target, "Set")) {
             return jayess_std_set_values_method(target);
         }
-        if (jayess_std_kind_is(target, "Uint8Array")) {
-            jayess_array *bytes = jayess_std_bytes_slot(target);
-            return jayess_value_from_array(jayess_array_clone(bytes));
+        if (jayess_std_is_typed_array(target)) {
+            jayess_array *values = jayess_array_new();
+            int i;
+            int length = jayess_value_array_length(target);
+            for (i = 0; i < length; i++) {
+                jayess_array_push_value(values, jayess_value_from_number(jayess_std_typed_array_get_number(target, i)));
+            }
+            return jayess_value_from_array(values);
         }
         if (jayess_std_kind_is(target, "Iterator")) {
             jayess_value *values = jayess_object_get(target->as.object_value, "__jayess_iterator_values");
@@ -5542,7 +8027,7 @@ jayess_value *jayess_value_iterable_values(jayess_value *target) {
             }
         }
     }
-    return jayess_value_from_array(jayess_array_new());
+    return jayess_std_iterable_protocol_values(target);
 }
 
 jayess_value *jayess_value_object_values(jayess_value *target) {
@@ -5581,40 +8066,51 @@ jayess_value *jayess_value_object_entries(jayess_value *target) {
 }
 
 jayess_value *jayess_value_object_assign(jayess_value *target, jayess_value *source) {
-    jayess_value *keys_value;
-    int i;
+    jayess_object *properties = NULL;
+    jayess_object_entry *current;
     if (target == NULL || source == NULL) {
         return target != NULL ? target : jayess_value_undefined();
     }
-    keys_value = jayess_value_object_keys(source);
-    if (keys_value == NULL || keys_value->kind != JAYESS_VALUE_ARRAY || keys_value->as.array_value == NULL) {
+    if (source->kind == JAYESS_VALUE_OBJECT) {
+        properties = source->as.object_value;
+    } else if (source->kind == JAYESS_VALUE_FUNCTION && source->as.function_value != NULL) {
+        properties = source->as.function_value->properties;
+    }
+    if (properties == NULL) {
         return target;
     }
-    for (i = 0; i < keys_value->as.array_value->count; i++) {
-        jayess_value *key = keys_value->as.array_value->values[i];
-        if (key != NULL && key->kind == JAYESS_VALUE_STRING) {
-            jayess_value_set_member(target, key->as.string_value, jayess_value_get_member(source, key->as.string_value));
+    for (current = properties->head; current != NULL; current = current->next) {
+        if (current->key != NULL) {
+            if (strncmp(current->key, "__jayess_", 10) == 0) {
+                continue;
+            }
+            jayess_value_set_member(target, current->key, current->value);
+        } else if (jayess_object_entry_is_symbol(current)) {
+            if (target->kind == JAYESS_VALUE_OBJECT && target->as.object_value != NULL) {
+                jayess_object_set_key_value(target->as.object_value, current->key_value, current->value);
+            } else if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
+                jayess_object_set_key_value(target->as.function_value->properties, current->key_value, current->value);
+            }
         }
     }
     return target;
 }
 
 jayess_value *jayess_value_object_has_own(jayess_value *target, jayess_value *key) {
-    char *text;
+    jayess_value *property_key;
     jayess_value *value = NULL;
     if (target == NULL || key == NULL) {
         return jayess_value_from_bool(0);
     }
-    text = jayess_value_stringify(key);
-    if (text == NULL) {
+    property_key = jayess_value_to_property_key(key);
+    if (property_key == NULL) {
         return jayess_value_from_bool(0);
     }
     if (target->kind == JAYESS_VALUE_OBJECT && target->as.object_value != NULL) {
-        value = jayess_object_get(target->as.object_value, text);
+        value = jayess_object_get_key_value(target->as.object_value, property_key);
     } else if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
-        value = jayess_object_get(target->as.function_value->properties, text);
+        value = jayess_object_get_key_value(target->as.function_value->properties, property_key);
     }
-    free(text);
     return jayess_value_from_bool(value != NULL);
 }
 
@@ -6607,6 +9103,132 @@ static jayess_value *jayess_std_tls_connect_socket(jayess_value *options) {
 #endif
 }
 
+static jayess_value *jayess_std_tls_accept_socket(jayess_value *socket_value, jayess_value *options) {
+    jayess_object *object_options = jayess_value_as_object(options);
+    jayess_value *cert_value = object_options != NULL ? jayess_object_get(object_options, "cert") : NULL;
+    jayess_value *key_value = object_options != NULL ? jayess_object_get(object_options, "key") : NULL;
+    jayess_value *cert_file_value = object_options != NULL ? jayess_object_get(object_options, "certFile") : NULL;
+    jayess_value *key_file_value = object_options != NULL ? jayess_object_get(object_options, "keyFile") : NULL;
+    jayess_socket_handle handle = jayess_std_socket_handle(socket_value);
+    char *cert_text = NULL;
+    char *key_text = NULL;
+    jayess_tls_socket_state *state = NULL;
+#ifdef _WIN32
+    (void)socket_value;
+    (void)object_options;
+    (void)cert_value;
+    (void)key_value;
+    (void)cert_file_value;
+    (void)key_file_value;
+    (void)handle;
+    jayess_throw(jayess_type_error_value("https.createServer is not available on this platform"));
+    return jayess_value_undefined();
+#else
+    if (socket_value == NULL || socket_value->kind != JAYESS_VALUE_OBJECT || socket_value->as.object_value == NULL || !jayess_std_kind_is(socket_value, "Socket")) {
+        jayess_throw(jayess_type_error_value("https.createServer accepted an invalid socket"));
+        return jayess_value_undefined();
+    }
+    if (object_options == NULL) {
+        jayess_throw(jayess_type_error_value("https.createServer options must be an object"));
+        return jayess_value_undefined();
+    }
+    cert_text = jayess_value_stringify(!jayess_value_is_nullish(cert_value) ? cert_value : cert_file_value);
+    key_text = jayess_value_stringify(!jayess_value_is_nullish(key_value) ? key_value : key_file_value);
+    if (handle == JAYESS_INVALID_SOCKET) {
+        free(cert_text);
+        free(key_text);
+        jayess_throw(jayess_type_error_value("https.createServer accepted an invalid socket handle"));
+        return jayess_value_undefined();
+    }
+    if (cert_text == NULL || cert_text[0] == '\0' || key_text == NULL || key_text[0] == '\0') {
+        free(cert_text);
+        free(key_text);
+        jayess_throw(jayess_type_error_value("https.createServer requires cert and key file paths"));
+        return jayess_value_undefined();
+    }
+    OPENSSL_init_ssl(0, NULL);
+    state = (jayess_tls_socket_state *)calloc(1, sizeof(jayess_tls_socket_state));
+    if (state == NULL) {
+        free(cert_text);
+        free(key_text);
+        jayess_throw(jayess_type_error_value("https.createServer failed to allocate TLS state"));
+        return jayess_value_undefined();
+    }
+    state->handle = handle;
+    state->ctx = SSL_CTX_new(TLS_server_method());
+    if (state->ctx == NULL) {
+        free(cert_text);
+        free(key_text);
+        jayess_std_tls_state_free(state, 0);
+        jayess_throw(jayess_type_error_value("https.createServer failed to create TLS context"));
+        return jayess_value_undefined();
+    }
+    if (SSL_CTX_use_certificate_file(state->ctx, cert_text, SSL_FILETYPE_PEM) != 1) {
+        free(cert_text);
+        free(key_text);
+        jayess_std_tls_state_free(state, 0);
+        jayess_throw(jayess_type_error_value("https.createServer failed to load server certificate"));
+        return jayess_value_undefined();
+    }
+    if (SSL_CTX_use_PrivateKey_file(state->ctx, key_text, SSL_FILETYPE_PEM) != 1) {
+        free(cert_text);
+        free(key_text);
+        jayess_std_tls_state_free(state, 0);
+        jayess_throw(jayess_type_error_value("https.createServer failed to load private key"));
+        return jayess_value_undefined();
+    }
+    if (SSL_CTX_check_private_key(state->ctx) != 1) {
+        free(cert_text);
+        free(key_text);
+        jayess_std_tls_state_free(state, 0);
+        jayess_throw(jayess_type_error_value("https.createServer certificate and private key do not match"));
+        return jayess_value_undefined();
+    }
+    state->ssl = SSL_new(state->ctx);
+    if (state->ssl == NULL) {
+        free(cert_text);
+        free(key_text);
+        jayess_std_tls_state_free(state, 0);
+        jayess_throw(jayess_type_error_value("https.createServer failed to create TLS session"));
+        return jayess_value_undefined();
+    }
+    SSL_set_fd(state->ssl, handle);
+    if (SSL_accept(state->ssl) != 1) {
+        free(cert_text);
+        free(key_text);
+        jayess_std_tls_state_free(state, 0);
+        jayess_std_socket_close_handle(handle);
+        jayess_std_socket_set_handle(socket_value, JAYESS_INVALID_SOCKET);
+        jayess_throw(jayess_type_error_value("https.createServer TLS handshake failed"));
+        return jayess_value_undefined();
+    }
+    socket_value->as.object_value->native_handle = state;
+    jayess_object_set_value(socket_value->as.object_value, "secure", jayess_value_from_bool(1));
+    jayess_object_set_value(socket_value->as.object_value, "authorized", jayess_value_from_bool(0));
+    jayess_object_set_value(socket_value->as.object_value, "backend", jayess_value_from_string("openssl"));
+    jayess_object_set_value(socket_value->as.object_value, "protocol", jayess_value_from_string(SSL_get_version(state->ssl)));
+    {
+        const unsigned char *selected = NULL;
+        unsigned int selected_length = 0;
+        char negotiated_alpn[256];
+        negotiated_alpn[0] = '\0';
+        SSL_get0_alpn_selected(state->ssl, &selected, &selected_length);
+        if (selected != NULL && selected_length > 0) {
+            size_t copy_length = selected_length;
+            if (copy_length >= sizeof(negotiated_alpn)) {
+                copy_length = sizeof(negotiated_alpn) - 1;
+            }
+            memcpy(negotiated_alpn, selected, copy_length);
+            negotiated_alpn[copy_length] = '\0';
+        }
+        jayess_object_set_value(socket_value->as.object_value, "alpnProtocol", jayess_value_from_string(negotiated_alpn));
+    }
+    free(cert_text);
+    free(key_text);
+    return socket_value;
+#endif
+}
+
 static void jayess_std_socket_mark_closed(jayess_value *env) {
     if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
         jayess_object_set_value(env->as.object_value, "connected", jayess_value_from_bool(0));
@@ -6682,6 +9304,34 @@ static jayess_value *jayess_std_socket_value_from_handle(jayess_socket_handle ha
     jayess_object_set_value(socket_object, "protocol", jayess_value_from_string(""));
     jayess_object_set_value(socket_object, "alpnProtocol", jayess_value_from_string(""));
     jayess_object_set_value(socket_object, "alpnProtocols", jayess_value_from_array(jayess_array_new()));
+    return jayess_value_from_object(socket_object);
+}
+
+static jayess_value *jayess_std_datagram_socket_value_from_handle(jayess_socket_handle handle) {
+    jayess_object *socket_object;
+    if (handle == JAYESS_INVALID_SOCKET) {
+        return jayess_value_undefined();
+    }
+    socket_object = jayess_object_new();
+    if (socket_object == NULL) {
+        jayess_std_socket_close_handle(handle);
+        return jayess_value_from_object(NULL);
+    }
+    socket_object->socket_handle = handle;
+    jayess_object_set_value(socket_object, "__jayess_std_kind", jayess_value_from_string("DatagramSocket"));
+    jayess_object_set_value(socket_object, "closed", jayess_value_from_bool(0));
+    jayess_object_set_value(socket_object, "localAddress", jayess_value_from_string(""));
+    jayess_object_set_value(socket_object, "localPort", jayess_value_from_number(0));
+    jayess_object_set_value(socket_object, "localFamily", jayess_value_from_number(0));
+    jayess_object_set_value(socket_object, "bytesRead", jayess_value_from_number(0));
+    jayess_object_set_value(socket_object, "bytesWritten", jayess_value_from_number(0));
+    jayess_object_set_value(socket_object, "timeout", jayess_value_from_number(0));
+    jayess_object_set_value(socket_object, "errored", jayess_value_from_bool(0));
+    jayess_object_set_value(socket_object, "backend", jayess_value_from_string("udp"));
+    jayess_object_set_value(socket_object, "protocol", jayess_value_from_string("udp"));
+    jayess_object_set_value(socket_object, "broadcast", jayess_value_from_bool(0));
+    jayess_object_set_value(socket_object, "multicastLoopback", jayess_value_from_bool(1));
+    jayess_object_set_value(socket_object, "multicastInterface", jayess_value_from_string(""));
     return jayess_value_from_object(socket_object);
 }
 
@@ -7498,6 +10148,180 @@ static void jayess_std_stream_emit_error(jayess_value *env, const char *message)
     jayess_std_stream_emit(env, "error", error);
 }
 
+static void jayess_std_fs_watch_emit_close(jayess_value *env) {
+    jayess_value *already_emitted;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return;
+    }
+    already_emitted = jayess_object_get(env->as.object_value, "__jayess_watcher_close_emitted");
+    if (jayess_value_as_bool(already_emitted)) {
+        return;
+    }
+    jayess_object_set_value(env->as.object_value, "__jayess_watcher_close_emitted", jayess_value_from_bool(1));
+    jayess_std_stream_emit(env, "close", jayess_value_undefined());
+}
+
+static jayess_value *jayess_std_fs_watch_poll_method(jayess_value *env) {
+    jayess_fs_watch_state *state = jayess_std_fs_watch_state(env);
+    int exists;
+    int is_dir;
+    double size;
+    double mtime_ms;
+    int changed;
+    jayess_value *event;
+    if (state == NULL || state->closed) {
+        return jayess_value_null();
+    }
+    jayess_fs_watch_snapshot_text(state->path, &exists, &is_dir, &size, &mtime_ms);
+    changed = exists != state->exists || is_dir != state->is_dir || size != state->size || mtime_ms != state->mtime_ms;
+    if (!changed) {
+        return jayess_value_null();
+    }
+    state->exists = exists;
+    state->is_dir = is_dir;
+    state->size = size;
+    state->mtime_ms = mtime_ms;
+    jayess_std_fs_watch_apply_snapshot(env, exists, is_dir, size, mtime_ms);
+    event = jayess_std_fs_watch_event_value(state);
+    jayess_std_stream_emit(env, "change", event);
+    return event;
+}
+
+static jayess_value *jayess_std_fs_watch_poll_async_tick(jayess_value *env) {
+    jayess_value *watcher;
+    jayess_value *promise;
+    jayess_value *callback;
+    jayess_value *result;
+    double deadline;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return jayess_value_undefined();
+    }
+    watcher = jayess_object_get(env->as.object_value, "watcher");
+    promise = jayess_object_get(env->as.object_value, "promise");
+    callback = jayess_object_get(env->as.object_value, "callback");
+    deadline = jayess_value_to_number(jayess_object_get(env->as.object_value, "deadlineMs"));
+    if (promise == NULL || promise->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(promise, "Promise") || !jayess_promise_is_state(promise, "pending")) {
+        return jayess_value_undefined();
+    }
+    result = jayess_std_fs_watch_poll_method(watcher);
+    if (result != NULL && result->kind != JAYESS_VALUE_NULL) {
+        jayess_promise_settle(promise, "fulfilled", result);
+        return jayess_value_undefined();
+    }
+    if (watcher == NULL || watcher->kind != JAYESS_VALUE_OBJECT || jayess_value_as_bool(jayess_value_get_member(watcher, "closed"))) {
+        jayess_promise_settle(promise, "fulfilled", jayess_value_null());
+        return jayess_value_undefined();
+    }
+    if (deadline >= 0 && jayess_now_ms() >= deadline) {
+        jayess_promise_settle(promise, "fulfilled", jayess_value_null());
+        return jayess_value_undefined();
+    }
+    jayess_set_timeout(callback, jayess_value_from_number(10));
+    return jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_fs_watch_poll_async_method(jayess_value *env, jayess_value *timeout_ms) {
+    jayess_value *immediate;
+    jayess_value *promise;
+    jayess_object *state;
+    jayess_value *state_value;
+    jayess_value *callback;
+    double timeout = -1.0;
+    if (timeout_ms != NULL && !jayess_value_is_nullish(timeout_ms)) {
+        timeout = jayess_value_to_number(timeout_ms);
+        if (timeout < 0) {
+            timeout = 0;
+        }
+    }
+    immediate = jayess_std_fs_watch_poll_method(env);
+    if (immediate != NULL && immediate->kind != JAYESS_VALUE_NULL) {
+        return jayess_std_promise_resolve(immediate);
+    }
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL || jayess_value_as_bool(jayess_object_get(env->as.object_value, "closed"))) {
+        return jayess_std_promise_resolve(jayess_value_null());
+    }
+    promise = jayess_std_promise_pending();
+    state = jayess_object_new();
+    if (state == NULL) {
+        jayess_promise_settle(promise, "rejected", jayess_type_error_value("failed to allocate watcher async state"));
+        return promise;
+    }
+    state_value = jayess_value_from_object(state);
+    jayess_object_set_value(state, "watcher", env);
+    jayess_object_set_value(state, "promise", promise);
+    jayess_object_set_value(state, "deadlineMs", jayess_value_from_number(timeout >= 0 ? jayess_now_ms() + timeout : -1.0));
+    callback = jayess_value_from_function((void *)jayess_std_fs_watch_poll_async_tick, state_value, "__jayess_fs_watch_poll_async_tick", NULL, 0, 0);
+    jayess_object_set_value(state, "callback", callback);
+    jayess_set_timeout(callback, jayess_value_from_number(10));
+    return promise;
+}
+
+static jayess_value *jayess_std_fs_watch_close_method(jayess_value *env) {
+    jayess_fs_watch_state *state = jayess_std_fs_watch_state(env);
+    if (state != NULL && !state->closed) {
+        state->closed = 1;
+        free(state->path);
+        free(state);
+        if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+            env->as.object_value->native_handle = NULL;
+        }
+    }
+    if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+        jayess_object_set_value(env->as.object_value, "closed", jayess_value_from_bool(1));
+    }
+    jayess_std_fs_watch_emit_close(env);
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_fs_watch_on_method(jayess_value *env, jayess_value *event, jayess_value *callback) {
+    char *event_text = jayess_value_stringify(event);
+    if (event_text == NULL || callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION) {
+        free(event_text);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        free(event_text);
+        return jayess_value_undefined();
+    }
+    if (strcmp(event_text, "error") == 0) {
+        jayess_std_stream_register_error_handler(env, callback);
+    } else if (strcmp(event_text, "close") == 0) {
+        jayess_std_stream_on(env, "close", callback);
+        if (jayess_value_as_bool(jayess_object_get(env->as.object_value, "closed"))) {
+            jayess_value_call_one(callback, jayess_value_undefined());
+        }
+    } else if (strcmp(event_text, "change") == 0) {
+        jayess_std_stream_on(env, "change", callback);
+    }
+    free(event_text);
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_fs_watch_once_method(jayess_value *env, jayess_value *event, jayess_value *callback) {
+    char *event_text = jayess_value_stringify(event);
+    if (event_text == NULL || callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION) {
+        free(event_text);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        free(event_text);
+        return jayess_value_undefined();
+    }
+    if (strcmp(event_text, "error") == 0) {
+        jayess_std_stream_register_error_once(env, callback);
+    } else if (strcmp(event_text, "close") == 0) {
+        if (jayess_value_as_bool(jayess_object_get(env->as.object_value, "closed"))) {
+            jayess_value_call_one(callback, jayess_value_undefined());
+        } else {
+            jayess_std_stream_once(env, "close", callback);
+        }
+    } else if (strcmp(event_text, "change") == 0) {
+        jayess_std_stream_once(env, "change", callback);
+    }
+    free(event_text);
+    return env != NULL ? env : jayess_value_undefined();
+}
+
 static void jayess_std_stream_register_error_handler(jayess_value *env, jayess_value *callback) {
     jayess_value *errored;
     if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL || callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION) {
@@ -7769,20 +10593,25 @@ static jayess_value *jayess_std_stream_off_method(jayess_value *env, jayess_valu
 }
 
 static jayess_value *jayess_std_read_stream_pipe_method(jayess_value *env, jayess_value *destination) {
-    if (destination == NULL || destination->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(destination, "WriteStream")) {
+    if (destination == NULL || destination->kind != JAYESS_VALUE_OBJECT) {
         return destination != NULL ? destination : jayess_value_undefined();
     }
     while (1) {
-        jayess_value *chunk = jayess_std_read_stream_read_chunk(env, jayess_value_undefined());
+        jayess_value *chunk;
+        if (jayess_std_kind_is(destination, "CompressionStream")) {
+            chunk = jayess_std_read_stream_read_bytes_method(env, jayess_value_undefined());
+        } else {
+            chunk = jayess_std_read_stream_read_chunk(env, jayess_value_undefined());
+        }
         if (chunk == NULL || chunk->kind == JAYESS_VALUE_NULL || chunk->kind == JAYESS_VALUE_UNDEFINED) {
             break;
         }
-        jayess_std_write_stream_write_method(destination, chunk);
+        jayess_std_writable_write(destination, chunk);
         if (jayess_has_exception()) {
             break;
         }
     }
-    jayess_std_write_stream_end_method(destination);
+    jayess_std_writable_end(destination);
     return destination;
 }
 
@@ -7865,7 +10694,7 @@ static jayess_value *jayess_std_http_body_stream_once_method(jayess_value *env, 
 }
 
 static jayess_value *jayess_std_http_body_stream_pipe_method(jayess_value *env, jayess_value *destination) {
-    if (destination == NULL || destination->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(destination, "WriteStream")) {
+    if (destination == NULL || destination->kind != JAYESS_VALUE_OBJECT) {
         return destination != NULL ? destination : jayess_value_undefined();
     }
     while (1) {
@@ -7873,12 +10702,12 @@ static jayess_value *jayess_std_http_body_stream_pipe_method(jayess_value *env, 
         if (chunk == NULL || chunk->kind == JAYESS_VALUE_NULL || chunk->kind == JAYESS_VALUE_UNDEFINED) {
             break;
         }
-        jayess_std_write_stream_write_method(destination, chunk);
+        jayess_std_writable_write(destination, chunk);
         if (jayess_has_exception()) {
             break;
         }
     }
-    jayess_std_write_stream_end_method(destination);
+    jayess_std_writable_end(destination);
     return destination;
 }
 
@@ -7977,6 +10806,234 @@ static jayess_value *jayess_std_write_stream_end_method(jayess_value *env) {
     return jayess_value_undefined();
 }
 
+static jayess_value *jayess_std_writable_write(jayess_value *destination, jayess_value *chunk) {
+    if (destination == NULL || destination->kind != JAYESS_VALUE_OBJECT) {
+        return jayess_value_from_bool(0);
+    }
+    if (jayess_std_kind_is(destination, "WriteStream")) {
+        return jayess_std_write_stream_write_method(destination, chunk);
+    }
+    if (jayess_std_kind_is(destination, "CompressionStream")) {
+        return jayess_std_compression_stream_write_method(destination, chunk);
+    }
+    return jayess_value_from_bool(0);
+}
+
+static jayess_value *jayess_std_writable_end(jayess_value *destination) {
+    if (destination == NULL || destination->kind != JAYESS_VALUE_OBJECT) {
+        return jayess_value_undefined();
+    }
+    if (jayess_std_kind_is(destination, "WriteStream")) {
+        return jayess_std_write_stream_end_method(destination);
+    }
+    if (jayess_std_kind_is(destination, "CompressionStream")) {
+        return jayess_std_compression_stream_end_method(destination);
+    }
+    return jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_compression_stream_new(const char *mode) {
+    jayess_object *object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("CompressionStream"));
+    jayess_object_set_value(object, "__jayess_compression_mode", jayess_value_from_string(mode != NULL ? mode : ""));
+    jayess_object_set_value(object, "__jayess_bytes", jayess_value_from_array(jayess_array_new()));
+    jayess_object_set_value(object, "__jayess_compression_offset", jayess_value_from_number(0));
+    jayess_object_set_value(object, "readableEnded", jayess_value_from_bool(0));
+    jayess_object_set_value(object, "writableEnded", jayess_value_from_bool(0));
+    jayess_object_set_value(object, "errored", jayess_value_from_bool(0));
+    jayess_object_set_value(object, "error", jayess_value_null());
+    return jayess_value_from_object(object);
+}
+
+static void jayess_std_compression_stream_mark_ended(jayess_value *env) {
+    if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+        jayess_object_set_value(env->as.object_value, "readableEnded", jayess_value_from_bool(1));
+    }
+}
+
+static jayess_value *jayess_std_compression_stream_transform(jayess_value *env, jayess_value *value) {
+    jayess_value *mode_value;
+    char *mode;
+    jayess_value *result = NULL;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return jayess_value_undefined();
+    }
+    mode_value = jayess_object_get(env->as.object_value, "__jayess_compression_mode");
+    mode = jayess_value_stringify(mode_value);
+    if (mode == NULL) {
+        return jayess_value_undefined();
+    }
+    if (strcmp(mode, "gzip") == 0) {
+        result = jayess_std_compression_gzip(value);
+    } else if (strcmp(mode, "gunzip") == 0) {
+        result = jayess_std_compression_gunzip(value);
+    } else if (strcmp(mode, "deflate") == 0) {
+        result = jayess_std_compression_deflate(value);
+    } else if (strcmp(mode, "inflate") == 0) {
+        result = jayess_std_compression_inflate(value);
+    } else if (strcmp(mode, "brotli") == 0) {
+        result = jayess_std_compression_brotli(value);
+    } else if (strcmp(mode, "unbrotli") == 0) {
+        result = jayess_std_compression_unbrotli(value);
+    }
+    free(mode);
+    return result != NULL ? result : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_compression_stream_write_method(jayess_value *env, jayess_value *value) {
+    jayess_value *chunk;
+    jayess_array *target_bytes;
+    jayess_array *chunk_bytes;
+    int i;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return jayess_value_from_bool(0);
+    }
+    chunk = jayess_std_compression_stream_transform(env, value);
+    if (chunk == NULL || chunk->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(chunk, "Uint8Array")) {
+        jayess_std_stream_emit_error(env, "compression stream transform failed");
+        return jayess_value_from_bool(0);
+    }
+    target_bytes = jayess_std_bytes_slot(env);
+    chunk_bytes = jayess_std_bytes_slot(chunk);
+    if (target_bytes == NULL || chunk_bytes == NULL) {
+        jayess_std_stream_emit_error(env, "compression stream buffer is unavailable");
+        return jayess_value_from_bool(0);
+    }
+    for (i = 0; i < chunk_bytes->count; i++) {
+        jayess_array_push_value(target_bytes, jayess_array_get(chunk_bytes, i));
+    }
+    return jayess_value_from_bool(1);
+}
+
+static jayess_value *jayess_std_compression_stream_read_bytes_method(jayess_value *env, jayess_value *size_value) {
+    jayess_array *bytes = jayess_std_bytes_slot(env);
+    int offset;
+    int requested;
+    int available;
+    int count;
+    jayess_value *out;
+    jayess_array *out_bytes;
+    int i;
+    if (bytes == NULL) {
+        jayess_std_compression_stream_mark_ended(env);
+        return jayess_value_undefined();
+    }
+    offset = (int)jayess_value_to_number(jayess_object_get(env->as.object_value, "__jayess_compression_offset"));
+    if (offset >= bytes->count) {
+        if (jayess_value_as_bool(jayess_object_get(env->as.object_value, "writableEnded"))) {
+            jayess_std_compression_stream_mark_ended(env);
+        }
+        return jayess_value_undefined();
+    }
+    requested = jayess_std_stream_requested_size(size_value, bytes->count - offset);
+    available = bytes->count - offset;
+    count = requested < available ? requested : available;
+    out = jayess_std_uint8_array_new(jayess_value_from_number((double)count));
+    out_bytes = jayess_std_bytes_slot(out);
+    if (out_bytes == NULL) {
+        return jayess_value_undefined();
+    }
+    for (i = 0; i < count; i++) {
+        jayess_array_set_value(out_bytes, i, jayess_array_get(bytes, offset + i));
+    }
+    jayess_object_set_value(env->as.object_value, "__jayess_compression_offset", jayess_value_from_number((double)(offset + count)));
+    if (offset + count >= bytes->count && jayess_value_as_bool(jayess_object_get(env->as.object_value, "writableEnded"))) {
+        jayess_std_compression_stream_mark_ended(env);
+        jayess_std_stream_emit(env, "end", jayess_value_undefined());
+    }
+    return out;
+}
+
+static jayess_value *jayess_std_compression_stream_read_method(jayess_value *env, jayess_value *size_value) {
+    jayess_value *chunk = jayess_std_compression_stream_read_bytes_method(env, size_value);
+    if (chunk == NULL || chunk->kind == JAYESS_VALUE_UNDEFINED || chunk->kind == JAYESS_VALUE_NULL) {
+        return chunk != NULL ? chunk : jayess_value_undefined();
+    }
+    return jayess_std_uint8_to_string_method(chunk, jayess_value_undefined());
+}
+
+static jayess_value *jayess_std_compression_stream_pipe_method(jayess_value *env, jayess_value *destination) {
+    while (1) {
+        jayess_value *chunk = jayess_std_compression_stream_read_bytes_method(env, jayess_value_undefined());
+        if (chunk == NULL || chunk->kind == JAYESS_VALUE_NULL || chunk->kind == JAYESS_VALUE_UNDEFINED) {
+            break;
+        }
+        jayess_std_writable_write(destination, chunk);
+        if (jayess_has_exception()) {
+            break;
+        }
+    }
+    jayess_std_writable_end(destination);
+    return destination != NULL ? destination : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_compression_stream_end_method(jayess_value *env) {
+    if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+        jayess_array *bytes = jayess_std_bytes_slot(env);
+        int offset = (int)jayess_value_to_number(jayess_object_get(env->as.object_value, "__jayess_compression_offset"));
+        jayess_object_set_value(env->as.object_value, "writableEnded", jayess_value_from_bool(1));
+        jayess_std_stream_emit(env, "finish", jayess_value_undefined());
+        if (bytes == NULL || offset >= bytes->count) {
+            jayess_std_compression_stream_mark_ended(env);
+            jayess_std_stream_emit(env, "end", jayess_value_undefined());
+        }
+    }
+    return jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_compression_stream_on_method(jayess_value *env, jayess_value *event, jayess_value *callback) {
+    char *event_text = jayess_value_stringify(event);
+    if (event_text == NULL || callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION) {
+        free(event_text);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (strcmp(event_text, "error") == 0) {
+        jayess_std_stream_register_error_handler(env, callback);
+    } else if (strcmp(event_text, "end") == 0 || strcmp(event_text, "finish") == 0) {
+        jayess_std_stream_on(env, strcmp(event_text, "finish") == 0 ? "finish" : "end", callback);
+    } else if (strcmp(event_text, "data") == 0) {
+        while (1) {
+            jayess_value *chunk = jayess_std_compression_stream_read_method(env, jayess_value_undefined());
+            if (chunk == NULL || chunk->kind == JAYESS_VALUE_NULL || chunk->kind == JAYESS_VALUE_UNDEFINED) {
+                break;
+            }
+            jayess_value_call_one(callback, chunk);
+            if (jayess_has_exception()) {
+                break;
+            }
+        }
+    }
+    free(event_text);
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_compression_stream_once_method(jayess_value *env, jayess_value *event, jayess_value *callback) {
+    char *event_text = jayess_value_stringify(event);
+    if (event_text == NULL || callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION) {
+        free(event_text);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (strcmp(event_text, "error") == 0) {
+        jayess_std_stream_register_error_once(env, callback);
+    } else if (strcmp(event_text, "end") == 0 || strcmp(event_text, "finish") == 0) {
+        if (jayess_value_as_bool(jayess_object_get(env->as.object_value, strcmp(event_text, "finish") == 0 ? "writableEnded" : "readableEnded"))) {
+            jayess_value_call_one(callback, jayess_value_undefined());
+        } else {
+            jayess_std_stream_once(env, strcmp(event_text, "finish") == 0 ? "finish" : "end", callback);
+        }
+    } else if (strcmp(event_text, "data") == 0) {
+        jayess_value *chunk = jayess_std_compression_stream_read_method(env, jayess_value_undefined());
+        if (chunk != NULL && chunk->kind != JAYESS_VALUE_NULL && chunk->kind != JAYESS_VALUE_UNDEFINED) {
+            jayess_value_call_one(callback, chunk);
+        }
+    }
+    free(event_text);
+    return env != NULL ? env : jayess_value_undefined();
+}
+
 static jayess_value *jayess_std_socket_read_method(jayess_value *env, jayess_value *size_value) {
     jayess_socket_handle handle = jayess_std_socket_handle(env);
     int requested = jayess_std_stream_requested_size(size_value, 4095);
@@ -7991,15 +11048,14 @@ static jayess_value *jayess_std_socket_read_method(jayess_value *env, jayess_val
     if (buffer == NULL) {
         return jayess_value_undefined();
     }
-    #ifdef _WIN32
     if (jayess_std_tls_state(env) != NULL) {
         read_count = jayess_std_tls_read_bytes(env, (unsigned char *)buffer, requested, &did_timeout);
     } else {
         read_count = (int)recv(handle, buffer, requested, 0);
+        if (read_count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            did_timeout = 1;
+        }
     }
-    #else
-    read_count = (int)recv(handle, buffer, requested, 0);
-    #endif
     if (read_count <= 0) {
         free(buffer);
         if (read_count < 0) {
@@ -8046,15 +11102,14 @@ static jayess_value *jayess_std_socket_read_bytes_method(jayess_value *env, jaye
     if (buffer == NULL) {
         return jayess_value_undefined();
     }
-    #ifdef _WIN32
     if (jayess_std_tls_state(env) != NULL) {
         read_count = jayess_std_tls_read_bytes(env, buffer, requested, &did_timeout);
     } else {
         read_count = (int)recv(handle, (char *)buffer, requested, 0);
+        if (read_count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            did_timeout = 1;
+        }
     }
-    #else
-    read_count = (int)recv(handle, (char *)buffer, requested, 0);
-    #endif
     if (read_count <= 0) {
         free(buffer);
         if (read_count < 0) {
@@ -8113,15 +11168,14 @@ static jayess_value *jayess_std_socket_write_method(jayess_value *env, jayess_va
             for (i = 0; i < chunk_len; i++) {
                 chunk[i] = (unsigned char)((int)jayess_value_to_number(jayess_array_get(bytes, offset + i)) & 255);
             }
-            #ifdef _WIN32
             if (jayess_std_tls_state(env) != NULL) {
                 sent = jayess_std_tls_write_bytes(env, chunk, chunk_len, &did_timeout);
             } else {
                 sent = (int)send(handle, (const char *)chunk, chunk_len, 0);
+                if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    did_timeout = 1;
+                }
             }
-            #else
-            sent = (int)send(handle, (const char *)chunk, chunk_len, 0);
-            #endif
             if (sent <= 0) {
                 jayess_std_stream_emit_error(env, did_timeout ? "socket write timed out" : "failed to write to socket");
                 return jayess_value_from_bool(0);
@@ -8145,15 +11199,14 @@ static jayess_value *jayess_std_socket_write_method(jayess_value *env, jayess_va
         length = strlen(text);
         while (offset < length) {
             int sent;
-            #ifdef _WIN32
             if (jayess_std_tls_state(env) != NULL) {
                 sent = jayess_std_tls_write_bytes(env, (const unsigned char *)text + offset, (int)(length - offset), &did_timeout);
             } else {
                 sent = (int)send(handle, text + offset, (int)(length - offset), 0);
+                if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    did_timeout = 1;
+                }
             }
-            #else
-            sent = (int)send(handle, text + offset, (int)(length - offset), 0);
-            #endif
             if (sent <= 0) {
                 jayess_std_stream_emit_error(env, did_timeout ? "socket write timed out" : "failed to write to socket");
                 free(text);
@@ -8169,6 +11222,319 @@ static jayess_value *jayess_std_socket_write_method(jayess_value *env, jayess_va
         free(text);
         return jayess_value_from_bool(1);
     }
+}
+
+static jayess_value *jayess_std_datagram_socket_send_method(jayess_value *env, jayess_value *value, jayess_value *port_value, jayess_value *host_value) {
+    jayess_socket_handle handle = jayess_std_socket_handle(env);
+    char *host_text = jayess_value_stringify(host_value);
+    int port = (int)jayess_value_to_number(port_value);
+    char port_text[32];
+    struct addrinfo hints;
+    struct addrinfo *results = NULL;
+    struct addrinfo *entry;
+    int status;
+    int sent = -1;
+    int did_timeout = 0;
+    if (handle == JAYESS_INVALID_SOCKET || host_text == NULL || host_text[0] == '\0' || port <= 0) {
+        free(host_text);
+        return jayess_value_from_bool(0);
+    }
+    snprintf(port_text, sizeof(port_text), "%d", port);
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    status = getaddrinfo(host_text, port_text, &hints, &results);
+    if (status != 0 || results == NULL) {
+        free(host_text);
+        return jayess_value_from_bool(0);
+    }
+    if (value != NULL && value->kind == JAYESS_VALUE_OBJECT && jayess_std_kind_is(value, "Uint8Array")) {
+        jayess_array *bytes = jayess_std_bytes_slot(value);
+        unsigned char *buffer;
+        int i;
+        if (bytes == NULL) {
+            freeaddrinfo(results);
+            free(host_text);
+            return jayess_value_from_bool(0);
+        }
+        buffer = (unsigned char *)malloc((size_t)bytes->count);
+        if (buffer == NULL) {
+            freeaddrinfo(results);
+            free(host_text);
+            return jayess_value_from_bool(0);
+        }
+        for (i = 0; i < bytes->count; i++) {
+            buffer[i] = (unsigned char)((int)jayess_value_to_number(jayess_array_get(bytes, i)) & 255);
+        }
+        for (entry = results; entry != NULL; entry = entry->ai_next) {
+            sent = (int)sendto(handle, (const char *)buffer, bytes->count, 0, entry->ai_addr, (int)entry->ai_addrlen);
+#ifdef _WIN32
+            if (sent < 0 && WSAGetLastError() == WSAETIMEDOUT) {
+                did_timeout = 1;
+            }
+#else
+            if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                did_timeout = 1;
+            }
+#endif
+            if (sent >= 0) {
+                break;
+            }
+        }
+        free(buffer);
+    } else {
+        char *text = jayess_value_stringify(value);
+        size_t length = text != NULL ? strlen(text) : 0;
+        for (entry = results; entry != NULL; entry = entry->ai_next) {
+            sent = (int)sendto(handle, text != NULL ? text : "", (int)length, 0, entry->ai_addr, (int)entry->ai_addrlen);
+#ifdef _WIN32
+            if (sent < 0 && WSAGetLastError() == WSAETIMEDOUT) {
+                did_timeout = 1;
+            }
+#else
+            if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                did_timeout = 1;
+            }
+#endif
+            if (sent >= 0) {
+                break;
+            }
+        }
+        free(text);
+    }
+    freeaddrinfo(results);
+    free(host_text);
+    if (sent < 0) {
+        jayess_std_stream_emit_error(env, did_timeout ? "datagram send timed out" : "failed to send datagram");
+        return jayess_value_from_bool(0);
+    }
+    if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+        jayess_value *current = jayess_object_get(env->as.object_value, "bytesWritten");
+        double total = jayess_value_to_number(current) + (double)sent;
+        jayess_object_set_value(env->as.object_value, "bytesWritten", jayess_value_from_number(total));
+    }
+    return jayess_value_from_bool(1);
+}
+
+static jayess_value *jayess_std_datagram_socket_receive_method(jayess_value *env, jayess_value *size_value) {
+    jayess_socket_handle handle = jayess_std_socket_handle(env);
+    int requested = jayess_std_stream_requested_size(size_value, 65535);
+    unsigned char *buffer;
+    int read_count;
+    int did_timeout = 0;
+    struct sockaddr_storage from_addr;
+    char address[INET6_ADDRSTRLEN];
+    int port = 0;
+    int family = 0;
+    void *addr_ptr = NULL;
+    jayess_object *packet;
+    jayess_value *bytes_value;
+    char *text;
+#ifdef _WIN32
+    int from_len = sizeof(from_addr);
+#else
+    socklen_t from_len = sizeof(from_addr);
+#endif
+    if (handle == JAYESS_INVALID_SOCKET) {
+        jayess_std_socket_mark_closed(env);
+        return jayess_value_undefined();
+    }
+    if (requested <= 0) {
+        requested = 65535;
+    }
+    buffer = (unsigned char *)malloc((size_t)requested);
+    if (buffer == NULL) {
+        return jayess_value_undefined();
+    }
+    memset(&from_addr, 0, sizeof(from_addr));
+    read_count = (int)recvfrom(handle, (char *)buffer, requested, 0, (struct sockaddr *)&from_addr, &from_len);
+#ifdef _WIN32
+    if (read_count < 0 && WSAGetLastError() == WSAETIMEDOUT) {
+        did_timeout = 1;
+    }
+#else
+    if (read_count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        did_timeout = 1;
+    }
+#endif
+    if (read_count <= 0) {
+        free(buffer);
+        if (read_count < 0) {
+            jayess_std_stream_emit_error(env, did_timeout ? "datagram receive timed out" : "failed to receive datagram");
+        }
+        return read_count == 0 ? jayess_value_null() : jayess_value_undefined();
+    }
+    if (from_addr.ss_family == AF_INET) {
+        struct sockaddr_in *ipv4 = (struct sockaddr_in *)&from_addr;
+        addr_ptr = &(ipv4->sin_addr);
+        port = ntohs(ipv4->sin_port);
+        family = 4;
+    } else if (from_addr.ss_family == AF_INET6) {
+        struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)&from_addr;
+        addr_ptr = &(ipv6->sin6_addr);
+        port = ntohs(ipv6->sin6_port);
+        family = 6;
+    }
+    address[0] = '\0';
+    if (addr_ptr == NULL || inet_ntop(from_addr.ss_family, addr_ptr, address, sizeof(address)) == NULL) {
+        strcpy(address, "");
+    }
+    if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+        jayess_value *current = jayess_object_get(env->as.object_value, "bytesRead");
+        double total = jayess_value_to_number(current) + (double)read_count;
+        jayess_object_set_value(env->as.object_value, "bytesRead", jayess_value_from_number(total));
+    }
+    packet = jayess_object_new();
+    bytes_value = jayess_std_uint8_array_from_bytes(buffer, (size_t)read_count);
+    text = (char *)malloc((size_t)read_count + 1);
+    if (text != NULL) {
+        memcpy(text, buffer, (size_t)read_count);
+        text[read_count] = '\0';
+    }
+    free(buffer);
+    jayess_object_set_value(packet, "data", jayess_value_from_string(text != NULL ? text : ""));
+    jayess_object_set_value(packet, "bytes", bytes_value);
+    jayess_object_set_value(packet, "address", jayess_value_from_string(address));
+    jayess_object_set_value(packet, "port", jayess_value_from_number((double)port));
+    jayess_object_set_value(packet, "family", jayess_value_from_number((double)family));
+    free(text);
+    return jayess_value_from_object(packet);
+}
+
+static jayess_value *jayess_std_datagram_socket_set_broadcast_method(jayess_value *env, jayess_value *enabled) {
+    jayess_socket_handle handle = jayess_std_socket_handle(env);
+    int flag = jayess_value_as_bool(enabled) ? 1 : 0;
+    if (handle == JAYESS_INVALID_SOCKET) {
+        jayess_std_socket_mark_closed(env);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+#ifdef _WIN32
+    if (setsockopt(handle, SOL_SOCKET, SO_BROADCAST, (const char *)&flag, sizeof(flag)) != 0) {
+#else
+    if (setsockopt(handle, SOL_SOCKET, SO_BROADCAST, &flag, sizeof(flag)) != 0) {
+#endif
+        jayess_std_stream_emit_error(env, "failed to configure SO_BROADCAST");
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+        jayess_object_set_value(env->as.object_value, "broadcast", jayess_value_from_bool(flag));
+    }
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static int jayess_std_datagram_ipv4_membership(jayess_socket_handle handle, const char *group_text, const char *interface_text, int join) {
+    struct ip_mreq membership;
+    memset(&membership, 0, sizeof(membership));
+    if (group_text == NULL || group_text[0] == '\0') {
+        return 0;
+    }
+    if (inet_pton(AF_INET, group_text, &membership.imr_multiaddr) != 1) {
+        return 0;
+    }
+    if (interface_text != NULL && interface_text[0] != '\0') {
+        if (inet_pton(AF_INET, interface_text, &membership.imr_interface) != 1) {
+            return 0;
+        }
+    } else {
+        membership.imr_interface.s_addr = htonl(INADDR_ANY);
+    }
+#ifdef _WIN32
+    return setsockopt(handle, IPPROTO_IP, join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP, (const char *)&membership, sizeof(membership)) == 0;
+#else
+    return setsockopt(handle, IPPROTO_IP, join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP, &membership, sizeof(membership)) == 0;
+#endif
+}
+
+static jayess_value *jayess_std_datagram_socket_join_group_method(jayess_value *env, jayess_value *group_value, jayess_value *interface_value) {
+    jayess_socket_handle handle = jayess_std_socket_handle(env);
+    char *group_text = jayess_value_stringify(group_value);
+    char *interface_text = jayess_value_stringify(interface_value);
+    if (handle == JAYESS_INVALID_SOCKET) {
+        jayess_std_socket_mark_closed(env);
+        free(group_text);
+        free(interface_text);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (!jayess_std_datagram_ipv4_membership(handle, group_text, interface_text, 1)) {
+        jayess_std_stream_emit_error(env, "failed to join multicast group");
+    }
+    free(group_text);
+    free(interface_text);
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_datagram_socket_leave_group_method(jayess_value *env, jayess_value *group_value, jayess_value *interface_value) {
+    jayess_socket_handle handle = jayess_std_socket_handle(env);
+    char *group_text = jayess_value_stringify(group_value);
+    char *interface_text = jayess_value_stringify(interface_value);
+    if (handle == JAYESS_INVALID_SOCKET) {
+        jayess_std_socket_mark_closed(env);
+        free(group_text);
+        free(interface_text);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (!jayess_std_datagram_ipv4_membership(handle, group_text, interface_text, 0)) {
+        jayess_std_stream_emit_error(env, "failed to leave multicast group");
+    }
+    free(group_text);
+    free(interface_text);
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_datagram_socket_set_multicast_interface_method(jayess_value *env, jayess_value *interface_value) {
+    jayess_socket_handle handle = jayess_std_socket_handle(env);
+    char *interface_text = jayess_value_stringify(interface_value);
+    struct in_addr interface_addr;
+    if (handle == JAYESS_INVALID_SOCKET) {
+        jayess_std_socket_mark_closed(env);
+        free(interface_text);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (interface_text == NULL || interface_text[0] == '\0' || inet_pton(AF_INET, interface_text, &interface_addr) != 1) {
+        free(interface_text);
+        jayess_std_stream_emit_error(env, "failed to configure multicast interface");
+        return env != NULL ? env : jayess_value_undefined();
+    }
+#ifdef _WIN32
+    if (setsockopt(handle, IPPROTO_IP, IP_MULTICAST_IF, (const char *)&interface_addr, sizeof(interface_addr)) != 0) {
+#else
+    if (setsockopt(handle, IPPROTO_IP, IP_MULTICAST_IF, &interface_addr, sizeof(interface_addr)) != 0) {
+#endif
+        free(interface_text);
+        jayess_std_stream_emit_error(env, "failed to configure multicast interface");
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+        jayess_object_set_value(env->as.object_value, "multicastInterface", jayess_value_from_string(interface_text));
+    }
+    free(interface_text);
+    return env != NULL ? env : jayess_value_undefined();
+}
+
+static jayess_value *jayess_std_datagram_socket_set_multicast_loopback_method(jayess_value *env, jayess_value *enabled) {
+    jayess_socket_handle handle = jayess_std_socket_handle(env);
+#ifdef _WIN32
+    BOOL flag = jayess_value_as_bool(enabled) ? TRUE : FALSE;
+    if (handle == JAYESS_INVALID_SOCKET) {
+        jayess_std_socket_mark_closed(env);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (setsockopt(handle, IPPROTO_IP, IP_MULTICAST_LOOP, (const char *)&flag, sizeof(flag)) != 0) {
+#else
+    unsigned char flag = jayess_value_as_bool(enabled) ? 1 : 0;
+    if (handle == JAYESS_INVALID_SOCKET) {
+        jayess_std_socket_mark_closed(env);
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (setsockopt(handle, IPPROTO_IP, IP_MULTICAST_LOOP, &flag, sizeof(flag)) != 0) {
+#endif
+        jayess_std_stream_emit_error(env, "failed to configure multicast loopback");
+        return env != NULL ? env : jayess_value_undefined();
+    }
+    if (env != NULL && env->kind == JAYESS_VALUE_OBJECT && env->as.object_value != NULL) {
+        jayess_object_set_value(env->as.object_value, "multicastLoopback", jayess_value_from_bool(flag ? 1 : 0));
+    }
+    return env != NULL ? env : jayess_value_undefined();
 }
 
 static jayess_value *jayess_std_socket_read_async_method(jayess_value *env, jayess_value *size_value) {
@@ -8574,8 +11940,253 @@ jayess_value *jayess_std_process_arch(void) {
 #endif
 }
 
+jayess_value *jayess_std_process_tmpdir(void) {
+#ifdef _WIN32
+    char buffer[MAX_PATH];
+    DWORD length = GetTempPathA((DWORD)sizeof(buffer), buffer);
+    if (length == 0 || length >= (DWORD)sizeof(buffer)) {
+        return jayess_value_from_string(".");
+    }
+    while (length > 0 && (buffer[length - 1] == '\\' || buffer[length - 1] == '/')) {
+        buffer[length - 1] = '\0';
+        length--;
+    }
+    return jayess_value_from_string(buffer);
+#else
+    const char *tmp = getenv("TMPDIR");
+    if (tmp == NULL || tmp[0] == '\0') {
+        tmp = "/tmp";
+    }
+    return jayess_value_from_string(tmp);
+#endif
+}
+
+jayess_value *jayess_std_process_hostname(void) {
+#ifdef _WIN32
+    char buffer[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD size = (DWORD)sizeof(buffer);
+    if (!GetComputerNameA(buffer, &size) || size == 0) {
+        return jayess_value_from_string("localhost");
+    }
+    buffer[size] = '\0';
+    return jayess_value_from_string(buffer);
+#else
+    char buffer[256];
+    if (gethostname(buffer, sizeof(buffer)) != 0) {
+        return jayess_value_from_string("localhost");
+    }
+    buffer[sizeof(buffer) - 1] = '\0';
+    return jayess_value_from_string(buffer);
+#endif
+}
+
+double jayess_std_process_uptime(void) {
+#ifdef _WIN32
+    return (double)GetTickCount64() / 1000.0;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0.0;
+    }
+    return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
+#endif
+}
+
+double jayess_std_process_hrtime(void) {
+#ifdef _WIN32
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart == 0 || !QueryPerformanceCounter(&counter)) {
+        return 0.0;
+    }
+    return ((double)counter.QuadPart * 1000000000.0) / (double)frequency.QuadPart;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0.0;
+    }
+    return ((double)ts.tv_sec * 1000000000.0) + (double)ts.tv_nsec;
+#endif
+}
+
+jayess_value *jayess_std_process_cpu_info(void) {
+    jayess_object *result = jayess_object_new();
+    long count = 1;
+#ifdef _WIN32
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    count = (long)info.dwNumberOfProcessors;
+#else
+    long detected = sysconf(_SC_NPROCESSORS_ONLN);
+    if (detected > 0) {
+        count = detected;
+    }
+#endif
+    jayess_object_set_value(result, "count", jayess_value_from_number((double)(count > 0 ? count : 1)));
+    jayess_object_set_value(result, "arch", jayess_std_process_arch());
+    return jayess_value_from_object(result);
+}
+
+jayess_value *jayess_std_process_memory_info(void) {
+    jayess_object *result = jayess_object_new();
+    double total = 0;
+    double available = 0;
+#ifdef _WIN32
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+        total = (double)status.ullTotalPhys;
+        available = (double)status.ullAvailPhys;
+    }
+#else
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long available_pages = sysconf(_SC_AVPHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && page_size > 0) {
+        total = (double)pages * (double)page_size;
+    }
+    if (available_pages > 0 && page_size > 0) {
+        available = (double)available_pages * (double)page_size;
+    }
+#endif
+    jayess_object_set_value(result, "total", jayess_value_from_number(total));
+    jayess_object_set_value(result, "available", jayess_value_from_number(available));
+    return jayess_value_from_object(result);
+}
+
+jayess_value *jayess_std_process_user_info(void) {
+    jayess_object *result = jayess_object_new();
+    const char *username = NULL;
+    const char *home = NULL;
+#ifdef _WIN32
+    char username_buffer[256];
+    DWORD username_size = (DWORD)sizeof(username_buffer);
+    if (GetUserNameA(username_buffer, &username_size) && username_size > 0) {
+        username = username_buffer;
+    } else {
+        username = getenv("USERNAME");
+    }
+    home = getenv("USERPROFILE");
+#else
+    struct passwd *pwd = getpwuid(getuid());
+    if (pwd != NULL && pwd->pw_name != NULL && pwd->pw_name[0] != '\0') {
+        username = pwd->pw_name;
+    } else {
+        username = getenv("USER");
+    }
+    if (pwd != NULL && pwd->pw_dir != NULL && pwd->pw_dir[0] != '\0') {
+        home = pwd->pw_dir;
+    } else {
+        home = getenv("HOME");
+    }
+#endif
+    if (username == NULL || username[0] == '\0') {
+        username = "unknown";
+    }
+    if (home == NULL || home[0] == '\0') {
+        home = "";
+    }
+    jayess_object_set_value(result, "username", jayess_value_from_string(username));
+    jayess_object_set_value(result, "home", jayess_value_from_string(home));
+    return jayess_value_from_object(result);
+}
+
 jayess_value *jayess_std_process_thread_pool_size(void) {
     return jayess_value_from_number((double)JAYESS_IO_WORKER_COUNT);
+}
+
+jayess_value *jayess_std_process_on_signal(jayess_value *signal, jayess_value *callback) {
+    char *signal_name = jayess_value_stringify(signal);
+    int signal_number;
+    jayess_value *bus;
+    if (signal_name == NULL || callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION) {
+        free(signal_name);
+        return jayess_value_undefined();
+    }
+    signal_number = jayess_std_child_process_signal_number(signal_name);
+    if (signal_number == 0) {
+        free(signal_name);
+        jayess_throw(jayess_type_error_value("unsupported process signal"));
+        return jayess_value_undefined();
+    }
+    if (!jayess_std_process_install_signal(signal_number)) {
+        free(signal_name);
+        jayess_throw(jayess_type_error_value("failed to install process signal handler"));
+        return jayess_value_undefined();
+    }
+    bus = jayess_std_process_signal_bus_value();
+    jayess_std_stream_on(bus, jayess_std_process_signal_name(signal_number), callback);
+    free(signal_name);
+    return bus;
+}
+
+jayess_value *jayess_std_process_once_signal(jayess_value *signal, jayess_value *callback) {
+    char *signal_name = jayess_value_stringify(signal);
+    int signal_number;
+    jayess_value *bus;
+    if (signal_name == NULL || callback == NULL || callback->kind != JAYESS_VALUE_FUNCTION) {
+        free(signal_name);
+        return jayess_value_undefined();
+    }
+    signal_number = jayess_std_child_process_signal_number(signal_name);
+    if (signal_number == 0) {
+        free(signal_name);
+        jayess_throw(jayess_type_error_value("unsupported process signal"));
+        return jayess_value_undefined();
+    }
+    if (!jayess_std_process_install_signal(signal_number)) {
+        free(signal_name);
+        jayess_throw(jayess_type_error_value("failed to install process signal handler"));
+        return jayess_value_undefined();
+    }
+    bus = jayess_std_process_signal_bus_value();
+    jayess_std_stream_once(bus, jayess_std_process_signal_name(signal_number), callback);
+    free(signal_name);
+    return bus;
+}
+
+jayess_value *jayess_std_process_off_signal(jayess_value *signal, jayess_value *callback) {
+    char *signal_name = jayess_value_stringify(signal);
+    int signal_number;
+    jayess_value *bus;
+    if (signal_name == NULL) {
+        free(signal_name);
+        return jayess_value_undefined();
+    }
+    signal_number = jayess_std_child_process_signal_number(signal_name);
+    if (signal_number == 0) {
+        free(signal_name);
+        jayess_throw(jayess_type_error_value("unsupported process signal"));
+        return jayess_value_undefined();
+    }
+    bus = jayess_std_process_signal_bus_value();
+    jayess_std_stream_off(bus, jayess_std_process_signal_name(signal_number), callback);
+    free(signal_name);
+    return bus;
+}
+
+jayess_value *jayess_std_process_raise(jayess_value *signal) {
+    char *signal_name = jayess_value_stringify(signal);
+    int signal_number;
+    if (signal_name == NULL) {
+        free(signal_name);
+        return jayess_value_from_bool(0);
+    }
+    signal_number = jayess_std_child_process_signal_number(signal_name);
+    free(signal_name);
+    if (signal_number == 0) {
+        jayess_throw(jayess_type_error_value("unsupported process signal"));
+        return jayess_value_undefined();
+    }
+    if (!jayess_std_process_install_signal(signal_number)) {
+        jayess_throw(jayess_type_error_value("failed to install process signal handler"));
+        return jayess_value_undefined();
+    }
+    if (raise(signal_number) != 0) {
+        return jayess_value_from_bool(0);
+    }
+    jayess_runtime_dispatch_pending_signals();
+    return jayess_value_from_bool(1);
 }
 
 jayess_value *jayess_std_tls_is_available(void) {
@@ -8827,6 +12438,753 @@ static char *jayess_read_text_file_or_empty(const char *path) {
     return text;
 }
 
+static jayess_value *jayess_std_child_process_result(int status, int pid, const char *stdout_text, const char *stderr_text) {
+    jayess_object *result = jayess_object_new();
+    jayess_object_set_value(result, "ok", jayess_value_from_bool(status == 0));
+    jayess_object_set_value(result, "status", jayess_value_from_number((double)status));
+    jayess_object_set_value(result, "stdout", jayess_value_from_string(stdout_text != NULL ? stdout_text : ""));
+    jayess_object_set_value(result, "stderr", jayess_value_from_string(stderr_text != NULL ? stderr_text : ""));
+    jayess_object_set_value(result, "pid", jayess_value_from_number((double)pid));
+    return jayess_value_from_object(result);
+}
+
+static int jayess_std_child_process_signal_number(const char *signal_name) {
+    char normalized[32];
+    size_t i = 0;
+    if (signal_name == NULL || signal_name[0] == '\0') {
+        return 15;
+    }
+    while (signal_name[i] != '\0' && i + 1 < sizeof(normalized)) {
+        normalized[i] = (char)toupper((unsigned char)signal_name[i]);
+        i++;
+    }
+    normalized[i] = '\0';
+    if (strcmp(normalized, "TERM") == 0 || strcmp(normalized, "SIGTERM") == 0) {
+        return 15;
+    }
+    if (strcmp(normalized, "KILL") == 0 || strcmp(normalized, "SIGKILL") == 0) {
+        return 9;
+    }
+    if (strcmp(normalized, "INT") == 0 || strcmp(normalized, "SIGINT") == 0) {
+        return 2;
+    }
+    if (strcmp(normalized, "HUP") == 0 || strcmp(normalized, "SIGHUP") == 0) {
+        return 1;
+    }
+    if (strcmp(normalized, "QUIT") == 0 || strcmp(normalized, "SIGQUIT") == 0) {
+        return 3;
+    }
+    if (strcmp(normalized, "STOP") == 0 || strcmp(normalized, "SIGSTOP") == 0) {
+        return 19;
+    }
+    if (strcmp(normalized, "CONT") == 0 || strcmp(normalized, "SIGCONT") == 0) {
+        return 18;
+    }
+    if (strcmp(normalized, "USR1") == 0 || strcmp(normalized, "SIGUSR1") == 0) {
+        return 10;
+    }
+    if (strcmp(normalized, "USR2") == 0 || strcmp(normalized, "SIGUSR2") == 0) {
+        return 12;
+    }
+    return 0;
+}
+
+static const char *jayess_std_process_signal_name(int signal_number) {
+    switch (signal_number) {
+        case 1:
+            return "SIGHUP";
+        case 2:
+            return "SIGINT";
+        case 3:
+            return "SIGQUIT";
+        case 9:
+            return "SIGKILL";
+        case 10:
+            return "SIGUSR1";
+        case 12:
+            return "SIGUSR2";
+        case 15:
+            return "SIGTERM";
+        case 18:
+            return "SIGCONT";
+        case 19:
+            return "SIGSTOP";
+        default:
+            return NULL;
+    }
+}
+
+static jayess_value *jayess_std_process_signal_bus_value(void) {
+    if (jayess_process_signal_bus == NULL || jayess_process_signal_bus->kind != JAYESS_VALUE_OBJECT || jayess_process_signal_bus->as.object_value == NULL) {
+        jayess_object *object = jayess_object_new();
+        if (object == NULL) {
+            return jayess_value_undefined();
+        }
+        jayess_process_signal_bus = jayess_value_from_object(object);
+    }
+    return jayess_process_signal_bus;
+}
+
+static void jayess_runtime_signal_handler(int signal_number) {
+    jayess_runtime_note_signal(signal_number);
+}
+
+static void jayess_runtime_note_signal(int signal_number) {
+    if (signal_number <= 0 || signal_number >= JAYESS_SIGNAL_MAX) {
+        return;
+    }
+    jayess_pending_signals[signal_number] = 1;
+}
+
+static int jayess_std_process_install_signal(int signal_number) {
+    if (signal_number <= 0 || signal_number >= JAYESS_SIGNAL_MAX) {
+        return 0;
+    }
+    if (jayess_installed_signals[signal_number]) {
+        return 1;
+    }
+    if (signal(signal_number, jayess_runtime_signal_handler) == SIG_ERR) {
+        return 0;
+    }
+    jayess_installed_signals[signal_number] = 1;
+    return 1;
+}
+
+static jayess_value *jayess_std_process_signal_event(int signal_number) {
+    jayess_object *event;
+    const char *signal_name = jayess_std_process_signal_name(signal_number);
+    if (signal_name == NULL) {
+        signal_name = "UNKNOWN";
+    }
+    event = jayess_object_new();
+    if (event == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(event, "signal", jayess_value_from_string(signal_name));
+    jayess_object_set_value(event, "number", jayess_value_from_number((double)signal_number));
+    return jayess_value_from_object(event);
+}
+
+static void jayess_runtime_dispatch_pending_signals(void) {
+    int signal_number;
+    jayess_value *bus = jayess_std_process_signal_bus_value();
+    if (bus == NULL || bus->kind != JAYESS_VALUE_OBJECT || bus->as.object_value == NULL) {
+        return;
+    }
+    for (signal_number = 1; signal_number < JAYESS_SIGNAL_MAX; signal_number++) {
+        sig_atomic_t count = jayess_pending_signals[signal_number];
+        if (count <= 0) {
+            continue;
+        }
+        jayess_pending_signals[signal_number] = 0;
+        while (count-- > 0) {
+            const char *signal_name = jayess_std_process_signal_name(signal_number);
+            jayess_value *event;
+            if (signal_name == NULL) {
+                continue;
+            }
+            event = jayess_std_process_signal_event(signal_number);
+            jayess_std_stream_emit(bus, signal_name, event);
+            if (jayess_has_exception()) {
+                return;
+            }
+        }
+    }
+}
+
+static jayess_worker_message *jayess_worker_message_new(jayess_value *value) {
+    jayess_worker_message *message = (jayess_worker_message *)malloc(sizeof(jayess_worker_message));
+    if (message == NULL) {
+        return NULL;
+    }
+    message->value = value != NULL ? value : jayess_value_undefined();
+    message->next = NULL;
+    return message;
+}
+
+static void jayess_worker_queue_push(jayess_worker_message **head, jayess_worker_message **tail, jayess_worker_message *message) {
+    if (head == NULL || tail == NULL || message == NULL) {
+        return;
+    }
+    message->next = NULL;
+    if (*tail != NULL) {
+        (*tail)->next = message;
+    } else {
+        *head = message;
+    }
+    *tail = message;
+}
+
+static jayess_worker_message *jayess_worker_queue_pop(jayess_worker_message **head, jayess_worker_message **tail) {
+    jayess_worker_message *message;
+    if (head == NULL || tail == NULL || *head == NULL) {
+        return NULL;
+    }
+    message = *head;
+    *head = message->next;
+    if (*head == NULL) {
+        *tail = NULL;
+    }
+    message->next = NULL;
+    return message;
+}
+
+static void jayess_worker_queue_free(jayess_worker_message **head, jayess_worker_message **tail) {
+    jayess_worker_message *current;
+    if (head == NULL || tail == NULL) {
+        return;
+    }
+    current = *head;
+    while (current != NULL) {
+        jayess_worker_message *next = current->next;
+        free(current);
+        current = next;
+    }
+    *head = NULL;
+    *tail = NULL;
+}
+
+static jayess_value *jayess_worker_clone_value(jayess_value *value, int depth, int *ok) {
+    int i;
+    jayess_object *clone_object;
+    jayess_array *clone_array;
+    jayess_value *clone_value;
+    jayess_object_entry *entry;
+    if (ok != NULL) {
+        *ok = 1;
+    }
+    if (depth > 64) {
+        if (ok != NULL) {
+            *ok = 0;
+        }
+        return jayess_value_undefined();
+    }
+    if (value == NULL) {
+        return jayess_value_undefined();
+    }
+    switch (value->kind) {
+    case JAYESS_VALUE_NULL:
+        return jayess_value_null();
+    case JAYESS_VALUE_UNDEFINED:
+        return jayess_value_undefined();
+    case JAYESS_VALUE_BOOL:
+        return jayess_value_from_bool(value->as.bool_value);
+    case JAYESS_VALUE_NUMBER:
+        return jayess_value_from_number(value->as.number_value);
+    case JAYESS_VALUE_STRING:
+        return jayess_value_from_string(value->as.string_value != NULL ? value->as.string_value : "");
+    case JAYESS_VALUE_BIGINT: {
+        char *text = jayess_value_stringify(value);
+        jayess_value *out = jayess_value_from_bigint(text != NULL ? text : "0");
+        free(text);
+        return out != NULL ? out : jayess_value_undefined();
+    }
+    case JAYESS_VALUE_SYMBOL:
+        return value;
+    case JAYESS_VALUE_FUNCTION:
+        if (ok != NULL) {
+            *ok = 0;
+        }
+        return jayess_value_undefined();
+    case JAYESS_VALUE_ARRAY:
+        clone_array = jayess_array_new();
+        if (clone_array == NULL) {
+            if (ok != NULL) {
+                *ok = 0;
+            }
+            return jayess_value_undefined();
+        }
+        for (i = 0; value->as.array_value != NULL && i < value->as.array_value->count; i++) {
+            int item_ok = 1;
+            jayess_array_set_value(clone_array, i, jayess_worker_clone_value(jayess_array_get(value->as.array_value, i), depth + 1, &item_ok));
+            if (!item_ok) {
+                if (ok != NULL) {
+                    *ok = 0;
+                }
+                return jayess_value_undefined();
+            }
+        }
+        return jayess_value_from_array(clone_array);
+    case JAYESS_VALUE_OBJECT:
+        if (value->as.object_value == NULL) {
+            return jayess_value_undefined();
+        }
+        if (jayess_std_kind_is(value, "SharedArrayBuffer")) {
+            return value;
+        }
+        if ((jayess_std_is_typed_array(value) || jayess_std_kind_is(value, "DataView")) && value->as.object_value != NULL) {
+            jayess_value *buffer = jayess_object_get(value->as.object_value, "buffer");
+            if (buffer != NULL && jayess_std_kind_is(buffer, "SharedArrayBuffer")) {
+                if (jayess_std_is_typed_array(value)) {
+                    const char *kind = jayess_std_typed_array_kind(value);
+                    return jayess_std_typed_array_new(kind != NULL ? kind : "Uint8Array", buffer);
+                }
+                if (jayess_std_kind_is(value, "DataView")) {
+                    return jayess_std_data_view_new(buffer);
+                }
+            }
+        }
+        if (value->as.object_value->stream_file != NULL || value->as.object_value->native_handle != NULL || value->as.object_value->socket_handle != JAYESS_INVALID_SOCKET) {
+            if (ok != NULL) {
+                *ok = 0;
+            }
+            return jayess_value_undefined();
+        }
+        clone_object = jayess_object_new();
+        if (clone_object == NULL) {
+            if (ok != NULL) {
+                *ok = 0;
+            }
+            return jayess_value_undefined();
+        }
+        for (entry = value->as.object_value->head; entry != NULL; entry = entry->next) {
+            int key_ok = 1;
+            int value_ok = 1;
+            jayess_value *cloned_key = entry->key_value != NULL ? jayess_worker_clone_value(entry->key_value, depth + 1, &key_ok) : jayess_value_from_string(entry->key != NULL ? entry->key : "");
+            jayess_value *cloned_entry_value = jayess_worker_clone_value(entry->value, depth + 1, &value_ok);
+            if (!key_ok || !value_ok) {
+                if (ok != NULL) {
+                    *ok = 0;
+                }
+                return jayess_value_undefined();
+            }
+            jayess_object_set_key_value(clone_object, cloned_key, cloned_entry_value);
+        }
+        clone_value = jayess_value_from_object(clone_object);
+        return clone_value != NULL ? clone_value : jayess_value_undefined();
+    default:
+        if (ok != NULL) {
+            *ok = 0;
+        }
+        return jayess_value_undefined();
+    }
+}
+
+static jayess_value *jayess_worker_make_envelope(int ok, jayess_value *value, jayess_value *error) {
+    jayess_object *envelope = jayess_object_new();
+    if (envelope == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(envelope, "ok", jayess_value_from_bool(ok));
+    jayess_object_set_value(envelope, "value", value != NULL ? value : jayess_value_undefined());
+    jayess_object_set_value(envelope, "error", error != NULL ? error : jayess_value_undefined());
+    return jayess_value_from_object(envelope);
+}
+
+static void jayess_worker_execute_message(jayess_worker_state *state, jayess_value *message) {
+    jayess_value *result;
+    jayess_value *envelope;
+    jayess_worker_message *outbound;
+    int clone_ok = 1;
+    if (state == NULL || state->handler == NULL) {
+        return;
+    }
+    result = jayess_value_call_with_this(state->handler, jayess_value_undefined(), message, 1);
+    if (jayess_has_exception()) {
+        jayess_value *error_value = jayess_worker_clone_value(jayess_take_exception(), 0, &clone_ok);
+        if (!clone_ok) {
+            error_value = jayess_type_error_value("worker failed to clone thrown value");
+        }
+        envelope = jayess_worker_make_envelope(0, jayess_value_undefined(), error_value);
+    } else {
+        jayess_value *cloned_result = jayess_worker_clone_value(result, 0, &clone_ok);
+        if (!clone_ok) {
+            envelope = jayess_worker_make_envelope(0, jayess_value_undefined(), jayess_type_error_value("worker failed to clone result value"));
+        } else {
+            envelope = jayess_worker_make_envelope(1, cloned_result, jayess_value_undefined());
+        }
+    }
+    outbound = jayess_worker_message_new(envelope);
+    if (outbound == NULL) {
+        return;
+    }
+#ifdef _WIN32
+    EnterCriticalSection(&state->lock);
+    jayess_worker_queue_push(&state->outbound_head, &state->outbound_tail, outbound);
+    WakeConditionVariable(&state->outbound_available);
+    LeaveCriticalSection(&state->lock);
+#else
+    pthread_mutex_lock(&state->lock);
+    jayess_worker_queue_push(&state->outbound_head, &state->outbound_tail, outbound);
+    pthread_cond_signal(&state->outbound_available);
+    pthread_mutex_unlock(&state->lock);
+#endif
+}
+
+#ifdef _WIN32
+static DWORD WINAPI jayess_worker_thread_main(LPVOID raw) {
+    jayess_worker_state *state = (jayess_worker_state *)raw;
+    for (;;) {
+        jayess_worker_message *message;
+        EnterCriticalSection(&state->lock);
+        while (!state->terminate_requested && state->inbound_head == NULL) {
+            SleepConditionVariableCS(&state->inbound_available, &state->lock, INFINITE);
+        }
+        if (state->terminate_requested && state->inbound_head == NULL) {
+            state->closed = 1;
+            WakeConditionVariable(&state->outbound_available);
+            LeaveCriticalSection(&state->lock);
+            break;
+        }
+        message = jayess_worker_queue_pop(&state->inbound_head, &state->inbound_tail);
+        LeaveCriticalSection(&state->lock);
+        if (message != NULL) {
+            jayess_worker_execute_message(state, message->value);
+            free(message);
+        }
+    }
+    return 0;
+}
+#else
+static void *jayess_worker_thread_main(void *raw) {
+    jayess_worker_state *state = (jayess_worker_state *)raw;
+    for (;;) {
+        jayess_worker_message *message;
+        pthread_mutex_lock(&state->lock);
+        while (!state->terminate_requested && state->inbound_head == NULL) {
+            pthread_cond_wait(&state->inbound_available, &state->lock);
+        }
+        if (state->terminate_requested && state->inbound_head == NULL) {
+            state->closed = 1;
+            pthread_cond_broadcast(&state->outbound_available);
+            pthread_mutex_unlock(&state->lock);
+            break;
+        }
+        message = jayess_worker_queue_pop(&state->inbound_head, &state->inbound_tail);
+        pthread_mutex_unlock(&state->lock);
+        if (message != NULL) {
+            jayess_worker_execute_message(state, message->value);
+            free(message);
+        }
+    }
+    return NULL;
+}
+#endif
+
+static int jayess_worker_wait_outbound(jayess_worker_state *state, double timeout_ms) {
+#ifdef _WIN32
+    DWORD wait_ms = timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms;
+    while (state->outbound_head == NULL && !state->closed) {
+        if (!SleepConditionVariableCS(&state->outbound_available, &state->lock, wait_ms)) {
+            return GetLastError() == ERROR_TIMEOUT ? 0 : 0;
+        }
+        if (timeout_ms >= 0) {
+            break;
+        }
+    }
+    return state->outbound_head != NULL;
+#else
+    if (timeout_ms < 0) {
+        while (state->outbound_head == NULL && !state->closed) {
+            pthread_cond_wait(&state->outbound_available, &state->lock);
+        }
+        return state->outbound_head != NULL;
+    }
+    while (state->outbound_head == NULL && !state->closed) {
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += (time_t)(timeout_ms / 1000.0);
+        deadline.tv_nsec += (long)((long long)(timeout_ms * 1000000.0) % 1000000000LL);
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec += 1;
+            deadline.tv_nsec -= 1000000000L;
+        }
+        if (pthread_cond_timedwait(&state->outbound_available, &state->lock, &deadline) != 0) {
+            break;
+        }
+    }
+    return state->outbound_head != NULL;
+#endif
+}
+
+#ifdef _WIN32
+static int jayess_spawn_shell_command(const char *command, const char *stdin_path, const char *stdout_path, const char *stderr_path, int *process_id) {
+    const char *comspec = getenv("COMSPEC");
+    char *quoted_shell = NULL;
+    char *quoted_command = NULL;
+    char *command_line = NULL;
+    SECURITY_ATTRIBUTES security;
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    HANDLE stdin_handle = INVALID_HANDLE_VALUE;
+    HANDLE stdout_handle = INVALID_HANDLE_VALUE;
+    HANDLE stderr_handle = INVALID_HANDLE_VALUE;
+    DWORD exit_code = 1;
+    if (comspec == NULL || comspec[0] == '\0') {
+        comspec = "cmd.exe";
+    }
+    quoted_shell = jayess_shell_quote(comspec);
+    quoted_command = jayess_shell_quote(command != NULL ? command : "");
+    if (quoted_shell == NULL || quoted_command == NULL) {
+        free(quoted_shell);
+        free(quoted_command);
+        return -1;
+    }
+    command_line = (char *)malloc(strlen(quoted_shell) + strlen(quoted_command) + 8);
+    if (command_line == NULL) {
+        free(quoted_shell);
+        free(quoted_command);
+        return -1;
+    }
+    sprintf(command_line, "%s /C %s", quoted_shell, quoted_command);
+    security.nLength = sizeof(security);
+    security.lpSecurityDescriptor = NULL;
+    security.bInheritHandle = TRUE;
+    if (stdin_path != NULL && stdin_path[0] != '\0') {
+        stdin_handle = CreateFileA(stdin_path, GENERIC_READ, FILE_SHARE_READ, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    stdout_handle = CreateFileA(stdout_path, GENERIC_WRITE, FILE_SHARE_READ, &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    stderr_handle = CreateFileA(stderr_path, GENERIC_WRITE, FILE_SHARE_READ, &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (stdout_handle == INVALID_HANDLE_VALUE || stderr_handle == INVALID_HANDLE_VALUE || (stdin_path != NULL && stdin_path[0] != '\0' && stdin_handle == INVALID_HANDLE_VALUE)) {
+        if (stdin_handle != INVALID_HANDLE_VALUE) CloseHandle(stdin_handle);
+        if (stdout_handle != INVALID_HANDLE_VALUE) CloseHandle(stdout_handle);
+        if (stderr_handle != INVALID_HANDLE_VALUE) CloseHandle(stderr_handle);
+        free(quoted_shell);
+        free(quoted_command);
+        free(command_line);
+        return -1;
+    }
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&process, sizeof(process));
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = stdin_handle != INVALID_HANDLE_VALUE ? stdin_handle : GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = stdout_handle;
+    startup.hStdError = stderr_handle;
+    if (!CreateProcessA(NULL, command_line, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process)) {
+        if (stdin_handle != INVALID_HANDLE_VALUE) CloseHandle(stdin_handle);
+        CloseHandle(stdout_handle);
+        CloseHandle(stderr_handle);
+        free(quoted_shell);
+        free(quoted_command);
+        free(command_line);
+        return -1;
+    }
+    if (process_id != NULL) {
+        *process_id = (int)process.dwProcessId;
+    }
+    WaitForSingleObject(process.hProcess, INFINITE);
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    if (stdin_handle != INVALID_HANDLE_VALUE) CloseHandle(stdin_handle);
+    CloseHandle(stdout_handle);
+    CloseHandle(stderr_handle);
+    free(quoted_shell);
+    free(quoted_command);
+    free(command_line);
+    return (int)exit_code;
+}
+
+static int jayess_spawn_process_argv(const char *file, jayess_array *args, const char *stdin_path, const char *stdout_path, const char *stderr_path, int *process_id) {
+    char *quoted_file = NULL;
+    char *command_line = NULL;
+    size_t command_len = 0;
+    SECURITY_ATTRIBUTES security;
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    HANDLE stdin_handle = INVALID_HANDLE_VALUE;
+    HANDLE stdout_handle = INVALID_HANDLE_VALUE;
+    HANDLE stderr_handle = INVALID_HANDLE_VALUE;
+    DWORD exit_code = 1;
+    int i;
+    if (file == NULL || file[0] == '\0') {
+        return -1;
+    }
+    quoted_file = jayess_shell_quote(file);
+    if (quoted_file == NULL) {
+        return -1;
+    }
+    command_len = strlen(quoted_file) + 1;
+    for (i = 0; args != NULL && i < args->count; i++) {
+        char *piece = jayess_value_stringify(jayess_array_get(args, i));
+        char *quoted_piece = jayess_shell_quote(piece != NULL ? piece : "");
+        command_len += (quoted_piece != NULL ? strlen(quoted_piece) : 0) + 1;
+        free(piece);
+        free(quoted_piece);
+    }
+    command_line = (char *)malloc(command_len + 1);
+    if (command_line == NULL) {
+        free(quoted_file);
+        return -1;
+    }
+    strcpy(command_line, quoted_file);
+    for (i = 0; args != NULL && i < args->count; i++) {
+        char *piece = jayess_value_stringify(jayess_array_get(args, i));
+        char *quoted_piece = jayess_shell_quote(piece != NULL ? piece : "");
+        strcat(command_line, " ");
+        strcat(command_line, quoted_piece != NULL ? quoted_piece : "\"\"");
+        free(piece);
+        free(quoted_piece);
+    }
+    security.nLength = sizeof(security);
+    security.lpSecurityDescriptor = NULL;
+    security.bInheritHandle = TRUE;
+    if (stdin_path != NULL && stdin_path[0] != '\0') {
+        stdin_handle = CreateFileA(stdin_path, GENERIC_READ, FILE_SHARE_READ, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    stdout_handle = CreateFileA(stdout_path, GENERIC_WRITE, FILE_SHARE_READ, &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    stderr_handle = CreateFileA(stderr_path, GENERIC_WRITE, FILE_SHARE_READ, &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (stdout_handle == INVALID_HANDLE_VALUE || stderr_handle == INVALID_HANDLE_VALUE || (stdin_path != NULL && stdin_path[0] != '\0' && stdin_handle == INVALID_HANDLE_VALUE)) {
+        if (stdin_handle != INVALID_HANDLE_VALUE) CloseHandle(stdin_handle);
+        if (stdout_handle != INVALID_HANDLE_VALUE) CloseHandle(stdout_handle);
+        if (stderr_handle != INVALID_HANDLE_VALUE) CloseHandle(stderr_handle);
+        free(quoted_file);
+        free(command_line);
+        return -1;
+    }
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&process, sizeof(process));
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = stdin_handle != INVALID_HANDLE_VALUE ? stdin_handle : GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = stdout_handle;
+    startup.hStdError = stderr_handle;
+    if (!CreateProcessA(NULL, command_line, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process)) {
+        if (stdin_handle != INVALID_HANDLE_VALUE) CloseHandle(stdin_handle);
+        CloseHandle(stdout_handle);
+        CloseHandle(stderr_handle);
+        free(quoted_file);
+        free(command_line);
+        return -1;
+    }
+    if (process_id != NULL) {
+        *process_id = (int)process.dwProcessId;
+    }
+    WaitForSingleObject(process.hProcess, INFINITE);
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    if (stdin_handle != INVALID_HANDLE_VALUE) CloseHandle(stdin_handle);
+    CloseHandle(stdout_handle);
+    CloseHandle(stderr_handle);
+    free(quoted_file);
+    free(command_line);
+    return (int)exit_code;
+}
+#else
+static int jayess_spawn_shell_command(const char *command, const char *stdin_path, const char *stdout_path, const char *stderr_path, int *process_id) {
+    int stdin_fd = -1;
+    int stdout_fd = open(stdout_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    int stderr_fd = open(stderr_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    int status = 1;
+    pid_t pid;
+    if (stdin_path != NULL && stdin_path[0] != '\0') {
+        stdin_fd = open(stdin_path, O_RDONLY);
+    }
+    if (stdout_fd < 0 || stderr_fd < 0 || (stdin_path != NULL && stdin_path[0] != '\0' && stdin_fd < 0)) {
+        if (stdin_fd >= 0) close(stdin_fd);
+        if (stdout_fd >= 0) close(stdout_fd);
+        if (stderr_fd >= 0) close(stderr_fd);
+        return -1;
+    }
+    pid = fork();
+    if (pid < 0) {
+        if (stdin_fd >= 0) close(stdin_fd);
+        close(stdout_fd);
+        close(stderr_fd);
+        return -1;
+    }
+    if (pid == 0) {
+        if (stdin_fd >= 0) {
+            dup2(stdin_fd, STDIN_FILENO);
+            close(stdin_fd);
+        }
+        dup2(stdout_fd, STDOUT_FILENO);
+        dup2(stderr_fd, STDERR_FILENO);
+        close(stdout_fd);
+        close(stderr_fd);
+        execl("/bin/sh", "sh", "-c", command != NULL ? command : "", (char *)NULL);
+        _exit(127);
+    }
+    if (process_id != NULL) {
+        *process_id = (int)pid;
+    }
+    if (stdin_fd >= 0) close(stdin_fd);
+    close(stdout_fd);
+    close(stderr_fd);
+    if (waitpid(pid, &status, 0) < 0) {
+        return -1;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return -1;
+}
+
+static int jayess_spawn_process_argv(const char *file, jayess_array *args, const char *stdin_path, const char *stdout_path, const char *stderr_path, int *process_id) {
+    int stdin_fd = -1;
+    int stdout_fd = open(stdout_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    int stderr_fd = open(stderr_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    int status = 1;
+    pid_t pid;
+    char **argv = NULL;
+    int argc = 0;
+    int i;
+    if (file == NULL || file[0] == '\0') {
+        return -1;
+    }
+    if (stdin_path != NULL && stdin_path[0] != '\0') {
+        stdin_fd = open(stdin_path, O_RDONLY);
+    }
+    if (stdout_fd < 0 || stderr_fd < 0 || (stdin_path != NULL && stdin_path[0] != '\0' && stdin_fd < 0)) {
+        if (stdin_fd >= 0) close(stdin_fd);
+        if (stdout_fd >= 0) close(stdout_fd);
+        if (stderr_fd >= 0) close(stderr_fd);
+        return -1;
+    }
+    argc = 1 + (args != NULL ? args->count : 0);
+    argv = (char **)calloc((size_t)argc + 1, sizeof(char *));
+    if (argv == NULL) {
+        if (stdin_fd >= 0) close(stdin_fd);
+        close(stdout_fd);
+        close(stderr_fd);
+        return -1;
+    }
+    argv[0] = (char *)file;
+    for (i = 0; args != NULL && i < args->count; i++) {
+        argv[i + 1] = jayess_value_stringify(jayess_array_get(args, i));
+    }
+    pid = fork();
+    if (pid < 0) {
+        if (stdin_fd >= 0) close(stdin_fd);
+        close(stdout_fd);
+        close(stderr_fd);
+        for (i = 1; i < argc; i++) free(argv[i]);
+        free(argv);
+        return -1;
+    }
+    if (pid == 0) {
+        if (stdin_fd >= 0) {
+            dup2(stdin_fd, STDIN_FILENO);
+            close(stdin_fd);
+        }
+        dup2(stdout_fd, STDOUT_FILENO);
+        dup2(stderr_fd, STDERR_FILENO);
+        close(stdout_fd);
+        close(stderr_fd);
+        execvp(file, argv);
+        _exit(127);
+    }
+    if (process_id != NULL) {
+        *process_id = (int)pid;
+    }
+    if (stdin_fd >= 0) close(stdin_fd);
+    close(stdout_fd);
+    close(stderr_fd);
+    if (waitpid(pid, &status, 0) < 0) {
+        status = -1;
+    } else if (WIFEXITED(status)) {
+        status = WEXITSTATUS(status);
+    } else {
+        status = -1;
+    }
+    for (i = 1; i < argc; i++) free(argv[i]);
+    free(argv);
+    return status;
+}
+#endif
+
 static char *jayess_compile_option_string(jayess_value *options, const char *key) {
     jayess_value *value;
     if (options == NULL || options->kind != JAYESS_VALUE_OBJECT || options->as.object_value == NULL || key == NULL) {
@@ -9023,6 +13381,1765 @@ jayess_value *jayess_std_compile(jayess_value *source, jayess_value *options) {
 
 jayess_value *jayess_std_compile_file(jayess_value *input_path, jayess_value *options) {
     return jayess_std_compile_impl(input_path, options, 1);
+}
+
+jayess_value *jayess_std_child_process_exec(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *command = NULL;
+    char *input = NULL;
+    const char *tmp_dir = jayess_temp_dir();
+    char stdin_path[4096];
+    char stdout_path[4096];
+    char stderr_path[4096];
+    FILE *stdin_file = NULL;
+    char *stdout_text = NULL;
+    char *stderr_text = NULL;
+    int status;
+    int pid = -1;
+    long stamp = (long)time(NULL);
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    if (options != NULL && options->kind == JAYESS_VALUE_STRING) {
+        command = jayess_value_stringify(options);
+    } else if (object != NULL) {
+        command = jayess_compile_option_string(options, "command");
+        input = jayess_compile_option_string(options, "input");
+    }
+    if (command == NULL || command[0] == '\0') {
+        free(command);
+        free(input);
+        return jayess_std_child_process_result(-1, -1, "", "childProcess.exec requires a non-empty command");
+    }
+    snprintf(stdin_path, sizeof(stdin_path), "%s%cjayess-child-%ld-%d.stdin", tmp_dir, sep, stamp, rand());
+    snprintf(stdout_path, sizeof(stdout_path), "%s%cjayess-child-%ld-%d.stdout", tmp_dir, sep, stamp, rand());
+    snprintf(stderr_path, sizeof(stderr_path), "%s%cjayess-child-%ld-%d.stderr", tmp_dir, sep, stamp, rand());
+    if (input != NULL) {
+        stdin_file = fopen(stdin_path, "wb");
+        if (stdin_file == NULL) {
+            free(command);
+            free(input);
+            return jayess_std_child_process_result(-1, -1, "", "failed to create child stdin pipe");
+        }
+        fwrite(input, 1, strlen(input), stdin_file);
+        fclose(stdin_file);
+    }
+    status = jayess_spawn_shell_command(command, input != NULL ? stdin_path : NULL, stdout_path, stderr_path, &pid);
+    stdout_text = jayess_read_text_file_or_empty(stdout_path);
+    stderr_text = jayess_read_text_file_or_empty(stderr_path);
+    if (input != NULL) {
+        remove(stdin_path);
+    }
+    remove(stdout_path);
+    remove(stderr_path);
+    {
+        jayess_value *result = jayess_std_child_process_result(status, pid, stdout_text, stderr_text);
+        free(command);
+        free(input);
+        free(stdout_text);
+        free(stderr_text);
+        return result;
+    }
+}
+
+jayess_value *jayess_std_child_process_spawn(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *file = NULL;
+    char *input = NULL;
+    jayess_array *args = NULL;
+    const char *tmp_dir = jayess_temp_dir();
+    char stdin_path[4096];
+    char stdout_path[4096];
+    char stderr_path[4096];
+    FILE *stdin_file = NULL;
+    char *stdout_text = NULL;
+    char *stderr_text = NULL;
+    int status;
+    int pid = -1;
+    long stamp = (long)time(NULL);
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    if (options != NULL && options->kind == JAYESS_VALUE_STRING) {
+        file = jayess_value_stringify(options);
+    } else if (object != NULL) {
+        file = jayess_compile_option_string(options, "file");
+        input = jayess_compile_option_string(options, "input");
+        {
+            jayess_value *args_value = jayess_object_get(object, "args");
+            if (args_value != NULL && args_value->kind == JAYESS_VALUE_ARRAY) {
+                args = args_value->as.array_value;
+            }
+        }
+    }
+    if (file == NULL || file[0] == '\0') {
+        free(file);
+        free(input);
+        return jayess_std_child_process_result(-1, -1, "", "childProcess.spawn requires a non-empty file");
+    }
+    snprintf(stdin_path, sizeof(stdin_path), "%s%cjayess-child-%ld-%d.stdin", tmp_dir, sep, stamp, rand());
+    snprintf(stdout_path, sizeof(stdout_path), "%s%cjayess-child-%ld-%d.stdout", tmp_dir, sep, stamp, rand());
+    snprintf(stderr_path, sizeof(stderr_path), "%s%cjayess-child-%ld-%d.stderr", tmp_dir, sep, stamp, rand());
+    if (input != NULL) {
+        stdin_file = fopen(stdin_path, "wb");
+        if (stdin_file == NULL) {
+            free(file);
+            free(input);
+            return jayess_std_child_process_result(-1, -1, "", "failed to create child stdin pipe");
+        }
+        fwrite(input, 1, strlen(input), stdin_file);
+        fclose(stdin_file);
+    }
+    status = jayess_spawn_process_argv(file, args, input != NULL ? stdin_path : NULL, stdout_path, stderr_path, &pid);
+    stdout_text = jayess_read_text_file_or_empty(stdout_path);
+    stderr_text = jayess_read_text_file_or_empty(stderr_path);
+    if (input != NULL) {
+        remove(stdin_path);
+    }
+    remove(stdout_path);
+    remove(stderr_path);
+    {
+        jayess_value *result = jayess_std_child_process_result(status, pid, stdout_text, stderr_text);
+        free(file);
+        free(input);
+        free(stdout_text);
+        free(stderr_text);
+        return result;
+    }
+}
+
+jayess_value *jayess_std_child_process_kill(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    jayess_value *pid_value = options;
+    char *signal_name = NULL;
+    int pid;
+    int ok = 0;
+    if (object != NULL) {
+        pid_value = jayess_object_get(object, "pid");
+        signal_name = jayess_compile_option_string(options, "signal");
+    }
+    if (pid_value == NULL || jayess_value_is_nullish(pid_value)) {
+        free(signal_name);
+        return jayess_value_from_bool(0);
+    }
+    pid = (int)jayess_value_to_number(pid_value);
+    if (pid <= 0) {
+        free(signal_name);
+        return jayess_value_from_bool(0);
+    }
+#ifdef _WIN32
+    {
+        HANDLE handle = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+        if (handle != NULL) {
+            ok = TerminateProcess(handle, 1) ? 1 : 0;
+            CloseHandle(handle);
+        }
+    }
+#else
+    {
+        int signal_number = jayess_std_child_process_signal_number(signal_name);
+        if (signal_number != 0) {
+            ok = kill((pid_t)pid, signal_number) == 0 ? 1 : 0;
+        }
+    }
+#endif
+    free(signal_name);
+    return jayess_value_from_bool(ok);
+}
+
+jayess_value *jayess_std_worker_create(jayess_value *handler) {
+    jayess_object *object;
+    jayess_worker_state *state;
+    if (handler == NULL || handler->kind != JAYESS_VALUE_FUNCTION || handler->as.function_value == NULL) {
+        return jayess_type_error_value("worker.create expects a function");
+    }
+    object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    state = (jayess_worker_state *)calloc(1, sizeof(jayess_worker_state));
+    if (state == NULL) {
+        return jayess_value_undefined();
+    }
+    state->handler = handler;
+#ifdef _WIN32
+    InitializeCriticalSection(&state->lock);
+    InitializeConditionVariable(&state->inbound_available);
+    InitializeConditionVariable(&state->outbound_available);
+    state->thread = CreateThread(NULL, 0, jayess_worker_thread_main, state, 0, NULL);
+    if (state->thread == NULL) {
+        DeleteCriticalSection(&state->lock);
+        free(state);
+        return jayess_value_undefined();
+    }
+#else
+    if (pthread_mutex_init(&state->lock, NULL) != 0 ||
+        pthread_cond_init(&state->inbound_available, NULL) != 0 ||
+        pthread_cond_init(&state->outbound_available, NULL) != 0 ||
+        pthread_create(&state->thread, NULL, jayess_worker_thread_main, state) != 0) {
+        pthread_cond_destroy(&state->outbound_available);
+        pthread_cond_destroy(&state->inbound_available);
+        pthread_mutex_destroy(&state->lock);
+        free(state);
+        return jayess_value_undefined();
+    }
+#endif
+    object->native_handle = state;
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("Worker"));
+    jayess_object_set_value(object, "closed", jayess_value_from_bool(0));
+    return jayess_value_from_object(object);
+}
+
+static jayess_value *jayess_std_worker_post_message_method(jayess_value *env, jayess_value *message) {
+    jayess_worker_state *state;
+    jayess_worker_message *queued;
+    int clone_ok = 1;
+    jayess_value *cloned_message;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(env, "Worker") || env->as.object_value == NULL) {
+        return jayess_value_from_bool(0);
+    }
+    state = (jayess_worker_state *)env->as.object_value->native_handle;
+    if (state == NULL || state->closed) {
+        return jayess_value_from_bool(0);
+    }
+    cloned_message = jayess_worker_clone_value(message, 0, &clone_ok);
+    if (!clone_ok) {
+        jayess_throw(jayess_type_error_value("worker.postMessage only supports cloneable values"));
+        return jayess_value_undefined();
+    }
+    queued = jayess_worker_message_new(cloned_message);
+    if (queued == NULL) {
+        return jayess_value_from_bool(0);
+    }
+#ifdef _WIN32
+    EnterCriticalSection(&state->lock);
+    if (state->closed || state->terminate_requested) {
+        LeaveCriticalSection(&state->lock);
+        free(queued);
+        return jayess_value_from_bool(0);
+    }
+    jayess_worker_queue_push(&state->inbound_head, &state->inbound_tail, queued);
+    WakeConditionVariable(&state->inbound_available);
+    LeaveCriticalSection(&state->lock);
+#else
+    pthread_mutex_lock(&state->lock);
+    if (state->closed || state->terminate_requested) {
+        pthread_mutex_unlock(&state->lock);
+        free(queued);
+        return jayess_value_from_bool(0);
+    }
+    jayess_worker_queue_push(&state->inbound_head, &state->inbound_tail, queued);
+    pthread_cond_signal(&state->inbound_available);
+    pthread_mutex_unlock(&state->lock);
+#endif
+    return jayess_value_from_bool(1);
+}
+
+static jayess_value *jayess_std_worker_receive_method(jayess_value *env, jayess_value *timeout) {
+    jayess_worker_state *state;
+    jayess_worker_message *message;
+    double timeout_ms = -1;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(env, "Worker") || env->as.object_value == NULL) {
+        return jayess_value_undefined();
+    }
+    state = (jayess_worker_state *)env->as.object_value->native_handle;
+    if (state == NULL) {
+        return jayess_value_undefined();
+    }
+    if (timeout != NULL && !jayess_value_is_nullish(timeout)) {
+        timeout_ms = jayess_value_to_number(timeout);
+    }
+#ifdef _WIN32
+    EnterCriticalSection(&state->lock);
+    if (!jayess_worker_wait_outbound(state, timeout_ms)) {
+        LeaveCriticalSection(&state->lock);
+        return jayess_value_undefined();
+    }
+    message = jayess_worker_queue_pop(&state->outbound_head, &state->outbound_tail);
+    env->as.object_value->native_handle = state;
+    jayess_object_set_value(env->as.object_value, "closed", jayess_value_from_bool(state->closed));
+    LeaveCriticalSection(&state->lock);
+#else
+    pthread_mutex_lock(&state->lock);
+    if (!jayess_worker_wait_outbound(state, timeout_ms)) {
+        pthread_mutex_unlock(&state->lock);
+        return jayess_value_undefined();
+    }
+    message = jayess_worker_queue_pop(&state->outbound_head, &state->outbound_tail);
+    jayess_object_set_value(env->as.object_value, "closed", jayess_value_from_bool(state->closed));
+    pthread_mutex_unlock(&state->lock);
+#endif
+    if (message == NULL) {
+        return jayess_value_undefined();
+    }
+    {
+        jayess_value *result = message->value != NULL ? message->value : jayess_value_undefined();
+        free(message);
+        return result;
+    }
+}
+
+static jayess_value *jayess_std_worker_terminate_method(jayess_value *env) {
+    jayess_worker_state *state;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(env, "Worker") || env->as.object_value == NULL) {
+        return jayess_value_from_bool(0);
+    }
+    state = (jayess_worker_state *)env->as.object_value->native_handle;
+    if (state == NULL) {
+        return jayess_value_from_bool(1);
+    }
+#ifdef _WIN32
+    EnterCriticalSection(&state->lock);
+    state->terminate_requested = 1;
+    WakeConditionVariable(&state->inbound_available);
+    WakeConditionVariable(&state->outbound_available);
+    LeaveCriticalSection(&state->lock);
+    WaitForSingleObject(state->thread, INFINITE);
+    CloseHandle(state->thread);
+    DeleteCriticalSection(&state->lock);
+#else
+    pthread_mutex_lock(&state->lock);
+    state->terminate_requested = 1;
+    pthread_cond_broadcast(&state->inbound_available);
+    pthread_cond_broadcast(&state->outbound_available);
+    pthread_mutex_unlock(&state->lock);
+    pthread_join(state->thread, NULL);
+    pthread_cond_destroy(&state->outbound_available);
+    pthread_cond_destroy(&state->inbound_available);
+    pthread_mutex_destroy(&state->lock);
+#endif
+    state->closed = 1;
+    jayess_worker_queue_free(&state->inbound_head, &state->inbound_tail);
+    jayess_worker_queue_free(&state->outbound_head, &state->outbound_tail);
+    env->as.object_value->native_handle = NULL;
+    jayess_object_set_value(env->as.object_value, "closed", jayess_value_from_bool(1));
+    free(state);
+    return jayess_value_from_bool(1);
+}
+
+static int jayess_atomics_is_supported_kind(const char *kind) {
+    return kind != NULL && (
+        strcmp(kind, "Int8Array") == 0 ||
+        strcmp(kind, "Uint8Array") == 0 ||
+        strcmp(kind, "Int16Array") == 0 ||
+        strcmp(kind, "Uint16Array") == 0 ||
+        strcmp(kind, "Int32Array") == 0 ||
+        strcmp(kind, "Uint32Array") == 0
+    );
+}
+
+static jayess_shared_bytes_state *jayess_atomics_state(jayess_value *target, int *index_out, const char **kind_out) {
+    const char *kind = jayess_std_typed_array_kind(target);
+    jayess_shared_bytes_state *state;
+    int index;
+    if (!jayess_atomics_is_supported_kind(kind)) {
+        jayess_throw(jayess_type_error_value("Atomics requires an integer typed array"));
+        return NULL;
+    }
+    state = jayess_std_shared_bytes_state(target);
+    if (state == NULL) {
+        jayess_throw(jayess_type_error_value("Atomics requires a SharedArrayBuffer-backed typed array"));
+        return NULL;
+    }
+    index = index_out != NULL ? *index_out : 0;
+    if (index < 0 || index >= jayess_value_array_length(target)) {
+        jayess_throw(jayess_type_error_value("Atomics index out of range"));
+        return NULL;
+    }
+    if (kind_out != NULL) {
+        *kind_out = kind;
+    }
+    return state;
+}
+
+static double jayess_atomics_apply(jayess_value *target, jayess_value *index_value, jayess_value *operand_value, const char *op, jayess_value *expected) {
+    const char *kind = NULL;
+    int index = (int)jayess_value_to_number(index_value);
+    jayess_shared_bytes_state *state = jayess_atomics_state(target, &index, &kind);
+    jayess_array *bytes = jayess_std_bytes_slot(target);
+    int size = jayess_std_typed_array_element_size(kind);
+    int offset = index * size;
+    double previous;
+    double operand = operand_value != NULL ? jayess_value_to_number(operand_value) : 0.0;
+    double expected_number = expected != NULL ? jayess_value_to_number(expected) : 0.0;
+    if (state == NULL) {
+        return 0.0;
+    }
+#ifdef _WIN32
+    EnterCriticalSection(&state->lock);
+#else
+    pthread_mutex_lock(&state->lock);
+#endif
+    if (strcmp(kind, "Uint8Array") == 0) {
+        previous = (double)jayess_std_bytes_read(bytes, offset);
+    } else if (strcmp(kind, "Int8Array") == 0) {
+        int value = jayess_std_bytes_read(bytes, offset);
+        previous = (double)(value >= 128 ? value - 256 : value);
+    } else if (strcmp(kind, "Uint16Array") == 0) {
+        previous = (double)(jayess_std_bytes_read(bytes, offset) | (jayess_std_bytes_read(bytes, offset + 1) << 8));
+    } else if (strcmp(kind, "Int16Array") == 0) {
+        int value = jayess_std_bytes_read(bytes, offset) | (jayess_std_bytes_read(bytes, offset + 1) << 8);
+        previous = (double)(value >= 32768 ? value - 65536 : value);
+    } else if (strcmp(kind, "Uint32Array") == 0) {
+        previous = (double)jayess_std_data_view_read_u32(bytes, offset, 1);
+    } else {
+        unsigned int raw = jayess_std_data_view_read_u32(bytes, offset, 1);
+        previous = (double)(raw >= 2147483648U ? (long long)raw - 4294967296LL : (long long)raw);
+    }
+    if (op != NULL) {
+        double next = previous;
+        if (strcmp(op, "store") == 0 || strcmp(op, "exchange") == 0) {
+            next = operand;
+        } else if (strcmp(op, "add") == 0) {
+            next = previous + operand;
+        } else if (strcmp(op, "sub") == 0) {
+            next = previous - operand;
+        } else if (strcmp(op, "and") == 0) {
+            next = (double)(((int64_t)previous) & ((int64_t)operand));
+        } else if (strcmp(op, "or") == 0) {
+            next = (double)(((int64_t)previous) | ((int64_t)operand));
+        } else if (strcmp(op, "xor") == 0) {
+            next = (double)(((int64_t)previous) ^ ((int64_t)operand));
+        } else if (strcmp(op, "compareExchange") == 0) {
+            if (previous == expected_number) {
+                next = operand;
+            } else {
+                next = previous;
+            }
+        }
+        if (strcmp(op, "compareExchange") != 0 || previous == expected_number) {
+            if (strcmp(kind, "Uint8Array") == 0) {
+                jayess_std_bytes_write(bytes, offset, (int)next & 255);
+            } else if (strcmp(kind, "Int8Array") == 0) {
+                jayess_std_bytes_write(bytes, offset, (int)next);
+            } else if (strcmp(kind, "Uint16Array") == 0 || strcmp(kind, "Int16Array") == 0) {
+                int value = (int)next;
+                jayess_std_bytes_write(bytes, offset, value & 255);
+                jayess_std_bytes_write(bytes, offset + 1, (value >> 8) & 255);
+            } else if (strcmp(kind, "Uint32Array") == 0) {
+                jayess_std_data_view_write_u32(bytes, offset, (unsigned int)next, 1);
+            } else {
+                jayess_std_data_view_write_u32(bytes, offset, (unsigned int)((int)next), 1);
+            }
+        }
+    }
+#ifdef _WIN32
+    LeaveCriticalSection(&state->lock);
+#else
+    pthread_mutex_unlock(&state->lock);
+#endif
+    return previous;
+}
+
+double jayess_atomics_load(jayess_value *target, jayess_value *index) {
+    return jayess_atomics_apply(target, index, NULL, NULL, NULL);
+}
+
+double jayess_atomics_store(jayess_value *target, jayess_value *index, jayess_value *value) {
+    jayess_atomics_apply(target, index, value, "store", NULL);
+    return jayess_value_to_number(value);
+}
+
+double jayess_atomics_add(jayess_value *target, jayess_value *index, jayess_value *value) {
+    return jayess_atomics_apply(target, index, value, "add", NULL);
+}
+
+double jayess_atomics_sub(jayess_value *target, jayess_value *index, jayess_value *value) {
+    return jayess_atomics_apply(target, index, value, "sub", NULL);
+}
+
+double jayess_atomics_and(jayess_value *target, jayess_value *index, jayess_value *value) {
+    return jayess_atomics_apply(target, index, value, "and", NULL);
+}
+
+double jayess_atomics_or(jayess_value *target, jayess_value *index, jayess_value *value) {
+    return jayess_atomics_apply(target, index, value, "or", NULL);
+}
+
+double jayess_atomics_xor(jayess_value *target, jayess_value *index, jayess_value *value) {
+    return jayess_atomics_apply(target, index, value, "xor", NULL);
+}
+
+double jayess_atomics_exchange(jayess_value *target, jayess_value *index, jayess_value *value) {
+    return jayess_atomics_apply(target, index, value, "exchange", NULL);
+}
+
+double jayess_atomics_compareExchange(jayess_value *target, jayess_value *index, jayess_value *expected, jayess_value *replacement) {
+    return jayess_atomics_apply(target, index, replacement, "compareExchange", expected);
+}
+
+#ifdef _WIN32
+static LPCWSTR jayess_std_crypto_algorithm_id(const char *name) {
+    if (jayess_std_crypto_equal_name(name, "sha1") || jayess_std_crypto_equal_name(name, "sha-1")) {
+        return BCRYPT_SHA1_ALGORITHM;
+    }
+    if (jayess_std_crypto_equal_name(name, "sha256") || jayess_std_crypto_equal_name(name, "sha-256")) {
+        return BCRYPT_SHA256_ALGORITHM;
+    }
+    if (jayess_std_crypto_equal_name(name, "sha384") || jayess_std_crypto_equal_name(name, "sha-384")) {
+        return BCRYPT_SHA384_ALGORITHM;
+    }
+    if (jayess_std_crypto_equal_name(name, "sha512") || jayess_std_crypto_equal_name(name, "sha-512")) {
+        return BCRYPT_SHA512_ALGORITHM;
+    }
+    if (jayess_std_crypto_equal_name(name, "md5")) {
+        return BCRYPT_MD5_ALGORITHM;
+    }
+    return NULL;
+}
+
+static int jayess_std_crypto_sha256_bytes(const unsigned char *input, size_t input_length, unsigned char *output, DWORD *output_length) {
+    BCRYPT_ALG_HANDLE provider = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    DWORD object_length = 0;
+    DWORD digest_length = 0;
+    DWORD bytes_written = 0;
+    PUCHAR object_buffer = NULL;
+    int ok = 0;
+    if (output == NULL || output_length == NULL) {
+        return 0;
+    }
+    if (BCryptOpenAlgorithmProvider(&provider, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+        BCryptGetProperty(provider, BCRYPT_OBJECT_LENGTH, (PUCHAR)&object_length, sizeof(object_length), &bytes_written, 0) < 0 ||
+        BCryptGetProperty(provider, BCRYPT_HASH_LENGTH, (PUCHAR)&digest_length, sizeof(digest_length), &bytes_written, 0) < 0 ||
+        digest_length > *output_length) {
+        if (provider != NULL) {
+            BCryptCloseAlgorithmProvider(provider, 0);
+        }
+        return 0;
+    }
+    object_buffer = (PUCHAR)malloc(object_length > 0 ? object_length : 1);
+    if (object_buffer == NULL ||
+        BCryptCreateHash(provider, &hash, object_buffer, object_length, NULL, 0, 0) < 0 ||
+        (input_length > 0 && BCryptHashData(hash, (PUCHAR)input, (ULONG)input_length, 0) < 0) ||
+        BCryptFinishHash(hash, output, digest_length, 0) < 0) {
+        if (hash != NULL) {
+            BCryptDestroyHash(hash);
+        }
+        BCryptCloseAlgorithmProvider(provider, 0);
+        free(object_buffer);
+        return 0;
+    }
+    *output_length = digest_length;
+    ok = 1;
+    BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(provider, 0);
+    free(object_buffer);
+    return ok;
+}
+#endif
+
+jayess_value *jayess_std_crypto_random_bytes(jayess_value *length_value) {
+    int length = (int)jayess_value_to_number(length_value);
+    unsigned char *buffer;
+    jayess_value *result;
+    if (length <= 0) {
+        return jayess_std_uint8_array_new(jayess_value_from_number(0));
+    }
+    buffer = (unsigned char *)malloc((size_t)length);
+    if (buffer == NULL) {
+        return jayess_std_uint8_array_new(jayess_value_from_number(0));
+    }
+#ifdef _WIN32
+    if (BCryptGenRandom(NULL, buffer, (ULONG)length, BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+        free(buffer);
+        return jayess_std_uint8_array_new(jayess_value_from_number(0));
+    }
+#else
+    if (RAND_bytes(buffer, length) != 1) {
+        free(buffer);
+        return jayess_std_uint8_array_new(jayess_value_from_number(0));
+    }
+#endif
+    result = jayess_std_uint8_array_from_bytes(buffer, (size_t)length);
+    free(buffer);
+    return result;
+}
+
+jayess_value *jayess_std_crypto_hash(jayess_value *algorithm, jayess_value *value) {
+    unsigned char *input = NULL;
+    size_t input_length = 0;
+    char *algorithm_text = jayess_value_stringify(algorithm);
+    char *hex = NULL;
+    jayess_value *result;
+    if (algorithm_text == NULL || !jayess_std_crypto_copy_bytes(value, &input, &input_length)) {
+        free(algorithm_text);
+        free(input);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        LPCWSTR algorithm_id = jayess_std_crypto_algorithm_id(algorithm_text);
+        BCRYPT_ALG_HANDLE provider = NULL;
+        BCRYPT_HASH_HANDLE hash = NULL;
+        DWORD object_length = 0;
+        DWORD hash_length = 0;
+        DWORD bytes_written = 0;
+        PUCHAR object_buffer = NULL;
+        PUCHAR digest = NULL;
+        if (algorithm_id == NULL ||
+            BCryptOpenAlgorithmProvider(&provider, algorithm_id, NULL, 0) < 0 ||
+            BCryptGetProperty(provider, BCRYPT_OBJECT_LENGTH, (PUCHAR)&object_length, sizeof(object_length), &bytes_written, 0) < 0 ||
+            BCryptGetProperty(provider, BCRYPT_HASH_LENGTH, (PUCHAR)&hash_length, sizeof(hash_length), &bytes_written, 0) < 0) {
+            if (provider != NULL) {
+                BCryptCloseAlgorithmProvider(provider, 0);
+            }
+            free(algorithm_text);
+            free(input);
+            return jayess_value_undefined();
+        }
+        object_buffer = (PUCHAR)malloc(object_length > 0 ? object_length : 1);
+        digest = (PUCHAR)malloc(hash_length > 0 ? hash_length : 1);
+        if (object_buffer == NULL || digest == NULL ||
+            BCryptCreateHash(provider, &hash, object_buffer, object_length, NULL, 0, 0) < 0 ||
+            BCryptHashData(hash, input, (ULONG)input_length, 0) < 0 ||
+            BCryptFinishHash(hash, digest, hash_length, 0) < 0) {
+            if (hash != NULL) {
+                BCryptDestroyHash(hash);
+            }
+            if (provider != NULL) {
+                BCryptCloseAlgorithmProvider(provider, 0);
+            }
+            free(object_buffer);
+            free(digest);
+            free(algorithm_text);
+            free(input);
+            return jayess_value_undefined();
+        }
+        hex = jayess_std_crypto_hex_encode(digest, (size_t)hash_length);
+        BCryptDestroyHash(hash);
+        BCryptCloseAlgorithmProvider(provider, 0);
+        free(object_buffer);
+        free(digest);
+    }
+#else
+    {
+        const EVP_MD *md = EVP_get_digestbyname(algorithm_text);
+        EVP_MD_CTX *ctx = NULL;
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int digest_length = 0;
+        if (md == NULL) {
+            free(algorithm_text);
+            free(input);
+            return jayess_value_undefined();
+        }
+        ctx = EVP_MD_CTX_new();
+        if (ctx == NULL ||
+            EVP_DigestInit_ex(ctx, md, NULL) != 1 ||
+            EVP_DigestUpdate(ctx, input, input_length) != 1 ||
+            EVP_DigestFinal_ex(ctx, digest, &digest_length) != 1) {
+            if (ctx != NULL) {
+                EVP_MD_CTX_free(ctx);
+            }
+            free(algorithm_text);
+            free(input);
+            return jayess_value_undefined();
+        }
+        hex = jayess_std_crypto_hex_encode(digest, (size_t)digest_length);
+        EVP_MD_CTX_free(ctx);
+    }
+#endif
+    free(algorithm_text);
+    free(input);
+    if (hex == NULL) {
+        return jayess_value_undefined();
+    }
+    result = jayess_value_from_string(hex);
+    free(hex);
+    return result;
+}
+
+jayess_value *jayess_std_crypto_hmac(jayess_value *algorithm, jayess_value *key, jayess_value *value) {
+    unsigned char *key_bytes = NULL;
+    unsigned char *value_bytes = NULL;
+    size_t key_length = 0;
+    size_t value_length = 0;
+    char *algorithm_text = jayess_value_stringify(algorithm);
+    char *hex = NULL;
+    jayess_value *result;
+    if (algorithm_text == NULL ||
+        !jayess_std_crypto_copy_bytes(key, &key_bytes, &key_length) ||
+        !jayess_std_crypto_copy_bytes(value, &value_bytes, &value_length)) {
+        free(algorithm_text);
+        free(key_bytes);
+        free(value_bytes);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        LPCWSTR algorithm_id = jayess_std_crypto_algorithm_id(algorithm_text);
+        BCRYPT_ALG_HANDLE provider = NULL;
+        BCRYPT_HASH_HANDLE hash = NULL;
+        DWORD object_length = 0;
+        DWORD hash_length = 0;
+        DWORD bytes_written = 0;
+        PUCHAR object_buffer = NULL;
+        PUCHAR digest = NULL;
+        if (algorithm_id == NULL ||
+            BCryptOpenAlgorithmProvider(&provider, algorithm_id, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0 ||
+            BCryptGetProperty(provider, BCRYPT_OBJECT_LENGTH, (PUCHAR)&object_length, sizeof(object_length), &bytes_written, 0) < 0 ||
+            BCryptGetProperty(provider, BCRYPT_HASH_LENGTH, (PUCHAR)&hash_length, sizeof(hash_length), &bytes_written, 0) < 0) {
+            if (provider != NULL) {
+                BCryptCloseAlgorithmProvider(provider, 0);
+            }
+            free(algorithm_text);
+            free(key_bytes);
+            free(value_bytes);
+            return jayess_value_undefined();
+        }
+        object_buffer = (PUCHAR)malloc(object_length > 0 ? object_length : 1);
+        digest = (PUCHAR)malloc(hash_length > 0 ? hash_length : 1);
+        if (object_buffer == NULL || digest == NULL ||
+            BCryptCreateHash(provider, &hash, object_buffer, object_length, key_bytes, (ULONG)key_length, 0) < 0 ||
+            BCryptHashData(hash, value_bytes, (ULONG)value_length, 0) < 0 ||
+            BCryptFinishHash(hash, digest, hash_length, 0) < 0) {
+            if (hash != NULL) {
+                BCryptDestroyHash(hash);
+            }
+            if (provider != NULL) {
+                BCryptCloseAlgorithmProvider(provider, 0);
+            }
+            free(object_buffer);
+            free(digest);
+            free(algorithm_text);
+            free(key_bytes);
+            free(value_bytes);
+            return jayess_value_undefined();
+        }
+        hex = jayess_std_crypto_hex_encode(digest, (size_t)hash_length);
+        BCryptDestroyHash(hash);
+        BCryptCloseAlgorithmProvider(provider, 0);
+        free(object_buffer);
+        free(digest);
+    }
+#else
+    {
+        const EVP_MD *md = EVP_get_digestbyname(algorithm_text);
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int digest_length = 0;
+        if (md == NULL || HMAC(md, key_bytes, (int)key_length, value_bytes, value_length, digest, &digest_length) == NULL) {
+            free(algorithm_text);
+            free(key_bytes);
+            free(value_bytes);
+            return jayess_value_undefined();
+        }
+        hex = jayess_std_crypto_hex_encode(digest, (size_t)digest_length);
+    }
+#endif
+    free(algorithm_text);
+    free(key_bytes);
+    free(value_bytes);
+    if (hex == NULL) {
+        return jayess_value_undefined();
+    }
+    result = jayess_value_from_string(hex);
+    free(hex);
+    return result;
+}
+
+jayess_value *jayess_std_crypto_secure_compare(jayess_value *left, jayess_value *right) {
+    unsigned char *left_bytes = NULL;
+    unsigned char *right_bytes = NULL;
+    size_t left_length = 0;
+    size_t right_length = 0;
+    size_t i;
+    unsigned char diff = 0;
+    size_t max_length;
+    if (!jayess_std_crypto_copy_bytes(left, &left_bytes, &left_length) ||
+        !jayess_std_crypto_copy_bytes(right, &right_bytes, &right_length)) {
+        free(left_bytes);
+        free(right_bytes);
+        return jayess_value_from_bool(0);
+    }
+    max_length = left_length > right_length ? left_length : right_length;
+    diff = (unsigned char)(left_length ^ right_length);
+    for (i = 0; i < max_length; i++) {
+        unsigned char left_byte = i < left_length ? left_bytes[i] : 0;
+        unsigned char right_byte = i < right_length ? right_bytes[i] : 0;
+        diff |= (unsigned char)(left_byte ^ right_byte);
+    }
+    free(left_bytes);
+    free(right_bytes);
+    return jayess_value_from_bool(diff == 0);
+}
+
+jayess_value *jayess_std_crypto_encrypt(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *algorithm = NULL;
+    unsigned char *key = NULL;
+    unsigned char *iv = NULL;
+    unsigned char *data = NULL;
+    unsigned char *aad = NULL;
+    size_t key_length = 0;
+    size_t iv_length = 0;
+    size_t data_length = 0;
+    size_t aad_length = 0;
+    int expected_key_length;
+    jayess_object *result = NULL;
+    jayess_value *boxed = NULL;
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    algorithm = jayess_compile_option_string(options, "algorithm");
+    expected_key_length = jayess_std_crypto_cipher_key_length(algorithm);
+    if (expected_key_length == 0 ||
+        !jayess_std_crypto_option_bytes(options, "key", &key, &key_length, 1) ||
+        !jayess_std_crypto_option_bytes(options, "iv", &iv, &iv_length, 1) ||
+        !jayess_std_crypto_option_bytes(options, "data", &data, &data_length, 1) ||
+        !jayess_std_crypto_option_bytes(options, "aad", &aad, &aad_length, 0) ||
+        (int)key_length != expected_key_length || iv_length == 0) {
+        free(algorithm);
+        free(key);
+        free(iv);
+        free(data);
+        free(aad);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        BCRYPT_ALG_HANDLE provider = NULL;
+        BCRYPT_KEY_HANDLE key_handle = NULL;
+        DWORD object_length = 0;
+        DWORD bytes_written = 0;
+        PUCHAR key_object = NULL;
+        unsigned char *ciphertext = NULL;
+        ULONG ciphertext_length = 0;
+        unsigned char tag[16];
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO auth_info;
+        if (BCryptOpenAlgorithmProvider(&provider, BCRYPT_AES_ALGORITHM, NULL, 0) < 0 ||
+            BCryptSetProperty(provider, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_GCM, (ULONG)(sizeof(BCRYPT_CHAIN_MODE_GCM)), 0) < 0 ||
+            BCryptGetProperty(provider, BCRYPT_OBJECT_LENGTH, (PUCHAR)&object_length, sizeof(object_length), &bytes_written, 0) < 0) {
+            if (provider != NULL) {
+                BCryptCloseAlgorithmProvider(provider, 0);
+            }
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        key_object = (PUCHAR)malloc(object_length > 0 ? object_length : 1);
+        ciphertext = (unsigned char *)malloc(data_length > 0 ? data_length : 1);
+        if (key_object == NULL || ciphertext == NULL ||
+            BCryptGenerateSymmetricKey(provider, &key_handle, key_object, object_length, key, (ULONG)key_length, 0) < 0) {
+            if (key_handle != NULL) {
+                BCryptDestroyKey(key_handle);
+            }
+            BCryptCloseAlgorithmProvider(provider, 0);
+            free(key_object);
+            free(ciphertext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        BCRYPT_INIT_AUTH_MODE_INFO(auth_info);
+        auth_info.pbNonce = iv;
+        auth_info.cbNonce = (ULONG)iv_length;
+        auth_info.pbAuthData = aad;
+        auth_info.cbAuthData = (ULONG)aad_length;
+        auth_info.pbTag = tag;
+        auth_info.cbTag = (ULONG)sizeof(tag);
+        if (BCryptEncrypt(key_handle, data, (ULONG)data_length, &auth_info, NULL, 0, ciphertext, (ULONG)data_length, &ciphertext_length, 0) < 0) {
+            BCryptDestroyKey(key_handle);
+            BCryptCloseAlgorithmProvider(provider, 0);
+            free(key_object);
+            free(ciphertext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        result = jayess_object_new();
+        if (result != NULL) {
+            jayess_object_set_value(result, "algorithm", jayess_value_from_string(algorithm));
+            jayess_object_set_value(result, "iv", jayess_std_uint8_array_from_bytes(iv, iv_length));
+            jayess_object_set_value(result, "ciphertext", jayess_std_uint8_array_from_bytes(ciphertext, (size_t)ciphertext_length));
+            jayess_object_set_value(result, "tag", jayess_std_uint8_array_from_bytes(tag, sizeof(tag)));
+            boxed = jayess_value_from_object(result);
+        } else {
+            boxed = jayess_value_undefined();
+        }
+        BCryptDestroyKey(key_handle);
+        BCryptCloseAlgorithmProvider(provider, 0);
+        free(key_object);
+        free(ciphertext);
+    }
+#else
+    {
+        const EVP_CIPHER *cipher = NULL;
+        EVP_CIPHER_CTX *ctx = NULL;
+        unsigned char *ciphertext = NULL;
+        int out_length = 0;
+        int final_length = 0;
+        unsigned char tag[16];
+        if (jayess_std_crypto_equal_name(algorithm, "aes-128-gcm")) {
+            cipher = EVP_aes_128_gcm();
+        } else if (jayess_std_crypto_equal_name(algorithm, "aes-192-gcm")) {
+            cipher = EVP_aes_192_gcm();
+        } else if (jayess_std_crypto_equal_name(algorithm, "aes-256-gcm")) {
+            cipher = EVP_aes_256_gcm();
+        }
+        if (cipher == NULL) {
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        ctx = EVP_CIPHER_CTX_new();
+        ciphertext = (unsigned char *)malloc(data_length > 0 ? data_length : 1);
+        if (ctx == NULL || ciphertext == NULL ||
+            EVP_EncryptInit_ex(ctx, cipher, NULL, NULL, NULL) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)iv_length, NULL) != 1 ||
+            EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv) != 1) {
+            if (ctx != NULL) {
+                EVP_CIPHER_CTX_free(ctx);
+            }
+            free(ciphertext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        if (aad_length > 0 && EVP_EncryptUpdate(ctx, NULL, &out_length, aad, (int)aad_length) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            free(ciphertext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        if ((data_length > 0 && EVP_EncryptUpdate(ctx, ciphertext, &out_length, data, (int)data_length) != 1) ||
+            EVP_EncryptFinal_ex(ctx, ciphertext + out_length, &final_length) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, (int)sizeof(tag), tag) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            free(ciphertext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        result = jayess_object_new();
+        if (result != NULL) {
+            jayess_object_set_value(result, "algorithm", jayess_value_from_string(algorithm));
+            jayess_object_set_value(result, "iv", jayess_std_uint8_array_from_bytes(iv, iv_length));
+            jayess_object_set_value(result, "ciphertext", jayess_std_uint8_array_from_bytes(ciphertext, (size_t)(out_length + final_length)));
+            jayess_object_set_value(result, "tag", jayess_std_uint8_array_from_bytes(tag, sizeof(tag)));
+            boxed = jayess_value_from_object(result);
+        } else {
+            boxed = jayess_value_undefined();
+        }
+        EVP_CIPHER_CTX_free(ctx);
+        free(ciphertext);
+    }
+#endif
+    free(algorithm);
+    free(key);
+    free(iv);
+    free(data);
+    free(aad);
+    return boxed != NULL ? boxed : jayess_value_undefined();
+}
+
+jayess_value *jayess_std_crypto_decrypt(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *algorithm = NULL;
+    unsigned char *key = NULL;
+    unsigned char *iv = NULL;
+    unsigned char *data = NULL;
+    unsigned char *tag = NULL;
+    unsigned char *aad = NULL;
+    size_t key_length = 0;
+    size_t iv_length = 0;
+    size_t data_length = 0;
+    size_t tag_length = 0;
+    size_t aad_length = 0;
+    int expected_key_length;
+    jayess_value *boxed = NULL;
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    algorithm = jayess_compile_option_string(options, "algorithm");
+    expected_key_length = jayess_std_crypto_cipher_key_length(algorithm);
+    if (expected_key_length == 0 ||
+        !jayess_std_crypto_option_bytes(options, "key", &key, &key_length, 1) ||
+        !jayess_std_crypto_option_bytes(options, "iv", &iv, &iv_length, 1) ||
+        !jayess_std_crypto_option_bytes(options, "data", &data, &data_length, 1) ||
+        !jayess_std_crypto_option_bytes(options, "tag", &tag, &tag_length, 1) ||
+        !jayess_std_crypto_option_bytes(options, "aad", &aad, &aad_length, 0) ||
+        (int)key_length != expected_key_length || iv_length == 0 || tag_length != 16) {
+        free(algorithm);
+        free(key);
+        free(iv);
+        free(data);
+        free(tag);
+        free(aad);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        BCRYPT_ALG_HANDLE provider = NULL;
+        BCRYPT_KEY_HANDLE key_handle = NULL;
+        DWORD object_length = 0;
+        DWORD bytes_written = 0;
+        PUCHAR key_object = NULL;
+        unsigned char *plaintext = NULL;
+        ULONG plaintext_length = 0;
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO auth_info;
+        if (BCryptOpenAlgorithmProvider(&provider, BCRYPT_AES_ALGORITHM, NULL, 0) < 0 ||
+            BCryptSetProperty(provider, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_GCM, (ULONG)(sizeof(BCRYPT_CHAIN_MODE_GCM)), 0) < 0 ||
+            BCryptGetProperty(provider, BCRYPT_OBJECT_LENGTH, (PUCHAR)&object_length, sizeof(object_length), &bytes_written, 0) < 0) {
+            if (provider != NULL) {
+                BCryptCloseAlgorithmProvider(provider, 0);
+            }
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(tag);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        key_object = (PUCHAR)malloc(object_length > 0 ? object_length : 1);
+        plaintext = (unsigned char *)malloc(data_length > 0 ? data_length : 1);
+        if (key_object == NULL || plaintext == NULL ||
+            BCryptGenerateSymmetricKey(provider, &key_handle, key_object, object_length, key, (ULONG)key_length, 0) < 0) {
+            if (key_handle != NULL) {
+                BCryptDestroyKey(key_handle);
+            }
+            BCryptCloseAlgorithmProvider(provider, 0);
+            free(key_object);
+            free(plaintext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(tag);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        BCRYPT_INIT_AUTH_MODE_INFO(auth_info);
+        auth_info.pbNonce = iv;
+        auth_info.cbNonce = (ULONG)iv_length;
+        auth_info.pbAuthData = aad;
+        auth_info.cbAuthData = (ULONG)aad_length;
+        auth_info.pbTag = tag;
+        auth_info.cbTag = (ULONG)tag_length;
+        if (BCryptDecrypt(key_handle, data, (ULONG)data_length, &auth_info, NULL, 0, plaintext, (ULONG)data_length, &plaintext_length, 0) < 0) {
+            BCryptDestroyKey(key_handle);
+            BCryptCloseAlgorithmProvider(provider, 0);
+            free(key_object);
+            free(plaintext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(tag);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        boxed = jayess_std_uint8_array_from_bytes(plaintext, (size_t)plaintext_length);
+        BCryptDestroyKey(key_handle);
+        BCryptCloseAlgorithmProvider(provider, 0);
+        free(key_object);
+        free(plaintext);
+    }
+#else
+    {
+        const EVP_CIPHER *cipher = NULL;
+        EVP_CIPHER_CTX *ctx = NULL;
+        unsigned char *plaintext = NULL;
+        int out_length = 0;
+        int final_length = 0;
+        int ok = 0;
+        if (jayess_std_crypto_equal_name(algorithm, "aes-128-gcm")) {
+            cipher = EVP_aes_128_gcm();
+        } else if (jayess_std_crypto_equal_name(algorithm, "aes-192-gcm")) {
+            cipher = EVP_aes_192_gcm();
+        } else if (jayess_std_crypto_equal_name(algorithm, "aes-256-gcm")) {
+            cipher = EVP_aes_256_gcm();
+        }
+        if (cipher == NULL) {
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(tag);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        ctx = EVP_CIPHER_CTX_new();
+        plaintext = (unsigned char *)malloc(data_length > 0 ? data_length : 1);
+        if (ctx == NULL || plaintext == NULL ||
+            EVP_DecryptInit_ex(ctx, cipher, NULL, NULL, NULL) != 1 ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)iv_length, NULL) != 1 ||
+            EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv) != 1) {
+            if (ctx != NULL) {
+                EVP_CIPHER_CTX_free(ctx);
+            }
+            free(plaintext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(tag);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        if (aad_length > 0 && EVP_DecryptUpdate(ctx, NULL, &out_length, aad, (int)aad_length) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            free(plaintext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(tag);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        if ((data_length > 0 && EVP_DecryptUpdate(ctx, plaintext, &out_length, data, (int)data_length) != 1) ||
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, (int)tag_length, tag) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            free(plaintext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(tag);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        ok = EVP_DecryptFinal_ex(ctx, plaintext + out_length, &final_length);
+        if (ok != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            free(plaintext);
+            free(algorithm);
+            free(key);
+            free(iv);
+            free(data);
+            free(tag);
+            free(aad);
+            return jayess_value_undefined();
+        }
+        boxed = jayess_std_uint8_array_from_bytes(plaintext, (size_t)(out_length + final_length));
+        EVP_CIPHER_CTX_free(ctx);
+        free(plaintext);
+    }
+#endif
+    free(algorithm);
+    free(key);
+    free(iv);
+    free(data);
+    free(tag);
+    free(aad);
+    return boxed != NULL ? boxed : jayess_value_undefined();
+}
+
+jayess_value *jayess_std_crypto_generate_key_pair(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *type = NULL;
+    int modulus_length = 2048;
+    jayess_value *public_key;
+    jayess_value *private_key;
+    jayess_crypto_key_state *public_state;
+    jayess_crypto_key_state *private_state;
+    jayess_object *result;
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    type = jayess_compile_option_string(options, "type");
+    if (!jayess_std_crypto_equal_name(type, "rsa")) {
+        free(type);
+        return jayess_value_undefined();
+    }
+    if (jayess_object_get(object, "modulusLength") != NULL) {
+        modulus_length = (int)jayess_value_to_number(jayess_object_get(object, "modulusLength"));
+    }
+    if (modulus_length < 1024) {
+        modulus_length = 1024;
+    }
+    public_key = jayess_std_crypto_key_value("rsa", 0);
+    private_key = jayess_std_crypto_key_value("rsa", 1);
+    public_state = jayess_std_crypto_key_state_from_value(public_key);
+    private_state = jayess_std_crypto_key_state_from_value(private_key);
+    if (public_state == NULL || private_state == NULL) {
+        free(type);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        BCRYPT_ALG_HANDLE provider = NULL;
+        BCRYPT_KEY_HANDLE private_handle = NULL;
+        BCRYPT_KEY_HANDLE public_handle = NULL;
+        DWORD blob_length = 0;
+        unsigned char *blob = NULL;
+        if (BCryptOpenAlgorithmProvider(&provider, BCRYPT_RSA_ALGORITHM, NULL, 0) < 0 ||
+            BCryptGenerateKeyPair(provider, &private_handle, (ULONG)modulus_length, 0) < 0 ||
+            BCryptFinalizeKeyPair(private_handle, 0) < 0 ||
+            BCryptExportKey(private_handle, NULL, BCRYPT_RSAPUBLIC_BLOB, NULL, 0, &blob_length, 0) < 0) {
+            if (private_handle != NULL) {
+                BCryptDestroyKey(private_handle);
+            }
+            if (provider != NULL) {
+                BCryptCloseAlgorithmProvider(provider, 0);
+            }
+            free(type);
+            return jayess_value_undefined();
+        }
+        blob = (unsigned char *)malloc(blob_length > 0 ? blob_length : 1);
+        if (blob == NULL ||
+            BCryptExportKey(private_handle, NULL, BCRYPT_RSAPUBLIC_BLOB, blob, blob_length, &blob_length, 0) < 0 ||
+            BCryptImportKeyPair(provider, NULL, BCRYPT_RSAPUBLIC_BLOB, &public_handle, blob, blob_length, 0) < 0) {
+            BCryptDestroyKey(private_handle);
+            BCryptCloseAlgorithmProvider(provider, 0);
+            free(blob);
+            free(type);
+            return jayess_value_undefined();
+        }
+        private_state->handle = private_handle;
+        public_state->handle = public_handle;
+        BCryptCloseAlgorithmProvider(provider, 0);
+        free(blob);
+    }
+#else
+    {
+        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+        EVP_PKEY *pkey = NULL;
+        if (ctx == NULL ||
+            EVP_PKEY_keygen_init(ctx) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, modulus_length) <= 0 ||
+            EVP_PKEY_keygen(ctx, &pkey) <= 0 ||
+            pkey == NULL) {
+            if (ctx != NULL) {
+                EVP_PKEY_CTX_free(ctx);
+            }
+            free(type);
+            return jayess_value_undefined();
+        }
+        EVP_PKEY_up_ref(pkey);
+        private_state->pkey = pkey;
+        public_state->pkey = pkey;
+        EVP_PKEY_CTX_free(ctx);
+    }
+#endif
+    result = jayess_object_new();
+    free(type);
+    if (result == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(result, "publicKey", public_key);
+    jayess_object_set_value(result, "privateKey", private_key);
+    return jayess_value_from_object(result);
+}
+
+jayess_value *jayess_std_crypto_public_encrypt(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *algorithm = NULL;
+    unsigned char *data = NULL;
+    size_t data_length = 0;
+    jayess_crypto_key_state *key_state = NULL;
+    jayess_value *key_value;
+    jayess_value *boxed = NULL;
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    algorithm = jayess_compile_option_string(options, "algorithm");
+    key_value = jayess_object_get(object, "key");
+    key_state = jayess_std_crypto_key_state_from_value(key_value);
+    if (!jayess_std_crypto_equal_name(algorithm, "rsa-oaep-sha256") || key_state == NULL ||
+        !jayess_std_crypto_option_bytes(options, "data", &data, &data_length, 1)) {
+        free(algorithm);
+        free(data);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        BCRYPT_OAEP_PADDING_INFO padding = { BCRYPT_SHA256_ALGORITHM, NULL, 0 };
+        ULONG out_length = 0;
+        unsigned char *ciphertext = NULL;
+        if (BCryptEncrypt(key_state->handle, data, (ULONG)data_length, &padding, NULL, 0, NULL, 0, &out_length, BCRYPT_PAD_OAEP) < 0) {
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        ciphertext = (unsigned char *)malloc(out_length > 0 ? out_length : 1);
+        if (ciphertext == NULL ||
+            BCryptEncrypt(key_state->handle, data, (ULONG)data_length, &padding, NULL, 0, ciphertext, out_length, &out_length, BCRYPT_PAD_OAEP) < 0) {
+            free(ciphertext);
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        boxed = jayess_std_uint8_array_from_bytes(ciphertext, (size_t)out_length);
+        free(ciphertext);
+    }
+#else
+    {
+        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(key_state->pkey, NULL);
+        size_t out_length = 0;
+        unsigned char *ciphertext = NULL;
+        if (ctx == NULL ||
+            EVP_PKEY_encrypt_init(ctx) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_oaep_md(ctx, EVP_sha256()) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, EVP_sha256()) <= 0 ||
+            EVP_PKEY_encrypt(ctx, NULL, &out_length, data, data_length) <= 0) {
+            if (ctx != NULL) {
+                EVP_PKEY_CTX_free(ctx);
+            }
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        ciphertext = (unsigned char *)malloc(out_length > 0 ? out_length : 1);
+        if (ciphertext == NULL ||
+            EVP_PKEY_encrypt(ctx, ciphertext, &out_length, data, data_length) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            free(ciphertext);
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        boxed = jayess_std_uint8_array_from_bytes(ciphertext, out_length);
+        EVP_PKEY_CTX_free(ctx);
+        free(ciphertext);
+    }
+#endif
+    free(algorithm);
+    free(data);
+    return boxed != NULL ? boxed : jayess_value_undefined();
+}
+
+jayess_value *jayess_std_crypto_private_decrypt(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *algorithm = NULL;
+    unsigned char *data = NULL;
+    size_t data_length = 0;
+    jayess_crypto_key_state *key_state = NULL;
+    jayess_value *key_value;
+    jayess_value *boxed = NULL;
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    algorithm = jayess_compile_option_string(options, "algorithm");
+    key_value = jayess_object_get(object, "key");
+    key_state = jayess_std_crypto_key_state_from_value(key_value);
+    if (!jayess_std_crypto_equal_name(algorithm, "rsa-oaep-sha256") || key_state == NULL || !key_state->is_private ||
+        !jayess_std_crypto_option_bytes(options, "data", &data, &data_length, 1)) {
+        free(algorithm);
+        free(data);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        BCRYPT_OAEP_PADDING_INFO padding = { BCRYPT_SHA256_ALGORITHM, NULL, 0 };
+        ULONG out_length = 0;
+        unsigned char *plaintext = NULL;
+        if (BCryptDecrypt(key_state->handle, data, (ULONG)data_length, &padding, NULL, 0, NULL, 0, &out_length, BCRYPT_PAD_OAEP) < 0) {
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        plaintext = (unsigned char *)malloc(out_length > 0 ? out_length : 1);
+        if (plaintext == NULL ||
+            BCryptDecrypt(key_state->handle, data, (ULONG)data_length, &padding, NULL, 0, plaintext, out_length, &out_length, BCRYPT_PAD_OAEP) < 0) {
+            free(plaintext);
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        boxed = jayess_std_uint8_array_from_bytes(plaintext, (size_t)out_length);
+        free(plaintext);
+    }
+#else
+    {
+        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(key_state->pkey, NULL);
+        size_t out_length = 0;
+        unsigned char *plaintext = NULL;
+        if (ctx == NULL ||
+            EVP_PKEY_decrypt_init(ctx) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_oaep_md(ctx, EVP_sha256()) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, EVP_sha256()) <= 0 ||
+            EVP_PKEY_decrypt(ctx, NULL, &out_length, data, data_length) <= 0) {
+            if (ctx != NULL) {
+                EVP_PKEY_CTX_free(ctx);
+            }
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        plaintext = (unsigned char *)malloc(out_length > 0 ? out_length : 1);
+        if (plaintext == NULL ||
+            EVP_PKEY_decrypt(ctx, plaintext, &out_length, data, data_length) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            free(plaintext);
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        boxed = jayess_std_uint8_array_from_bytes(plaintext, out_length);
+        EVP_PKEY_CTX_free(ctx);
+        free(plaintext);
+    }
+#endif
+    free(algorithm);
+    free(data);
+    return boxed != NULL ? boxed : jayess_value_undefined();
+}
+
+jayess_value *jayess_std_crypto_sign(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *algorithm = NULL;
+    unsigned char *data = NULL;
+    size_t data_length = 0;
+    jayess_crypto_key_state *key_state = NULL;
+    jayess_value *key_value;
+    jayess_value *boxed = NULL;
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    algorithm = jayess_compile_option_string(options, "algorithm");
+    key_value = jayess_object_get(object, "key");
+    key_state = jayess_std_crypto_key_state_from_value(key_value);
+    if (!jayess_std_crypto_equal_name(algorithm, "rsa-pss-sha256") || key_state == NULL || !key_state->is_private ||
+        !jayess_std_crypto_option_bytes(options, "data", &data, &data_length, 1)) {
+        free(algorithm);
+        free(data);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        BCRYPT_PSS_PADDING_INFO padding = { BCRYPT_SHA256_ALGORITHM, 32 };
+        unsigned char digest[32];
+        DWORD digest_length = sizeof(digest);
+        ULONG signature_length = 0;
+        unsigned char *signature = NULL;
+        if (!jayess_std_crypto_sha256_bytes(data, data_length, digest, &digest_length) ||
+            BCryptSignHash(key_state->handle, &padding, digest, digest_length, NULL, 0, &signature_length, BCRYPT_PAD_PSS) < 0) {
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        signature = (unsigned char *)malloc(signature_length > 0 ? signature_length : 1);
+        if (signature == NULL ||
+            BCryptSignHash(key_state->handle, &padding, digest, digest_length, signature, signature_length, &signature_length, BCRYPT_PAD_PSS) < 0) {
+            free(signature);
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        boxed = jayess_std_uint8_array_from_bytes(signature, (size_t)signature_length);
+        free(signature);
+    }
+#else
+    {
+        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+        EVP_PKEY_CTX *pkey_ctx = NULL;
+        size_t signature_length = 0;
+        unsigned char *signature = NULL;
+        if (ctx == NULL ||
+            EVP_DigestSignInit(ctx, &pkey_ctx, EVP_sha256(), NULL, key_state->pkey) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, RSA_PKCS1_PSS_PADDING) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_mgf1_md(pkey_ctx, EVP_sha256()) <= 0 ||
+            EVP_DigestSignUpdate(ctx, data, data_length) <= 0 ||
+            EVP_DigestSignFinal(ctx, NULL, &signature_length) <= 0) {
+            if (ctx != NULL) {
+                EVP_MD_CTX_free(ctx);
+            }
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        signature = (unsigned char *)malloc(signature_length > 0 ? signature_length : 1);
+        if (signature == NULL ||
+            EVP_DigestSignFinal(ctx, signature, &signature_length) <= 0) {
+            EVP_MD_CTX_free(ctx);
+            free(signature);
+            free(algorithm);
+            free(data);
+            return jayess_value_undefined();
+        }
+        boxed = jayess_std_uint8_array_from_bytes(signature, signature_length);
+        EVP_MD_CTX_free(ctx);
+        free(signature);
+    }
+#endif
+    free(algorithm);
+    free(data);
+    return boxed != NULL ? boxed : jayess_value_undefined();
+}
+
+jayess_value *jayess_std_crypto_verify(jayess_value *options) {
+    jayess_object *object = jayess_value_as_object(options);
+    char *algorithm = NULL;
+    unsigned char *data = NULL;
+    unsigned char *signature = NULL;
+    size_t data_length = 0;
+    size_t signature_length = 0;
+    jayess_crypto_key_state *key_state = NULL;
+    jayess_value *key_value;
+    int ok = 0;
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    algorithm = jayess_compile_option_string(options, "algorithm");
+    key_value = jayess_object_get(object, "key");
+    key_state = jayess_std_crypto_key_state_from_value(key_value);
+    if (!jayess_std_crypto_equal_name(algorithm, "rsa-pss-sha256") || key_state == NULL ||
+        !jayess_std_crypto_option_bytes(options, "data", &data, &data_length, 1) ||
+        !jayess_std_crypto_option_bytes(options, "signature", &signature, &signature_length, 1)) {
+        free(algorithm);
+        free(data);
+        free(signature);
+        return jayess_value_undefined();
+    }
+#ifdef _WIN32
+    {
+        BCRYPT_PSS_PADDING_INFO padding = { BCRYPT_SHA256_ALGORITHM, 32 };
+        unsigned char digest[32];
+        DWORD digest_length = sizeof(digest);
+        if (jayess_std_crypto_sha256_bytes(data, data_length, digest, &digest_length) &&
+            BCryptVerifySignature(key_state->handle, &padding, digest, digest_length, signature, (ULONG)signature_length, BCRYPT_PAD_PSS) == 0) {
+            ok = 1;
+        }
+    }
+#else
+    {
+        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+        EVP_PKEY_CTX *pkey_ctx = NULL;
+        if (ctx != NULL &&
+            EVP_DigestVerifyInit(ctx, &pkey_ctx, EVP_sha256(), NULL, key_state->pkey) > 0 &&
+            EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, RSA_PKCS1_PSS_PADDING) > 0 &&
+            EVP_PKEY_CTX_set_rsa_mgf1_md(pkey_ctx, EVP_sha256()) > 0 &&
+            EVP_DigestVerifyUpdate(ctx, data, data_length) > 0 &&
+            EVP_DigestVerifyFinal(ctx, signature, signature_length) == 1) {
+            ok = 1;
+        }
+        if (ctx != NULL) {
+            EVP_MD_CTX_free(ctx);
+        }
+    }
+#endif
+    free(algorithm);
+    free(data);
+    free(signature);
+    return jayess_value_from_bool(ok);
+}
+
+static jayess_value *jayess_std_compression_transform(jayess_value *value, int window_bits, int mode) {
+    unsigned char *input = NULL;
+    size_t input_length = 0;
+    z_stream stream;
+    unsigned char chunk[4096];
+    unsigned char *output = NULL;
+    size_t output_length = 0;
+    size_t output_capacity = 0;
+    int status;
+    jayess_value *result = NULL;
+    if (!jayess_std_crypto_copy_bytes(value, &input, &input_length)) {
+        free(input);
+        return jayess_value_undefined();
+    }
+    memset(&stream, 0, sizeof(stream));
+    if (mode == 0) {
+        status = deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, window_bits, 8, Z_DEFAULT_STRATEGY);
+    } else {
+        status = inflateInit2(&stream, window_bits);
+    }
+    if (status != Z_OK) {
+        free(input);
+        return jayess_value_undefined();
+    }
+    stream.next_in = input;
+    stream.avail_in = (uInt)input_length;
+    do {
+        int flush = mode == 0 ? (stream.avail_in == 0 ? Z_FINISH : Z_NO_FLUSH) : Z_NO_FLUSH;
+        stream.next_out = chunk;
+        stream.avail_out = sizeof(chunk);
+        status = mode == 0 ? deflate(&stream, flush) : inflate(&stream, Z_NO_FLUSH);
+        if (!(status == Z_OK || status == Z_STREAM_END || (mode == 0 && status == Z_BUF_ERROR))) {
+            if (mode == 0) {
+                deflateEnd(&stream);
+            } else {
+                inflateEnd(&stream);
+            }
+            free(input);
+            free(output);
+            return jayess_value_undefined();
+        }
+        {
+            size_t produced = sizeof(chunk) - stream.avail_out;
+            if (produced > 0) {
+                if (output_length + produced > output_capacity) {
+                    size_t new_capacity = output_capacity == 0 ? produced : output_capacity * 2;
+                    unsigned char *grown;
+                    while (new_capacity < output_length + produced) {
+                        new_capacity *= 2;
+                    }
+                    grown = (unsigned char *)realloc(output, new_capacity);
+                    if (grown == NULL) {
+                        if (mode == 0) {
+                            deflateEnd(&stream);
+                        } else {
+                            inflateEnd(&stream);
+                        }
+                        free(input);
+                        free(output);
+                        return jayess_value_undefined();
+                    }
+                    output = grown;
+                    output_capacity = new_capacity;
+                }
+                memcpy(output + output_length, chunk, produced);
+                output_length += produced;
+            }
+        }
+        if (mode == 0 && status == Z_BUF_ERROR && flush == Z_FINISH) {
+            status = Z_STREAM_END;
+        }
+    } while (status != Z_STREAM_END);
+    if (mode == 0) {
+        deflateEnd(&stream);
+    } else {
+        inflateEnd(&stream);
+    }
+    result = jayess_std_uint8_array_from_bytes(output != NULL ? output : (const unsigned char *)"", output_length);
+    free(input);
+    free(output);
+    return result != NULL ? result : jayess_value_undefined();
+}
+
+jayess_value *jayess_std_compression_gzip(jayess_value *value) {
+    return jayess_std_compression_transform(value, 15 + 16, 0);
+}
+
+jayess_value *jayess_std_compression_gunzip(jayess_value *value) {
+    return jayess_std_compression_transform(value, 15 + 16, 1);
+}
+
+jayess_value *jayess_std_compression_deflate(jayess_value *value) {
+    return jayess_std_compression_transform(value, 15, 0);
+}
+
+jayess_value *jayess_std_compression_inflate(jayess_value *value) {
+    return jayess_std_compression_transform(value, 15, 1);
+}
+
+jayess_value *jayess_std_compression_brotli(jayess_value *value) {
+    unsigned char *input = NULL;
+    size_t input_length = 0;
+    size_t encoded_size;
+    unsigned char *encoded = NULL;
+    jayess_value *result = NULL;
+    if (!jayess_std_crypto_copy_bytes(value, &input, &input_length)) {
+        free(input);
+        return jayess_value_undefined();
+    }
+    encoded_size = BrotliEncoderMaxCompressedSize(input_length);
+    encoded = (unsigned char *)malloc(encoded_size > 0 ? encoded_size : 1);
+    if (encoded == NULL) {
+        free(input);
+        return jayess_value_undefined();
+    }
+    if (BrotliEncoderCompress(BROTLI_DEFAULT_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_MODE_GENERIC, input_length, input, &encoded_size, encoded) == BROTLI_FALSE) {
+        free(input);
+        free(encoded);
+        return jayess_value_undefined();
+    }
+    result = jayess_std_uint8_array_from_bytes(encoded, encoded_size);
+    free(input);
+    free(encoded);
+    return result != NULL ? result : jayess_value_undefined();
+}
+
+jayess_value *jayess_std_compression_unbrotli(jayess_value *value) {
+    unsigned char *input = NULL;
+    size_t input_length = 0;
+    size_t output_capacity;
+    unsigned char *output = NULL;
+    size_t output_length = output_capacity;
+    BrotliDecoderResult status;
+    jayess_value *result = NULL;
+    if (!jayess_std_crypto_copy_bytes(value, &input, &input_length)) {
+        free(input);
+        return jayess_value_undefined();
+    }
+    output_capacity = input_length > 0 ? input_length * 6 : 64;
+    if (output_capacity < 64) {
+        output_capacity = 64;
+    }
+    output = (unsigned char *)malloc(output_capacity);
+    if (output == NULL) {
+        free(input);
+        return jayess_value_undefined();
+    }
+    for (;;) {
+        output_length = output_capacity;
+        status = BrotliDecoderDecompress(input_length, input, &output_length, output);
+        if (status == BROTLI_DECODER_RESULT_SUCCESS) {
+            result = jayess_std_uint8_array_from_bytes(output, output_length);
+            free(input);
+            free(output);
+            return result != NULL ? result : jayess_value_undefined();
+        }
+        if (status != BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT || output_capacity > (1u << 26)) {
+            free(input);
+            free(output);
+            return jayess_value_undefined();
+        }
+        output_capacity *= 2;
+        {
+            unsigned char *grown = (unsigned char *)realloc(output, output_capacity);
+            if (grown == NULL) {
+                free(input);
+                free(output);
+                return jayess_value_undefined();
+            }
+            output = grown;
+        }
+    }
+}
+
+jayess_value *jayess_std_compression_create_gzip_stream(void) {
+    return jayess_std_compression_stream_new("gzip");
+}
+
+jayess_value *jayess_std_compression_create_gunzip_stream(void) {
+    return jayess_std_compression_stream_new("gunzip");
+}
+
+jayess_value *jayess_std_compression_create_deflate_stream(void) {
+    return jayess_std_compression_stream_new("deflate");
+}
+
+jayess_value *jayess_std_compression_create_inflate_stream(void) {
+    return jayess_std_compression_stream_new("inflate");
+}
+
+jayess_value *jayess_std_compression_create_brotli_stream(void) {
+    return jayess_std_compression_stream_new("brotli");
+}
+
+jayess_value *jayess_std_compression_create_unbrotli_stream(void) {
+    return jayess_std_compression_stream_new("unbrotli");
 }
 
 jayess_value *jayess_std_path_join(jayess_value *parts) {
@@ -9699,6 +15816,19 @@ static int jayess_http_headers_transfer_chunked(jayess_object *headers) {
     if (value != NULL) {
         char *text = jayess_value_stringify(value);
         int matches = jayess_http_text_contains_ci(text, "chunked");
+        free(text);
+        if (matches) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int jayess_http_header_value_contains_ci(jayess_object *headers, const char *key, const char *needle) {
+    jayess_value *value = jayess_http_header_get_ci(headers, key);
+    if (value != NULL) {
+        char *text = jayess_value_stringify(value);
+        int matches = jayess_http_text_contains_ci(text, needle);
         free(text);
         if (matches) {
             return 1;
@@ -11233,11 +17363,11 @@ jayess_value *jayess_std_url_parse(jayess_value *input) {
 
 jayess_value *jayess_std_url_format(jayess_value *parts) {
     jayess_object *object = jayess_value_as_object(parts);
-    char *protocol = object != NULL ? jayess_value_stringify(jayess_object_get(object, "protocol")) : jayess_strdup("");
-    char *host = object != NULL ? jayess_value_stringify(jayess_object_get(object, "host")) : jayess_strdup("");
-    char *pathname = object != NULL ? jayess_value_stringify(jayess_object_get(object, "pathname")) : jayess_strdup("");
-    char *query = object != NULL ? jayess_value_stringify(jayess_object_get(object, "query")) : jayess_strdup("");
-    char *hash = object != NULL ? jayess_value_stringify(jayess_object_get(object, "hash")) : jayess_strdup("");
+    char *protocol = jayess_strdup(object != NULL ? jayess_value_as_string(jayess_object_get(object, "protocol")) : "");
+    char *host = jayess_strdup(object != NULL ? jayess_value_as_string(jayess_object_get(object, "host")) : "");
+    char *pathname = jayess_strdup(object != NULL ? jayess_value_as_string(jayess_object_get(object, "pathname")) : "");
+    char *query = jayess_strdup(object != NULL ? jayess_value_as_string(jayess_object_get(object, "query")) : "");
+    char *hash = jayess_strdup(object != NULL ? jayess_value_as_string(jayess_object_get(object, "hash")) : "");
     size_t len = strlen(protocol != NULL ? protocol : "") + strlen(host != NULL ? host : "") + strlen(pathname != NULL ? pathname : "") + strlen(query != NULL ? query : "") + strlen(hash != NULL ? hash : "") + 8;
     char *out = (char *)malloc(len);
     if (out == NULL) {
@@ -11452,6 +17582,429 @@ jayess_value *jayess_std_http_format_response(jayess_value *parts) {
     free(body);
     free(out);
     return result;
+}
+
+static jayess_value *jayess_http_read_request_from_socket(jayess_value *socket_value) {
+    char *buffer = NULL;
+    size_t buffer_len = 0;
+    size_t buffer_cap = 0;
+    const char *header_end = NULL;
+    jayess_object *headers;
+    long content_length = 0;
+    size_t total_needed = 0;
+    while (1) {
+        unsigned char chunk[1024];
+        int read_count;
+        char *next_buffer;
+        read_count = jayess_http_socket_read_raw(socket_value, chunk, (int)sizeof(chunk), NULL);
+        if (read_count <= 0) {
+            free(buffer);
+            return jayess_value_undefined();
+        }
+        if (buffer_len + (size_t)read_count + 1 > buffer_cap) {
+            buffer_cap = (buffer_len + (size_t)read_count + 1) * 2;
+            next_buffer = (char *)realloc(buffer, buffer_cap);
+            if (next_buffer == NULL) {
+                free(buffer);
+                return jayess_value_undefined();
+            }
+            buffer = next_buffer;
+        }
+        memcpy(buffer + buffer_len, chunk, (size_t)read_count);
+        buffer_len += (size_t)read_count;
+        buffer[buffer_len] = '\0';
+        header_end = jayess_http_header_boundary(buffer);
+        if (header_end == NULL) {
+            continue;
+        }
+        {
+            const char *line_end = jayess_http_line_end(buffer);
+            const char *header_start = jayess_http_next_line(line_end);
+            char *headers_text = jayess_substring(header_start, 0, (size_t)(header_end - header_start));
+            headers = jayess_http_parse_header_object(headers_text);
+            free(headers_text);
+        }
+        if (jayess_http_headers_transfer_chunked(headers)) {
+            const char *body_start = (header_end[0] == '\r' && header_end[1] == '\n') ? header_end + 4 : header_end + 2;
+            size_t body_len = buffer_len - (size_t)(body_start - buffer);
+            if (jayess_http_chunked_body_complete(body_start, body_len)) {
+                break;
+            }
+            continue;
+        }
+        content_length = jayess_http_headers_content_length(headers);
+        total_needed = ((header_end[0] == '\r' && header_end[1] == '\n') ? (size_t)(header_end - buffer) + 4 : (size_t)(header_end - buffer) + 2) + (content_length > 0 ? (size_t)content_length : 0);
+        if (buffer_len >= total_needed) {
+            break;
+        }
+    }
+    {
+        jayess_value *result = jayess_std_http_parse_request(jayess_value_from_string(buffer != NULL ? buffer : ""));
+        free(buffer);
+        return result;
+    }
+}
+
+static int jayess_http_request_wants_keep_alive(jayess_value *request) {
+    jayess_object *request_object = jayess_value_as_object(request);
+    jayess_object *headers = request_object != NULL ? jayess_value_as_object(jayess_object_get(request_object, "headers")) : NULL;
+    const char *version = request_object != NULL ? jayess_value_as_string(jayess_object_get(request_object, "version")) : NULL;
+    if (request_object == NULL) {
+        return 0;
+    }
+    if (jayess_http_header_value_contains_ci(headers, "Connection", "close")) {
+        return 0;
+    }
+    if (version != NULL && strcmp(version, "HTTP/1.1") == 0) {
+        return 1;
+    }
+    return jayess_http_header_value_contains_ci(headers, "Connection", "keep-alive");
+}
+
+static int jayess_std_http_response_send_headers(jayess_value *env) {
+    jayess_http_response_state *state;
+    jayess_object *response_object;
+    jayess_object *headers;
+    jayess_value *status_value;
+    jayess_value *headers_value;
+    jayess_value *response_text;
+    char *response_raw;
+    char *header_boundary;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return 0;
+    }
+    state = (jayess_http_response_state *)env->as.object_value->native_handle;
+    if (state == NULL || state->socket == NULL) {
+        return 0;
+    }
+    if (state->headers_sent) {
+        return 1;
+    }
+    response_object = jayess_object_new();
+    status_value = jayess_object_get(env->as.object_value, "statusCode");
+    headers_value = jayess_object_get(env->as.object_value, "headers");
+    headers = jayess_value_as_object(headers_value);
+    if (headers == NULL) {
+        headers = jayess_object_new();
+        jayess_object_set_value(env->as.object_value, "headers", jayess_value_from_object(headers));
+    }
+    if (jayess_http_header_get_ci(headers, "Connection") == NULL) {
+        jayess_object_set_value(headers, "Connection", jayess_value_from_string(state->keep_alive ? "keep-alive" : "close"));
+    }
+    if (jayess_http_header_get_ci(headers, "Content-Length") == NULL && !jayess_http_headers_transfer_chunked(headers)) {
+        jayess_object_set_value(headers, "Transfer-Encoding", jayess_value_from_string("chunked"));
+    }
+    state->chunked = jayess_http_headers_transfer_chunked(headers);
+    jayess_object_set_value(response_object, "version", jayess_value_from_string("HTTP/1.1"));
+    jayess_object_set_value(response_object, "status", status_value != NULL ? status_value : jayess_value_from_number(200));
+    jayess_object_set_value(response_object, "reason", jayess_value_from_string("OK"));
+    jayess_object_set_value(response_object, "headers", jayess_value_from_object(headers));
+    jayess_object_set_value(response_object, "body", jayess_value_from_string(""));
+    response_text = jayess_std_http_format_response(jayess_value_from_object(response_object));
+    response_raw = jayess_value_stringify(response_text);
+    if (response_raw == NULL) {
+        return 0;
+    }
+    header_boundary = strstr(response_raw, "\r\n\r\n");
+    if (header_boundary != NULL) {
+        header_boundary[4] = '\0';
+    }
+    if (!jayess_value_as_bool(jayess_std_socket_write_method(state->socket, jayess_value_from_string(response_raw)))) {
+        free(response_raw);
+        return 0;
+    }
+    free(response_raw);
+    state->headers_sent = 1;
+    return 1;
+}
+
+static jayess_value *jayess_std_http_response_set_header_method(jayess_value *env, jayess_value *name, jayess_value *value) {
+    char *name_text;
+    jayess_object *headers;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return jayess_value_undefined();
+    }
+    headers = jayess_value_as_object(jayess_object_get(env->as.object_value, "headers"));
+    if (headers == NULL) {
+        headers = jayess_object_new();
+        jayess_object_set_value(env->as.object_value, "headers", jayess_value_from_object(headers));
+    }
+    name_text = jayess_value_stringify(name);
+    if (name_text != NULL && name_text[0] != '\0') {
+        jayess_object_set_value(headers, name_text, value != NULL ? value : jayess_value_undefined());
+    }
+    free(name_text);
+    return env;
+}
+
+static jayess_value *jayess_std_http_response_write_method(jayess_value *env, jayess_value *chunk) {
+    jayess_http_response_state *state;
+    char *chunk_text;
+    char size_text[32];
+    jayess_value *ok;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return jayess_value_from_bool(0);
+    }
+    state = (jayess_http_response_state *)env->as.object_value->native_handle;
+    if (state == NULL || state->finished) {
+        return jayess_value_from_bool(0);
+    }
+    if (!jayess_std_http_response_send_headers(env)) {
+        return jayess_value_from_bool(0);
+    }
+    if (!state->chunked) {
+        return jayess_std_socket_write_method(state->socket, chunk != NULL ? chunk : jayess_value_from_string(""));
+    }
+    chunk_text = jayess_value_stringify(chunk != NULL ? chunk : jayess_value_from_string(""));
+    if (chunk_text == NULL) {
+        return jayess_value_from_bool(0);
+    }
+    if (chunk_text[0] == '\0') {
+        free(chunk_text);
+        return jayess_value_from_bool(1);
+    }
+    snprintf(size_text, sizeof(size_text), "%zx\r\n", strlen(chunk_text));
+    ok = jayess_std_socket_write_method(state->socket, jayess_value_from_string(size_text));
+    if (!jayess_value_as_bool(ok)) {
+        free(chunk_text);
+        return jayess_value_from_bool(0);
+    }
+    ok = jayess_std_socket_write_method(state->socket, jayess_value_from_string(chunk_text));
+    if (!jayess_value_as_bool(ok)) {
+        free(chunk_text);
+        return jayess_value_from_bool(0);
+    }
+    free(chunk_text);
+    return jayess_std_socket_write_method(state->socket, jayess_value_from_string("\r\n"));
+}
+
+static jayess_value *jayess_std_http_response_end_method(jayess_value *env, jayess_value *chunk) {
+    jayess_http_response_state *state;
+    jayess_object *headers;
+    char *chunk_text;
+    char length_text[32];
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return jayess_value_undefined();
+    }
+    state = (jayess_http_response_state *)env->as.object_value->native_handle;
+    if (state == NULL || state->finished) {
+        return env;
+    }
+    headers = jayess_value_as_object(jayess_object_get(env->as.object_value, "headers"));
+    if (!state->headers_sent && chunk != NULL && !(chunk->kind == JAYESS_VALUE_UNDEFINED || chunk->kind == JAYESS_VALUE_NULL)) {
+        if (headers == NULL) {
+            headers = jayess_object_new();
+            jayess_object_set_value(env->as.object_value, "headers", jayess_value_from_object(headers));
+        }
+        if (jayess_http_header_get_ci(headers, "Content-Length") == NULL && !jayess_http_headers_transfer_chunked(headers)) {
+            chunk_text = jayess_value_stringify(chunk);
+            if (chunk_text != NULL) {
+                snprintf(length_text, sizeof(length_text), "%zu", strlen(chunk_text));
+                jayess_object_set_value(headers, "Content-Length", jayess_value_from_string(length_text));
+            }
+            free(chunk_text);
+        }
+    }
+    if (chunk != NULL && !(chunk->kind == JAYESS_VALUE_UNDEFINED || chunk->kind == JAYESS_VALUE_NULL)) {
+        if (!jayess_value_as_bool(jayess_std_http_response_write_method(env, chunk))) {
+            return env;
+        }
+    } else if (!state->headers_sent) {
+        if (!jayess_std_http_response_send_headers(env)) {
+            return env;
+        }
+    }
+    state->finished = 1;
+    jayess_object_set_value(env->as.object_value, "finished", jayess_value_from_bool(1));
+    if (state->chunked && state->socket != NULL) {
+        if (!jayess_value_as_bool(jayess_std_socket_write_method(state->socket, jayess_value_from_string("0\r\n\r\n")))) {
+            return env;
+        }
+    }
+    if (state->socket != NULL) {
+        if (state->keep_alive) {
+            return env;
+        }
+        jayess_std_socket_close_method(state->socket);
+    }
+    return env;
+}
+
+static jayess_value *jayess_std_http_server_close_method(jayess_value *env) {
+    jayess_http_server_state *state;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return jayess_value_undefined();
+    }
+    state = (jayess_http_server_state *)env->as.object_value->native_handle;
+    if (state == NULL || state->closed) {
+        return env;
+    }
+    state->closed = 1;
+    jayess_object_set_value(env->as.object_value, "closed", jayess_value_from_bool(1));
+    if (state->backend_server != NULL) {
+        jayess_std_server_close_method(state->backend_server);
+    }
+    return env;
+}
+
+static jayess_value *jayess_std_http_server_new(jayess_value *handler, jayess_value *tls_options, int secure, int http_mode, const char *api_name) {
+    jayess_object *server;
+    jayess_value *server_value;
+    jayess_http_server_state *state;
+    if (handler == NULL || handler->kind != JAYESS_VALUE_FUNCTION) {
+        char message[96];
+        snprintf(message, sizeof(message), "%s handler must be a function", api_name != NULL ? api_name : "server.createServer");
+        jayess_throw(jayess_type_error_value(message));
+        return jayess_value_undefined();
+    }
+    server = jayess_object_new();
+    if (server == NULL) {
+        return jayess_value_undefined();
+    }
+    server_value = jayess_value_from_object(server);
+    state = (jayess_http_server_state *)malloc(sizeof(jayess_http_server_state));
+    if (state == NULL) {
+        return jayess_value_undefined();
+    }
+    state->handler = handler;
+    state->tls_options = tls_options;
+    state->backend_server = NULL;
+    state->secure = secure;
+    state->http_mode = http_mode;
+    state->closed = 0;
+    server->native_handle = state;
+    jayess_object_set_value(server, "listening", jayess_value_from_bool(0));
+    jayess_object_set_value(server, "closed", jayess_value_from_bool(0));
+    jayess_object_set_value(server, "secure", jayess_value_from_bool(secure));
+    jayess_object_set_value(server, "listen", jayess_value_from_function((void *)jayess_std_http_server_listen_method, server_value, "listen", NULL, 2, 0));
+    jayess_object_set_value(server, "close", jayess_value_from_function((void *)jayess_std_http_server_close_method, server_value, "close", NULL, 0, 0));
+    return server_value;
+}
+
+static jayess_value *jayess_std_http_server_listen_method(jayess_value *env, jayess_value *port_value, jayess_value *host_value) {
+    jayess_http_server_state *state;
+    jayess_object *options;
+    char *host_text;
+    int port;
+    if (env == NULL || env->kind != JAYESS_VALUE_OBJECT || env->as.object_value == NULL) {
+        return jayess_value_undefined();
+    }
+    state = (jayess_http_server_state *)env->as.object_value->native_handle;
+    if (state == NULL || state->handler == NULL) {
+        return jayess_value_undefined();
+    }
+    host_text = jayess_value_stringify(host_value);
+    port = (int)jayess_value_to_number(port_value);
+    options = jayess_object_new();
+    jayess_object_set_value(options, "host", jayess_value_from_string(host_text != NULL && host_text[0] != '\0' ? host_text : "127.0.0.1"));
+    jayess_object_set_value(options, "port", jayess_value_from_number((double)port));
+    free(host_text);
+    state->backend_server = jayess_std_net_listen(jayess_value_from_object(options));
+    if (state->backend_server == NULL || state->backend_server->kind != JAYESS_VALUE_OBJECT) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(env->as.object_value, "listening", jayess_value_from_bool(1));
+    while (!state->closed) {
+        jayess_value *socket = jayess_std_server_accept_method(state->backend_server);
+        jayess_value *request;
+        jayess_object *response_object;
+        jayess_http_response_state *response_state;
+        jayess_value *response;
+        if (state->closed) {
+            break;
+        }
+        if (socket == NULL || socket->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(socket, "Socket")) {
+            continue;
+        }
+        if (state->secure) {
+            socket = jayess_std_tls_accept_socket(socket, state->tls_options);
+            if (jayess_has_exception()) {
+                break;
+            }
+            if (socket == NULL || socket->kind != JAYESS_VALUE_OBJECT || !jayess_std_kind_is(socket, "Socket")) {
+                continue;
+            }
+        }
+        if (!state->http_mode) {
+            jayess_value_call_one(state->handler, socket);
+            if (jayess_has_exception()) {
+                jayess_std_socket_close_method(socket);
+                break;
+            }
+            if (!jayess_value_as_bool(jayess_object_get(socket->as.object_value, "closed"))) {
+                jayess_std_socket_close_method(socket);
+            }
+            continue;
+        }
+        while (!state->closed) {
+            request = jayess_http_read_request_from_socket(socket);
+            if (request == NULL || request->kind != JAYESS_VALUE_OBJECT) {
+                jayess_std_socket_close_method(socket);
+                break;
+            }
+            jayess_object_set_value(request->as.object_value, "url", jayess_object_get(request->as.object_value, "path"));
+            jayess_object_set_value(request->as.object_value, "keepAlive", jayess_value_from_bool(jayess_http_request_wants_keep_alive(request)));
+            response_object = jayess_object_new();
+            response_state = (jayess_http_response_state *)malloc(sizeof(jayess_http_response_state));
+            if (response_state == NULL) {
+                jayess_std_socket_close_method(socket);
+                break;
+            }
+            response_state->socket = socket;
+            response_state->headers_sent = 0;
+            response_state->finished = 0;
+            response_state->keep_alive = jayess_http_request_wants_keep_alive(request);
+            response_state->chunked = 0;
+            response = jayess_value_from_object(response_object);
+            response_object->native_handle = response_state;
+            jayess_object_set_value(response_object, "statusCode", jayess_value_from_number(200));
+            jayess_object_set_value(response_object, "headers", jayess_value_from_object(jayess_object_new()));
+            jayess_object_set_value(response_object, "finished", jayess_value_from_bool(0));
+            jayess_object_set_value(response_object, "setHeader", jayess_value_from_function((void *)jayess_std_http_response_set_header_method, response, "setHeader", NULL, 2, 0));
+            jayess_object_set_value(response_object, "write", jayess_value_from_function((void *)jayess_std_http_response_write_method, response, "write", NULL, 1, 0));
+            jayess_object_set_value(response_object, "end", jayess_value_from_function((void *)jayess_std_http_response_end_method, response, "end", NULL, 1, 0));
+            jayess_value_call_two_with_this(state->handler, jayess_value_undefined(), request, response);
+            if (jayess_has_exception()) {
+                jayess_std_socket_close_method(socket);
+                free(response_state);
+                response_object->native_handle = NULL;
+                break;
+            }
+            if (!response_state->finished) {
+                jayess_std_http_response_end_method(response, jayess_value_undefined());
+            }
+            {
+                int keep_socket = response_state->keep_alive && !jayess_value_as_bool(jayess_object_get(socket->as.object_value, "closed"));
+                free(response_state);
+                response_object->native_handle = NULL;
+                if (!keep_socket) {
+                    break;
+                }
+            }
+        }
+    }
+    jayess_object_set_value(env->as.object_value, "listening", jayess_value_from_bool(0));
+    return env;
+}
+
+jayess_value *jayess_std_http_create_server(jayess_value *handler) {
+    return jayess_std_http_server_new(handler, jayess_value_undefined(), 0, 1, "http.createServer");
+}
+
+jayess_value *jayess_std_https_create_server(jayess_value *options, jayess_value *handler) {
+    if (jayess_value_as_object(options) == NULL) {
+        jayess_throw(jayess_type_error_value("https.createServer options must be an object"));
+        return jayess_value_undefined();
+    }
+    return jayess_std_http_server_new(handler, options, 1, 1, "https.createServer");
+}
+
+jayess_value *jayess_std_tls_create_server(jayess_value *options, jayess_value *handler) {
+    if (jayess_value_as_object(options) == NULL) {
+        jayess_throw(jayess_type_error_value("tls.createServer options must be an object"));
+        return jayess_value_undefined();
+    }
+    return jayess_std_http_server_new(handler, options, 1, 0, "tls.createServer");
 }
 
 jayess_value *jayess_std_http_request(jayess_value *options) {
@@ -12455,6 +19008,92 @@ jayess_value *jayess_std_net_is_ip(jayess_value *input) {
     return jayess_value_from_number((double)family);
 }
 
+jayess_value *jayess_std_net_create_datagram_socket(jayess_value *options) {
+    jayess_object *object_options = jayess_value_as_object(options);
+    jayess_value *host_value = object_options != NULL ? jayess_object_get(object_options, "host") : NULL;
+    jayess_value *port_value = object_options != NULL ? jayess_object_get(object_options, "port") : NULL;
+    jayess_value *type_value = object_options != NULL ? jayess_object_get(object_options, "type") : NULL;
+    jayess_value *timeout_value = object_options != NULL ? jayess_object_get(object_options, "timeout") : NULL;
+    jayess_value *broadcast_value = object_options != NULL ? jayess_object_get(object_options, "broadcast") : NULL;
+    char *type_text = jayess_value_stringify(type_value);
+    char *host_text = jayess_value_stringify(host_value);
+    int port = (int)jayess_value_to_number(port_value);
+    int timeout = (int)jayess_value_to_number(timeout_value);
+    int enable_broadcast = jayess_value_as_bool(broadcast_value);
+    char port_text[32];
+    struct addrinfo hints;
+    struct addrinfo *results = NULL;
+    struct addrinfo *entry;
+    jayess_socket_handle handle = JAYESS_INVALID_SOCKET;
+    int family = 4;
+    int status;
+    if (type_text != NULL && type_text[0] != '\0') {
+        if (strcmp(type_text, "udp6") == 0) {
+            family = 6;
+        } else if (strcmp(type_text, "udp4") != 0) {
+            free(type_text);
+            free(host_text);
+            return jayess_value_undefined();
+        }
+    }
+    if ((host_text == NULL || host_text[0] == '\0')) {
+        free(host_text);
+        host_text = jayess_strdup(family == 6 ? "::1" : "127.0.0.1");
+    }
+    if (port < 0 || !jayess_std_socket_runtime_ready()) {
+        free(type_text);
+        free(host_text);
+        return jayess_value_undefined();
+    }
+    snprintf(port_text, sizeof(port_text), "%d", port);
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = family == 6 ? AF_INET6 : AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+    status = getaddrinfo(host_text, port_text, &hints, &results);
+    if (status != 0 || results == NULL) {
+        free(type_text);
+        free(host_text);
+        return jayess_value_undefined();
+    }
+    for (entry = results; entry != NULL; entry = entry->ai_next) {
+        handle = socket(entry->ai_family, entry->ai_socktype, entry->ai_protocol);
+        if (handle == JAYESS_INVALID_SOCKET) {
+            continue;
+        }
+        if (bind(handle, entry->ai_addr, (int)entry->ai_addrlen) == 0) {
+            family = entry->ai_family == AF_INET6 ? 6 : 4;
+            break;
+        }
+        jayess_std_socket_close_handle(handle);
+        handle = JAYESS_INVALID_SOCKET;
+    }
+    freeaddrinfo(results);
+    free(type_text);
+    free(host_text);
+    if (handle == JAYESS_INVALID_SOCKET) {
+        return jayess_value_undefined();
+    }
+    if (timeout > 0 && !jayess_std_socket_configure_timeout(handle, timeout)) {
+        jayess_std_socket_close_handle(handle);
+        return jayess_value_undefined();
+    }
+    {
+        jayess_value *result = jayess_std_datagram_socket_value_from_handle(handle);
+        if (result == NULL || result->kind != JAYESS_VALUE_OBJECT || result->as.object_value == NULL) {
+            jayess_std_socket_close_handle(handle);
+            return jayess_value_undefined();
+        }
+        jayess_object_set_value(result->as.object_value, "timeout", jayess_value_from_number((double)timeout));
+        jayess_object_set_value(result->as.object_value, "localFamily", jayess_value_from_number((double)family));
+        jayess_std_socket_set_local_endpoint(result, handle);
+        if (enable_broadcast) {
+            jayess_std_datagram_socket_set_broadcast_method(result, jayess_value_from_bool(1));
+        }
+        return result;
+    }
+}
+
 jayess_value *jayess_std_net_connect(jayess_value *options) {
     jayess_object *object_options = jayess_value_as_object(options);
     jayess_value *host_value = object_options != NULL ? jayess_object_get(object_options, "host") : NULL;
@@ -12675,6 +19314,30 @@ jayess_value *jayess_std_fs_write_file(jayess_value *path, jayess_value *content
         return jayess_value_from_bool(0);
     }
     file = fopen(path_text, "wb");
+    free(path_text);
+    if (file == NULL) {
+        free(text);
+        return jayess_value_from_bool(0);
+    }
+    length = strlen(text);
+    result = jayess_value_from_bool(fwrite(text, 1, length, file) == length);
+    fclose(file);
+    free(text);
+    return result;
+}
+
+jayess_value *jayess_std_fs_append_file(jayess_value *path, jayess_value *content) {
+    char *path_text = jayess_value_stringify(path);
+    char *text = jayess_value_stringify(content);
+    FILE *file;
+    size_t length;
+    jayess_value *result;
+    if (path_text == NULL || text == NULL) {
+        free(path_text);
+        free(text);
+        return jayess_value_from_bool(0);
+    }
+    file = fopen(path_text, "ab");
     free(path_text);
     if (file == NULL) {
         free(text);
@@ -13038,6 +19701,74 @@ jayess_value *jayess_std_fs_rename(jayess_value *from, jayess_value *to) {
     return jayess_value_from_bool(ok);
 }
 
+jayess_value *jayess_std_fs_symlink(jayess_value *target, jayess_value *path) {
+    char *target_text = jayess_value_stringify(target);
+    char *path_text = jayess_value_stringify(path);
+    int ok = 0;
+    if (target_text == NULL || path_text == NULL) {
+        free(target_text);
+        free(path_text);
+        return jayess_value_from_bool(0);
+    }
+#ifdef _WIN32
+    {
+        DWORD flags = 0;
+        if (jayess_path_is_dir_text(target_text)) {
+            flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
+        }
+#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+        flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+        ok = CreateSymbolicLinkA(path_text, target_text, flags) != 0;
+    }
+#else
+    ok = symlink(target_text, path_text) == 0;
+#endif
+    free(target_text);
+    free(path_text);
+    return jayess_value_from_bool(ok);
+}
+
+jayess_value *jayess_std_fs_watch(jayess_value *path) {
+    char *path_text = jayess_value_stringify(path);
+    jayess_object *object;
+    jayess_value *watcher;
+    jayess_fs_watch_state *state;
+    int exists;
+    int is_dir;
+    double size;
+    double mtime_ms;
+    if (path_text == NULL) {
+        return jayess_value_undefined();
+    }
+    object = jayess_object_new();
+    if (object == NULL) {
+        free(path_text);
+        return jayess_value_undefined();
+    }
+    state = (jayess_fs_watch_state *)malloc(sizeof(jayess_fs_watch_state));
+    if (state == NULL) {
+        free(path_text);
+        return jayess_value_undefined();
+    }
+    jayess_fs_watch_snapshot_text(path_text, &exists, &is_dir, &size, &mtime_ms);
+    state->path = path_text;
+    state->exists = exists;
+    state->is_dir = is_dir;
+    state->size = size;
+    state->mtime_ms = mtime_ms;
+    state->closed = 0;
+    object->native_handle = state;
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("Watcher"));
+    jayess_object_set_value(object, "path", jayess_value_from_string(path_text));
+    jayess_object_set_value(object, "closed", jayess_value_from_bool(0));
+    jayess_object_set_value(object, "errored", jayess_value_from_bool(0));
+    jayess_object_set_value(object, "error", jayess_value_null());
+    watcher = jayess_value_from_object(object);
+    jayess_std_fs_watch_apply_snapshot(watcher, exists, is_dir, size, mtime_ms);
+    return watcher;
+}
+
 jayess_value *jayess_std_number_is_nan(jayess_value *value) {
     return jayess_value_from_bool(isnan(jayess_value_to_number(value)));
 }
@@ -13092,26 +19823,36 @@ jayess_value *jayess_std_object_from_entries(jayess_value *entries) {
     for (i = 0; i < entries->as.array_value->count; i++) {
         jayess_value *entry = jayess_array_get(entries->as.array_value, i);
         if (entry != NULL && entry->kind == JAYESS_VALUE_ARRAY && entry->as.array_value != NULL && entry->as.array_value->count >= 2) {
-            char *key = jayess_value_stringify(jayess_array_get(entry->as.array_value, 0));
+            jayess_value *key = jayess_value_to_property_key(jayess_array_get(entry->as.array_value, 0));
             jayess_value *value = jayess_array_get(entry->as.array_value, 1);
-            jayess_object_set_value(object, key != NULL ? key : "", value);
-            free(key);
+            if (key != NULL) {
+                jayess_object_set_key_value(object, key, value);
+            }
         }
     }
     return jayess_value_from_object(object);
 }
 
 void jayess_value_set_computed_member(jayess_value *target, jayess_value *key, jayess_value *value) {
-    char *key_text;
+    jayess_value *property_key;
     if (target == NULL || key == NULL || value == NULL) {
         return;
     }
-    key_text = jayess_value_stringify(key);
-    if (key_text == NULL) {
+    property_key = jayess_value_to_property_key(key);
+    if (property_key == NULL) {
         return;
     }
-    jayess_value_set_member(target, key_text, value);
-    free(key_text);
+    if (property_key->kind == JAYESS_VALUE_STRING) {
+        jayess_value_set_member(target, property_key->as.string_value, value);
+        return;
+    }
+    if (target->kind == JAYESS_VALUE_OBJECT && target->as.object_value != NULL) {
+        jayess_object_set_key_value(target->as.object_value, property_key, value);
+        return;
+    }
+    if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
+        jayess_object_set_key_value(target->as.function_value->properties, property_key, value);
+    }
 }
 
 jayess_array *jayess_array_new(void) {
@@ -13275,12 +20016,8 @@ void jayess_array_append_array(jayess_array *array, jayess_array *other) {
 }
 
 void jayess_value_set_index(jayess_value *target, int index, jayess_value *value) {
-    if (target != NULL && target->kind == JAYESS_VALUE_OBJECT && jayess_std_kind_is(target, "Uint8Array")) {
-        jayess_array *bytes = jayess_std_bytes_slot(target);
-        int byte_value = (int)jayess_value_to_number(value) & 255;
-        if (bytes != NULL) {
-            jayess_array_set_value(bytes, index, jayess_value_from_number((double)byte_value));
-        }
+    if (target != NULL && target->kind == JAYESS_VALUE_OBJECT && jayess_std_is_typed_array(target)) {
+        jayess_std_typed_array_set_number(target, index, jayess_value_to_number(value));
         return;
     }
     if (target == NULL || target->kind != JAYESS_VALUE_ARRAY) {
@@ -13290,10 +20027,8 @@ void jayess_value_set_index(jayess_value *target, int index, jayess_value *value
 }
 
 jayess_value *jayess_value_get_index(jayess_value *target, int index) {
-    if (target != NULL && target->kind == JAYESS_VALUE_OBJECT && jayess_std_kind_is(target, "Uint8Array")) {
-        jayess_array *bytes = jayess_std_bytes_slot(target);
-        jayess_value *value = bytes != NULL ? jayess_array_get(bytes, index) : NULL;
-        return value != NULL ? value : jayess_value_undefined();
+    if (target != NULL && target->kind == JAYESS_VALUE_OBJECT && jayess_std_is_typed_array(target)) {
+        return jayess_value_from_number(jayess_std_typed_array_get_number(target, index));
     }
     if (target == NULL || target->kind != JAYESS_VALUE_ARRAY) {
         return NULL;
@@ -13302,7 +20037,17 @@ jayess_value *jayess_value_get_index(jayess_value *target, int index) {
 }
 
 void jayess_value_set_dynamic_index(jayess_value *target, jayess_value *index, jayess_value *value) {
+    jayess_value *property_key;
     if (target == NULL || index == NULL || value == NULL) {
+        return;
+    }
+
+    if (index->kind == JAYESS_VALUE_SYMBOL) {
+        if (target->kind == JAYESS_VALUE_OBJECT && target->as.object_value != NULL) {
+            jayess_object_set_key_value(target->as.object_value, index, value);
+        } else if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
+            jayess_object_set_key_value(target->as.function_value->properties, index, value);
+        }
         return;
     }
 
@@ -13325,13 +20070,30 @@ void jayess_value_set_dynamic_index(jayess_value *target, jayess_value *index, j
         return;
     }
 
-    if (index->kind == JAYESS_VALUE_OBJECT || index->kind == JAYESS_VALUE_ARRAY) {
+    property_key = jayess_value_to_property_key(index);
+    if (property_key == NULL || property_key->kind != JAYESS_VALUE_STRING) {
         return;
+    }
+    if (target->kind == JAYESS_VALUE_OBJECT || target->kind == JAYESS_VALUE_FUNCTION) {
+        jayess_value_set_member(target, property_key->as.string_value, value);
     }
 }
 
 jayess_value *jayess_value_get_dynamic_index(jayess_value *target, jayess_value *index) {
+    jayess_value *property_key;
     if (target == NULL || index == NULL) {
+        return NULL;
+    }
+
+    if (index->kind == JAYESS_VALUE_SYMBOL) {
+        if (target->kind == JAYESS_VALUE_OBJECT && target->as.object_value != NULL) {
+            jayess_value *value = jayess_object_get_key_value(target->as.object_value, index);
+            return value != NULL ? value : jayess_value_undefined();
+        }
+        if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
+            jayess_value *value = jayess_object_get_key_value(target->as.function_value->properties, index);
+            return value != NULL ? value : jayess_value_undefined();
+        }
         return NULL;
     }
 
@@ -13347,16 +20109,35 @@ jayess_value *jayess_value_get_dynamic_index(jayess_value *target, jayess_value 
         return jayess_value_get_index(target, index->as.bool_value ? 1 : 0);
     }
 
+    property_key = jayess_value_to_property_key(index);
+    if (property_key != NULL && property_key->kind == JAYESS_VALUE_STRING && (target->kind == JAYESS_VALUE_OBJECT || target->kind == JAYESS_VALUE_FUNCTION)) {
+        return jayess_value_get_member(target, property_key->as.string_value);
+    }
     return NULL;
 }
 
 void jayess_value_delete_dynamic_index(jayess_value *target, jayess_value *index) {
+    jayess_value *property_key;
     if (target == NULL || index == NULL) {
+        return;
+    }
+
+    if (index->kind == JAYESS_VALUE_SYMBOL) {
+        if (target->kind == JAYESS_VALUE_OBJECT && target->as.object_value != NULL) {
+            jayess_object_delete_key_value(target->as.object_value, index);
+        } else if (target->kind == JAYESS_VALUE_FUNCTION && target->as.function_value != NULL) {
+            jayess_object_delete_key_value(target->as.function_value->properties, index);
+        }
         return;
     }
 
     if (index->kind == JAYESS_VALUE_STRING) {
         jayess_value_delete_member(target, index->as.string_value);
+        return;
+    }
+    property_key = jayess_value_to_property_key(index);
+    if (property_key != NULL && property_key->kind == JAYESS_VALUE_STRING) {
+        jayess_value_delete_member(target, property_key->as.string_value);
     }
 }
 
@@ -13370,9 +20151,8 @@ int jayess_value_array_length(jayess_value *target) {
     if (target->kind == JAYESS_VALUE_ARRAY && target->as.array_value != NULL) {
         return target->as.array_value->count;
     }
-    if (target->kind == JAYESS_VALUE_OBJECT && jayess_std_kind_is(target, "Uint8Array")) {
-        jayess_array *bytes = jayess_std_bytes_slot(target);
-        return bytes != NULL ? bytes->count : 0;
+    if (target->kind == JAYESS_VALUE_OBJECT && jayess_std_is_typed_array(target)) {
+        return jayess_std_typed_array_length_from_bytes(jayess_std_bytes_slot(target), jayess_std_typed_array_kind(target));
     }
     return 0;
 }
@@ -13407,8 +20187,8 @@ jayess_value *jayess_value_array_unshift(jayess_value *target, jayess_value *val
 
 jayess_value *jayess_value_array_slice(jayess_value *target, int start, int end, int has_end) {
     if (target == NULL || target->kind != JAYESS_VALUE_ARRAY || target->as.array_value == NULL) {
-        if (target != NULL && target->kind == JAYESS_VALUE_OBJECT && jayess_std_kind_is(target, "Uint8Array")) {
-            return jayess_std_uint8_slice_values(target, start, end, has_end);
+        if (target != NULL && target->kind == JAYESS_VALUE_OBJECT && jayess_std_is_typed_array(target)) {
+            return jayess_std_typed_array_slice_values(target, start, end, has_end);
         }
         return jayess_value_from_array(jayess_array_new());
     }
@@ -13485,6 +20265,16 @@ jayess_value *jayess_value_from_number(double value) {
     return boxed;
 }
 
+jayess_value *jayess_value_from_bigint(const char *value) {
+    jayess_value *boxed = (jayess_value *)malloc(sizeof(jayess_value));
+    if (boxed == NULL) {
+        return NULL;
+    }
+    boxed->kind = JAYESS_VALUE_BIGINT;
+    boxed->as.bigint_value = jayess_strdup(value != NULL ? value : "0");
+    return boxed;
+}
+
 jayess_value *jayess_value_from_bool(int value) {
     jayess_value *boxed = (jayess_value *)malloc(sizeof(jayess_value));
     if (boxed == NULL) {
@@ -13492,6 +20282,24 @@ jayess_value *jayess_value_from_bool(int value) {
     }
     boxed->kind = JAYESS_VALUE_BOOL;
     boxed->as.bool_value = value ? 1 : 0;
+    return boxed;
+}
+
+jayess_value *jayess_value_from_symbol(const char *description) {
+    jayess_value *boxed = (jayess_value *)malloc(sizeof(jayess_value));
+    jayess_symbol *symbol_value;
+    if (boxed == NULL) {
+        return NULL;
+    }
+    symbol_value = (jayess_symbol *)malloc(sizeof(jayess_symbol));
+    if (symbol_value == NULL) {
+        free(boxed);
+        return NULL;
+    }
+    symbol_value->id = jayess_next_symbol_id++;
+    symbol_value->description = description != NULL ? jayess_strdup(description) : NULL;
+    boxed->kind = JAYESS_VALUE_SYMBOL;
+    boxed->as.symbol_value = symbol_value;
     return boxed;
 }
 
@@ -13529,6 +20337,144 @@ jayess_value *jayess_value_from_args(jayess_args *args) {
     return jayess_value_from_array(array);
 }
 
+jayess_value *jayess_value_from_bytes_copy(const unsigned char *bytes, size_t length) {
+    return jayess_std_uint8_array_from_bytes(bytes != NULL ? bytes : (const unsigned char *)"", length);
+}
+
+unsigned char *jayess_value_to_bytes_copy(jayess_value *value, size_t *length_out) {
+    jayess_array *bytes = jayess_std_bytes_slot(value);
+    unsigned char *copy;
+    size_t i;
+    if (length_out != NULL) {
+        *length_out = 0;
+    }
+    if (bytes == NULL || bytes->count <= 0) {
+        return NULL;
+    }
+    copy = (unsigned char *)malloc((size_t)bytes->count);
+    if (copy == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < (size_t)bytes->count; i++) {
+        copy[i] = (unsigned char)((int)jayess_value_to_number(jayess_array_get(bytes, (int)i)) & 255);
+    }
+    if (length_out != NULL) {
+        *length_out = (size_t)bytes->count;
+    }
+    return copy;
+}
+
+char *jayess_value_to_string_copy(jayess_value *value) {
+    if (value == NULL) {
+        return jayess_strdup("");
+    }
+    if (value->kind == JAYESS_VALUE_STRING) {
+        return jayess_strdup(value->as.string_value != NULL ? value->as.string_value : "");
+    }
+    return jayess_value_stringify(value);
+}
+
+void jayess_string_free(char *text) {
+    free(text);
+}
+
+void jayess_bytes_free(void *bytes) {
+    free(bytes);
+}
+
+jayess_value *jayess_value_from_native_handle(const char *kind, void *handle) {
+    jayess_object *object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_from_object(NULL);
+    }
+    object->native_handle = handle;
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("NativeHandle"));
+    jayess_object_set_value(object, "kind", jayess_value_from_string(kind != NULL ? kind : ""));
+    return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_value_from_managed_native_handle(const char *kind, void *handle, jayess_native_handle_finalizer finalizer) {
+    jayess_object *object = jayess_object_new();
+    jayess_managed_native_handle *managed;
+    if (object == NULL) {
+        return jayess_value_from_object(NULL);
+    }
+    managed = (jayess_managed_native_handle *)malloc(sizeof(jayess_managed_native_handle));
+    if (managed == NULL) {
+        return jayess_value_from_object(NULL);
+    }
+    managed->handle = handle;
+    managed->finalizer = finalizer;
+    managed->closed = 0;
+    object->native_handle = managed;
+    jayess_object_set_value(object, "__jayess_std_kind", jayess_value_from_string("ManagedNativeHandle"));
+    jayess_object_set_value(object, "kind", jayess_value_from_string(kind != NULL ? kind : ""));
+    jayess_object_set_value(object, "closed", jayess_value_from_bool(0));
+    return jayess_value_from_object(object);
+}
+
+void *jayess_value_as_native_handle(jayess_value *value, const char *kind) {
+    const char *actual_kind;
+    jayess_managed_native_handle *managed;
+    if (value == NULL || value->kind != JAYESS_VALUE_OBJECT || value->as.object_value == NULL) {
+        return NULL;
+    }
+    if (!(jayess_std_kind_is(value, "NativeHandle") || jayess_std_kind_is(value, "ManagedNativeHandle"))) {
+        return NULL;
+    }
+    actual_kind = jayess_value_as_string(jayess_object_get(value->as.object_value, "kind"));
+    if (kind != NULL && *kind != '\0' && !jayess_string_eq(actual_kind, kind)) {
+        return NULL;
+    }
+    if (jayess_std_kind_is(value, "ManagedNativeHandle")) {
+        managed = (jayess_managed_native_handle *)value->as.object_value->native_handle;
+        if (managed == NULL || managed->closed) {
+            return NULL;
+        }
+        return managed->handle;
+    }
+    return value->as.object_value->native_handle;
+}
+
+void jayess_value_clear_native_handle(jayess_value *value) {
+    if (value == NULL || value->kind != JAYESS_VALUE_OBJECT || value->as.object_value == NULL) {
+        return;
+    }
+    if (jayess_std_kind_is(value, "ManagedNativeHandle")) {
+        jayess_managed_native_handle *managed = (jayess_managed_native_handle *)value->as.object_value->native_handle;
+        if (managed != NULL) {
+            managed->handle = NULL;
+            managed->closed = 1;
+        }
+        jayess_object_set_value(value->as.object_value, "closed", jayess_value_from_bool(1));
+        return;
+    }
+    value->as.object_value->native_handle = NULL;
+}
+
+int jayess_value_close_native_handle(jayess_value *value) {
+    jayess_managed_native_handle *managed;
+    if (value == NULL || value->kind != JAYESS_VALUE_OBJECT || value->as.object_value == NULL) {
+        return 0;
+    }
+    if (!jayess_std_kind_is(value, "ManagedNativeHandle")) {
+        value->as.object_value->native_handle = NULL;
+        return 1;
+    }
+    managed = (jayess_managed_native_handle *)value->as.object_value->native_handle;
+    if (managed == NULL || managed->closed) {
+        jayess_object_set_value(value->as.object_value, "closed", jayess_value_from_bool(1));
+        return 0;
+    }
+    if (managed->finalizer != NULL && managed->handle != NULL) {
+        managed->finalizer(managed->handle);
+    }
+    managed->handle = NULL;
+    managed->closed = 1;
+    jayess_object_set_value(value->as.object_value, "closed", jayess_value_from_bool(1));
+    return 1;
+}
+
 jayess_value *jayess_value_from_function(void *callee, jayess_value *env, const char *name, const char *class_name, int param_count, int has_rest) {
     jayess_value *boxed = (jayess_value *)malloc(sizeof(jayess_value));
     jayess_function *function_value;
@@ -13552,6 +20498,14 @@ jayess_value *jayess_value_from_function(void *callee, jayess_value *env, const 
     boxed->kind = JAYESS_VALUE_FUNCTION;
     boxed->as.function_value = function_value;
     return boxed;
+}
+
+jayess_value *jayess_call_function(jayess_value *callback, jayess_value *argument) {
+    return jayess_value_call_one(callback, argument);
+}
+
+jayess_value *jayess_call_function2(jayess_value *callback, jayess_value *first, jayess_value *second) {
+    return jayess_value_call_two_with_this(callback, jayess_value_undefined(), first, second);
 }
 
 void *jayess_value_function_ptr(jayess_value *value) {
@@ -13674,8 +20628,69 @@ jayess_value *jayess_value_merge_bound_args(jayess_value *value, jayess_value *t
     return jayess_value_from_array(merged);
 }
 
+static char *jayess_capture_stack_trace_text(void) {
+    jayess_call_frame *frame = jayess_call_stack;
+    size_t total = 1;
+    char *text;
+    if (frame == NULL) {
+        text = (char *)malloc(1);
+        if (text != NULL) {
+            text[0] = '\0';
+        }
+        return text;
+    }
+    while (frame != NULL) {
+        const char *name = (frame->name != NULL && frame->name[0] != '\0') ? frame->name : "<anonymous>";
+        total += strlen("  at ") + strlen(name) + 1;
+        frame = frame->previous;
+    }
+    text = (char *)malloc(total);
+    if (text == NULL) {
+        return NULL;
+    }
+    text[0] = '\0';
+    frame = jayess_call_stack;
+    while (frame != NULL) {
+        const char *name = (frame->name != NULL && frame->name[0] != '\0') ? frame->name : "<anonymous>";
+        strcat(text, "  at ");
+        strcat(text, name);
+        strcat(text, "\n");
+        frame = frame->previous;
+    }
+    return text;
+}
+
+static void jayess_attach_exception_stack(jayess_value *value) {
+    char *stack_text;
+    if (value == NULL) {
+        return;
+    }
+    if (value->kind != JAYESS_VALUE_OBJECT || value->as.object_value == NULL) {
+        return;
+    }
+    stack_text = jayess_capture_stack_trace_text();
+    if (stack_text == NULL) {
+        return;
+    }
+    jayess_object_set_value(value->as.object_value, "stack", jayess_value_from_string(stack_text));
+    free(stack_text);
+}
+
 void jayess_throw(jayess_value *value) {
     jayess_current_exception = value != NULL ? value : jayess_value_undefined();
+    jayess_attach_exception_stack(jayess_current_exception);
+}
+
+void jayess_throw_error(const char *message) {
+    jayess_throw(jayess_error_value("Error", message));
+}
+
+void jayess_throw_type_error(const char *message) {
+    jayess_throw(jayess_type_error_value(message));
+}
+
+void jayess_throw_named_error(const char *name, const char *message) {
+    jayess_throw(jayess_error_value(name, message));
 }
 
 void jayess_throw_not_function(void) {
@@ -13693,13 +20708,39 @@ jayess_value *jayess_take_exception(void) {
 }
 
 void jayess_report_uncaught_exception(void) {
+    jayess_value *stack;
     if (jayess_current_exception == NULL) {
         return;
     }
     fputs("Uncaught exception: ", stderr);
     jayess_print_value_inline(jayess_current_exception);
     fputc('\n', stderr);
+    if (jayess_current_exception->kind == JAYESS_VALUE_OBJECT && jayess_current_exception->as.object_value != NULL) {
+        stack = jayess_object_get(jayess_current_exception->as.object_value, "stack");
+        if (stack != NULL && stack->kind == JAYESS_VALUE_STRING && stack->as.string_value != NULL && stack->as.string_value[0] != '\0') {
+            fputs(stack->as.string_value, stderr);
+        }
+    }
     jayess_current_exception = NULL;
+}
+
+void jayess_push_call_frame(const char *name) {
+    jayess_call_frame *frame = (jayess_call_frame *)malloc(sizeof(jayess_call_frame));
+    if (frame == NULL) {
+        return;
+    }
+    frame->name = name;
+    frame->previous = jayess_call_stack;
+    jayess_call_stack = frame;
+}
+
+void jayess_pop_call_frame(void) {
+    jayess_call_frame *current = jayess_call_stack;
+    if (current == NULL) {
+        return;
+    }
+    jayess_call_stack = current->previous;
+    free(current);
 }
 
 void jayess_push_this(jayess_value *value) {
@@ -13739,8 +20780,12 @@ const char *jayess_value_typeof(jayess_value *value) {
         return "string";
     case JAYESS_VALUE_NUMBER:
         return "number";
+    case JAYESS_VALUE_BIGINT:
+        return "bigint";
     case JAYESS_VALUE_BOOL:
         return "boolean";
+    case JAYESS_VALUE_SYMBOL:
+        return "symbol";
     case JAYESS_VALUE_FUNCTION:
         return "function";
     case JAYESS_VALUE_NULL:
@@ -13775,10 +20820,14 @@ double jayess_value_to_number(jayess_value *value) {
         return 0.0;
     case JAYESS_VALUE_NUMBER:
         return value->as.number_value;
+    case JAYESS_VALUE_BIGINT:
+        return strtod(value->as.bigint_value != NULL ? value->as.bigint_value : "0", NULL);
     case JAYESS_VALUE_BOOL:
         return value->as.bool_value ? 1.0 : 0.0;
     case JAYESS_VALUE_STRING:
         return strtod(value->as.string_value != NULL ? value->as.string_value : "0", NULL);
+    case JAYESS_VALUE_SYMBOL:
+        return 0.0;
     case JAYESS_VALUE_UNDEFINED:
         return 0.0;
     default:
@@ -13803,8 +20852,14 @@ int jayess_value_eq(jayess_value *left, jayess_value *right) {
                       right->as.string_value != NULL ? right->as.string_value : "") == 0;
     case JAYESS_VALUE_NUMBER:
         return left->as.number_value == right->as.number_value;
+    case JAYESS_VALUE_BIGINT:
+        return strcmp(left->as.bigint_value != NULL ? left->as.bigint_value : "0",
+                      right->as.bigint_value != NULL ? right->as.bigint_value : "0") == 0;
     case JAYESS_VALUE_BOOL:
         return left->as.bool_value == right->as.bool_value;
+    case JAYESS_VALUE_SYMBOL:
+        return left->as.symbol_value != NULL && right->as.symbol_value != NULL &&
+               left->as.symbol_value->id == right->as.symbol_value->id;
     case JAYESS_VALUE_OBJECT:
         return left->as.object_value == right->as.object_value;
     case JAYESS_VALUE_ARRAY:
@@ -13851,8 +20906,12 @@ int jayess_value_is_truthy(jayess_value *value) {
         return value->as.string_value != NULL && value->as.string_value[0] != '\0';
     case JAYESS_VALUE_NUMBER:
         return value->as.number_value != 0.0;
+    case JAYESS_VALUE_BIGINT:
+        return value->as.bigint_value != NULL && strcmp(value->as.bigint_value, "0") != 0;
     case JAYESS_VALUE_BOOL:
         return value->as.bool_value != 0;
+    case JAYESS_VALUE_SYMBOL:
+        return value->as.symbol_value != NULL;
     case JAYESS_VALUE_OBJECT:
         return value->as.object_value != NULL;
     case JAYESS_VALUE_ARRAY:
@@ -13900,6 +20959,60 @@ jayess_array *jayess_value_as_array(jayess_value *value) {
         return NULL;
     }
     return value->as.array_value;
+}
+
+const char *jayess_expect_string(jayess_value *value, const char *context) {
+    if (value == NULL || value->kind != JAYESS_VALUE_STRING) {
+        char message[256];
+        snprintf(message, sizeof(message), "%s expects a string", context != NULL && context[0] != '\0' ? context : "native wrapper");
+        jayess_throw_type_error(message);
+        return "";
+    }
+    return value->as.string_value != NULL ? value->as.string_value : "";
+}
+
+jayess_object *jayess_expect_object(jayess_value *value, const char *context) {
+    if (value == NULL || value->kind != JAYESS_VALUE_OBJECT || value->as.object_value == NULL) {
+        char message[256];
+        snprintf(message, sizeof(message), "%s expects an object", context != NULL && context[0] != '\0' ? context : "native wrapper");
+        jayess_throw_type_error(message);
+        return NULL;
+    }
+    return value->as.object_value;
+}
+
+jayess_array *jayess_expect_array(jayess_value *value, const char *context) {
+    if (value == NULL || value->kind != JAYESS_VALUE_ARRAY || value->as.array_value == NULL) {
+        char message[256];
+        snprintf(message, sizeof(message), "%s expects an array", context != NULL && context[0] != '\0' ? context : "native wrapper");
+        jayess_throw_type_error(message);
+        return NULL;
+    }
+    return value->as.array_value;
+}
+
+unsigned char *jayess_expect_bytes_copy(jayess_value *value, size_t *length_out, const char *context) {
+    unsigned char *bytes = jayess_value_to_bytes_copy(value, length_out);
+    if (bytes == NULL && (length_out == NULL || *length_out == 0)) {
+        char message[256];
+        snprintf(message, sizeof(message), "%s expects a Uint8Array or byte buffer value", context != NULL && context[0] != '\0' ? context : "native wrapper");
+        jayess_throw_type_error(message);
+    }
+    return bytes;
+}
+
+void *jayess_expect_native_handle(jayess_value *value, const char *kind, const char *context) {
+    void *handle = jayess_value_as_native_handle(value, kind);
+    if (handle == NULL) {
+        char message[256];
+        if (kind != NULL && kind[0] != '\0') {
+            snprintf(message, sizeof(message), "%s expects a %s native handle", context != NULL && context[0] != '\0' ? context : "native wrapper", kind);
+        } else {
+            snprintf(message, sizeof(message), "%s expects a native handle", context != NULL && context[0] != '\0' ? context : "native wrapper");
+        }
+        jayess_throw_type_error(message);
+    }
+    return handle;
 }
 
 static jayess_array *jayess_array_clone(jayess_array *array) {
