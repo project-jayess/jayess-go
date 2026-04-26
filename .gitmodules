@@ -58,13 +58,25 @@
 	path = refs/nghttp2
 	url = git@github.com:nghttp2/nghttp2.git
 	branch = master
+[submodule "refs/openal-soft"]
+	path = refs/openal-soft
+	url = git@github.com:kcat/openal-soft.git
+	branch = master
 [submodule "refs/openssl"]
 	path = refs/openssl
 	url = git@github.com:openssl/openssl.git
 	branch = master
+[submodule "refs/portaudio"]
+	path = refs/portaudio
+	url = git@github.com:PortAudio/portaudio.git
+	branch = master
 [submodule "refs/picohttpparser"]
 	path = refs/picohttpparser
 	url = git@github.com:h2o/picohttpparser.git
+	branch = master
+[submodule "refs/miniaudio"]
+	path = refs/miniaudio
+	url = git@github.com:mackron/miniaudio.git
 	branch = master
 [submodule "refs/raylib"]
 	path = refs/raylib
