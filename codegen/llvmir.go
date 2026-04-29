@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -18,177 +19,73 @@ func NewLLVMIRGenerator() *LLVMIRGenerator {
 }
 
 type variableSlot struct {
-	kind ir.ValueKind
-	ptr  string
+	kind        ir.ValueKind
+	ptr         string
+	ownsCleanup bool
 }
 
+type boxedUse struct {
+	ref     string
+	cleanup bool
+	shallow bool
+}
+
+const indirectApplyMaxArgs = 16
+
 type emittedValue struct {
-	kind ir.ValueKind
-	ref  string
+	kind         ir.ValueKind
+	ref          string
+	staticString bool
 }
 
 type functionState struct {
-	tempCounter     int
-	labelCounter    int
-	slots           map[string]variableSlot
-	stringRefs      map[string]string
-	controlStack    []controlLabels
-	functions       map[string]ir.Function
-	externs         map[string]ir.ExternFunction
-	globals         map[string]ir.ValueKind
-	classNames      map[string]bool
-	functionName    string
-	isMain          bool
-	exceptionTarget string
+	tempCounter           int
+	labelCounter          int
+	slots                 map[string]variableSlot
+	hoistedVarSlots       map[string]variableSlot
+	scopeStack            []cleanupScope
+	stringRefs            map[string]string
+	controlStack          []controlLabels
+	functions             map[string]ir.Function
+	externs               map[string]ir.ExternFunction
+	globals               map[string]ir.ValueKind
+	classNames            map[string]bool
+	functionName          string
+	eligibleLocals        map[string]ir.LocalLifetimeClassification
+	isMain                bool
+	exceptionTarget       string
+	exceptionCleanupDepth int
+}
+
+type cleanupScope struct {
+	cleanups []variableSlot
+	shadowed []shadowedSlot
+}
+
+type shadowedSlot struct {
+	name string
+	slot variableSlot
+	ok   bool
+}
+
+type debugMetadataState struct {
+	enabled          bool
+	fileName         string
+	directory        string
+	compileUnitID    int
+	fileID           int
+	subroutineTypeID int
+	functionIDs      map[string]int
+	locationIDs      map[string]int
 }
 
 type controlLabels struct {
 	label                string
 	breakTarget          string
 	continueTarget       string
+	cleanupScopeDepth    int
 	allowsUnlabeledBreak bool
 	allowsContinue       bool
-}
-
-func validateClassLayout(module *ir.Module) error {
-	functions := map[string]ir.Function{}
-	for _, fn := range module.Functions {
-		functions[fn.Name] = fn
-	}
-	globals := map[string]bool{}
-	for _, global := range module.Globals {
-		globals[global.Name] = true
-	}
-	classes := map[string]ir.ClassDecl{}
-	for _, classDecl := range module.Classes {
-		classes[classDecl.Name] = classDecl
-	}
-	for _, classDecl := range module.Classes {
-		if classDecl.SuperClass != "" {
-			if _, ok := classes[classDecl.SuperClass]; !ok {
-				return fmt.Errorf("codegen class validation failed: class %s extends unknown class %s", classDecl.Name, classDecl.SuperClass)
-			}
-		}
-		if _, ok := functions[classDecl.Name]; !ok {
-			return fmt.Errorf("codegen class validation failed: missing lowered constructor for class %s", classDecl.Name)
-		}
-		for _, field := range classDecl.Fields {
-			if !field.Static {
-				continue
-			}
-			name := classStaticSymbol(classDecl.Name, field.Name, field.Private)
-			if !globals[name] {
-				return fmt.Errorf("codegen class validation failed: missing lowered static field %s for class %s", field.Name, classDecl.Name)
-			}
-		}
-		for _, method := range classDecl.Methods {
-			if method.IsConstructor {
-				continue
-			}
-			name := classMethodSymbol(classDecl.Name, method.Name, method.Private, method.Static, method.IsGetter, method.IsSetter)
-			fn, ok := functions[name]
-			if !ok {
-				return fmt.Errorf("codegen class validation failed: missing lowered method %s for class %s", method.Name, classDecl.Name)
-			}
-			expectedParams := method.ParamCount
-			if !method.Static {
-				expectedParams++
-			}
-			if len(fn.Params) != expectedParams {
-				return fmt.Errorf("codegen class validation failed: lowered method %s for class %s has %d params, expected %d", method.Name, classDecl.Name, len(fn.Params), expectedParams)
-			}
-		}
-	}
-	return nil
-}
-
-func emitClassMetadata(buf *bytes.Buffer, classes []ir.ClassDecl) {
-	if len(classes) == 0 {
-		return
-	}
-	fmt.Fprintf(buf, "; class metadata\n")
-	for _, classDecl := range classes {
-		super := "none"
-		if classDecl.SuperClass != "" {
-			super = classDecl.SuperClass
-		}
-		fmt.Fprintf(buf, "; class %s extends %s\n", classDecl.Name, super)
-		fmt.Fprintf(buf, ";   fields=%d methods=%d\n", len(classDecl.Fields), len(classDecl.Methods))
-		for _, field := range classDecl.Fields {
-			kind := "instance"
-			if field.Static {
-				kind = "static"
-			}
-			if field.Private {
-				kind += " private"
-			}
-			initFlag := "noinit"
-			if field.HasInitializer {
-				initFlag = "init"
-			}
-			fmt.Fprintf(buf, ";   field %s [%s %s]\n", field.Name, kind, initFlag)
-		}
-		for _, method := range classDecl.Methods {
-			kind := "instance"
-			if method.Static {
-				kind = "static"
-			}
-			if method.Private {
-				kind += " private"
-			}
-			if method.IsConstructor {
-				kind = "constructor"
-			}
-			fmt.Fprintf(buf, ";   method %s [%s params=%d]\n", method.Name, kind, method.ParamCount)
-		}
-	}
-	buf.WriteString("\n")
-}
-
-func classMethodSymbol(className, methodName string, private, static, getter, setter bool) string {
-	if getter || setter {
-		kind := "set"
-		if getter {
-			kind = "get"
-		}
-		if static {
-			return fmt.Sprintf("%s__static_accessor__%s__%s", className, kind, methodName)
-		}
-		return fmt.Sprintf("%s__accessor__%s__%s", className, kind, methodName)
-	}
-	if static {
-		return classStaticSymbol(className, methodName, private)
-	}
-	if private {
-		return fmt.Sprintf("%s__private__%s", className, methodName)
-	}
-	return fmt.Sprintf("%s__%s", className, methodName)
-}
-
-func classStaticSymbol(className, name string, private bool) string {
-	if private {
-		return fmt.Sprintf("%s__private__%s", className, name)
-	}
-	return fmt.Sprintf("%s__%s", className, name)
-}
-
-func stackFrameLabel(fn ir.Function) string {
-	if fn.Line > 0 && fn.Column > 0 {
-		return fmt.Sprintf("%s (%d:%d)", fn.Name, fn.Line, fn.Column)
-	}
-	return fn.Name
-}
-
-func emitFunctionSourceComment(buf *bytes.Buffer, fn ir.Function, loweredName string) {
-	if fn.Line > 0 && fn.Column > 0 {
-		fmt.Fprintf(buf, "; source function %s at %d:%d\n", fn.Name, fn.Line, fn.Column)
-		fmt.Fprintf(buf, "; debug frame %s\n", stackFrameLabel(fn))
-	} else {
-		fmt.Fprintf(buf, "; source function %s\n", fn.Name)
-	}
-	if loweredName != fn.Name {
-		fmt.Fprintf(buf, "; lowered symbol @%s\n", loweredName)
-	}
 }
 
 func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]byte, error) {
@@ -201,10 +98,17 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 
 	stringsPool := collectStrings(module)
 	stringRefs := buildStringRefMap(stringsPool)
+	debugState := buildDebugMetadataState(module)
+	sourceFilename := module.SourcePath
+	if sourceFilename == "" {
+		sourceFilename = "jayess"
+	}
+	sourceFilename = filepath.Base(sourceFilename)
 
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "; jayess module\n")
 	fmt.Fprintf(&buf, "target triple = %q\n\n", targetTriple)
+	fmt.Fprintf(&buf, "source_filename = %q\n\n", sourceFilename)
 	emitClassMetadata(&buf, module.Classes)
 
 	for i, value := range stringsPool {
@@ -275,6 +179,8 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_dns_lookup(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_dns_lookup_all(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_dns_reverse(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_dns_set_resolver(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_std_dns_clear_resolver()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_child_process_exec(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_child_process_spawn(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_child_process_kill(ptr)\n")
@@ -362,6 +268,8 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare ptr @jayess_std_fs_watch(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_read_line(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_read_key(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_read_line_value(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_read_key_value(ptr)\n")
 	fmt.Fprintf(&buf, "declare void @jayess_sleep_ms(i32)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_sleep_async(ptr, ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_set_timeout(ptr, ptr)\n")
@@ -473,6 +381,8 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_array_unshift(ptr, ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_array_slice(ptr, i32, i32, i1)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_from_string(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_value_from_static_string(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_value_from_owned_string(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_from_bigint(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_bitwise_not(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_bitwise_and(ptr, ptr)\n")
@@ -497,7 +407,22 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_function_ptr(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_function_env(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_bind(ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function2(ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function3(ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function4(ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function5(ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function6(ptr, ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function7(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function8(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function9(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function10(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function11(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function12(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_call_function13(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_value_call_with_this(ptr, ptr, ptr, i32)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_function_bound_this(ptr)\n")
+	fmt.Fprintf(&buf, "declare i32 @jayess_value_function_bound_arg_count(ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_value_function_bound_arg(ptr, i32)\n")
 	fmt.Fprintf(&buf, "declare double @jayess_value_to_number(ptr)\n")
 	fmt.Fprintf(&buf, "declare i32 @jayess_value_function_param_count(ptr)\n")
 	fmt.Fprintf(&buf, "declare i1 @jayess_value_function_has_rest(ptr)\n")
@@ -508,6 +433,7 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare i1 @jayess_string_eq(ptr, ptr)\n")
 	fmt.Fprintf(&buf, "declare i1 @jayess_args_is_truthy(ptr)\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_value_merge_bound_args(ptr, ptr)\n")
+	fmt.Fprintf(&buf, "declare ptr @jayess_value_constructor_return(ptr, ptr)\n")
 	fmt.Fprintf(&buf, "declare void @jayess_throw(ptr)\n")
 	fmt.Fprintf(&buf, "declare void @jayess_throw_not_function()\n")
 	fmt.Fprintf(&buf, "declare i1 @jayess_has_exception()\n")
@@ -515,6 +441,8 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	fmt.Fprintf(&buf, "declare void @jayess_report_uncaught_exception()\n")
 	fmt.Fprintf(&buf, "declare void @jayess_push_call_frame(ptr)\n")
 	fmt.Fprintf(&buf, "declare void @jayess_pop_call_frame()\n")
+	fmt.Fprintf(&buf, "declare void @jayess_value_free_unshared(ptr)\n")
+	fmt.Fprintf(&buf, "declare void @jayess_value_free_array_shallow(ptr)\n")
 	fmt.Fprintf(&buf, "declare void @jayess_push_this(ptr)\n")
 	fmt.Fprintf(&buf, "declare void @jayess_pop_this()\n")
 	fmt.Fprintf(&buf, "declare ptr @jayess_current_this()\n")
@@ -550,13 +478,22 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	for _, fn := range module.ExternFunctions {
 		externsByName[fn.Name] = fn
 	}
+	eligibleLocalsByFunction := map[string]map[string]ir.LocalLifetimeClassification{}
+	for _, item := range module.LifetimeEligible {
+		locals := eligibleLocalsByFunction[item.Function]
+		if locals == nil {
+			locals = map[string]ir.LocalLifetimeClassification{}
+			eligibleLocalsByFunction[item.Function] = locals
+		}
+		locals[localEligibilityKey(item.Name, item.Line, item.Column)] = item
+	}
 
 	if err := g.emitGlobalInit(&buf, module.Globals, stringRefs, functionsByName, externsByName, globalKinds, classNames); err != nil {
 		return nil, err
 	}
 
 	for _, fn := range module.Functions {
-		if err := g.emitFunction(&buf, fn, stringRefs, functionsByName, externsByName, globalKinds, classNames); err != nil {
+		if err := g.emitFunction(&buf, fn, stringRefs, functionsByName, externsByName, globalKinds, classNames, eligibleLocalsByFunction[fn.Name], debugState); err != nil {
 			return nil, err
 		}
 	}
@@ -564,15 +501,15 @@ func (g *LLVMIRGenerator) Generate(module *ir.Module, targetTriple string) ([]by
 	if err := g.emitEntryWrapper(&buf, findMain(module.Functions)); err != nil {
 		return nil, err
 	}
+	emitDebugMetadata(&buf, module, debugState)
 
-	return buf.Bytes(), nil
+	return []byte(applyFunctionDebugLocations(buf.String(), module, debugState)), nil
 }
 
-func (g *LLVMIRGenerator) emitFunction(buf *bytes.Buffer, fn ir.Function, stringRefs map[string]string, functionsByName map[string]ir.Function, externsByName map[string]ir.ExternFunction, globalKinds map[string]ir.ValueKind, classNames map[string]bool) error {
-	headerName := fn.Name
+func (g *LLVMIRGenerator) emitFunction(buf *bytes.Buffer, fn ir.Function, stringRefs map[string]string, functionsByName map[string]ir.Function, externsByName map[string]ir.ExternFunction, globalKinds map[string]ir.ValueKind, classNames map[string]bool, eligibleLocals map[string]ir.LocalLifetimeClassification, debugState *debugMetadataState) error {
+	headerName := emittedFunctionName(fn.Name)
 	returnType := "ptr"
 	if fn.Name == "main" {
-		headerName = "jayess_user_main"
 		returnType = "double"
 	}
 	emitFunctionSourceComment(buf, fn, headerName)
@@ -583,35 +520,60 @@ func (g *LLVMIRGenerator) emitFunction(buf *bytes.Buffer, fn ir.Function, string
 		}
 		fmt.Fprintf(buf, "ptr %%%s", param.Name)
 	}
-	buf.WriteString(") {\n")
+	buf.WriteString(")")
+	if debugState != nil && debugState.enabled {
+		if id, ok := debugState.functionIDs[fn.Name]; ok {
+			fmt.Fprintf(buf, " !dbg !%d", id)
+		}
+	}
+	buf.WriteString(" {\n")
 	buf.WriteString("entry:\n")
 
 	state := &functionState{
-		slots:        map[string]variableSlot{},
-		stringRefs:   stringRefs,
-		functions:    functionsByName,
-		externs:      externsByName,
-		globals:      globalKinds,
-		classNames:   classNames,
-		functionName: fn.Name,
-		isMain:       fn.Name == "main",
+		slots:           map[string]variableSlot{},
+		hoistedVarSlots: map[string]variableSlot{},
+		stringRefs:      stringRefs,
+		functions:       functionsByName,
+		externs:         externsByName,
+		globals:         globalKinds,
+		classNames:      classNames,
+		functionName:    fn.Name,
+		eligibleLocals:  eligibleLocals,
+		isMain:          fn.Name == "main",
 	}
 	uncaughtLabel := state.nextLabel("throw.uncaught")
 	state.exceptionTarget = uncaughtLabel
-	fmt.Fprintf(buf, "  call void @jayess_push_call_frame(ptr %s)\n", state.stringRefs[stackFrameLabel(fn)])
+	state.exceptionCleanupDepth = 0
+	debugLocationSuffix := ""
+	if debugState != nil && debugState.enabled {
+		if id, ok := debugState.locationIDs[fn.Name]; ok {
+			debugLocationSuffix = fmt.Sprintf(", !dbg !%d", id)
+		}
+	}
+	fmt.Fprintf(buf, "  call void @jayess_push_call_frame(ptr %s)%s\n", state.stringRefs[stackFrameLabel(fn)], debugLocationSuffix)
 
+	state.pushScope()
 	for _, param := range fn.Params {
 		slot := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = alloca ptr\n", slot)
 		fmt.Fprintf(buf, "  store ptr %%%s, ptr %s\n", param.Name, slot)
 		state.slots[param.Name] = variableSlot{kind: param.Kind, ptr: slot}
+		if param.CleanupEligible && param.Kind == ir.ValueDynamic {
+			state.scopeStack[len(state.scopeStack)-1].cleanups = append(state.scopeStack[len(state.scopeStack)-1].cleanups, variableSlot{
+				kind: ir.ValueDynamic,
+				ptr:  slot,
+			})
+		}
 	}
+	g.emitHoistedVarSlots(buf, state, fn)
 
-	terminated, err := g.emitStatements(buf, state, fn.Body)
+	terminated, err := g.emitScopedStatements(buf, state, fn.Body)
 	if err != nil {
 		return err
 	}
 	if !terminated {
+		g.emitCurrentScopeCleanup(buf, state)
+		state.popScope()
 		buf.WriteString("  call void @jayess_pop_call_frame()\n")
 		if state.isMain {
 			buf.WriteString("  ret double 0.000000\n")
@@ -619,6 +581,8 @@ func (g *LLVMIRGenerator) emitFunction(buf *bytes.Buffer, fn ir.Function, string
 			buf.WriteString("  %tmp.default = call ptr @jayess_value_undefined()\n")
 			buf.WriteString("  ret ptr %tmp.default\n")
 		}
+	} else {
+		state.popScope()
 	}
 	fmt.Fprintf(buf, "%s:\n", uncaughtLabel)
 	buf.WriteString("  call void @jayess_pop_call_frame()\n")
@@ -649,13 +613,14 @@ func (g *LLVMIRGenerator) emitEntryWrapper(buf *bytes.Buffer, fn ir.Function) er
 		buf.WriteString("  %result = call double @jayess_user_main()\n")
 	}
 	buf.WriteString("  call void @jayess_run_microtasks()\n")
-	buf.WriteString("  call void @jayess_runtime_shutdown()\n")
 	buf.WriteString("  %thrown = call i1 @jayess_has_exception()\n")
 	buf.WriteString("  br i1 %thrown, label %uncaught, label %exit.ok\n")
 	buf.WriteString("uncaught:\n")
 	buf.WriteString("  call void @jayess_report_uncaught_exception()\n")
+	buf.WriteString("  call void @jayess_runtime_shutdown()\n")
 	buf.WriteString("  ret i32 1\n")
 	buf.WriteString("exit.ok:\n")
+	buf.WriteString("  call void @jayess_runtime_shutdown()\n")
 	buf.WriteString("  %exit = fptosi double %result to i32\n")
 	buf.WriteString("  ret i32 %exit\n")
 	buf.WriteString("}\n")
@@ -704,30 +669,70 @@ func (g *LLVMIRGenerator) emitStatements(buf *bytes.Buffer, state *functionState
 			if err != nil {
 				return false, err
 			}
-			slot := state.nextTemp()
 			storageKind := value.kind
+			var slot string
 			if stmt.Kind == ir.DeclarationVar {
 				storageKind = ir.ValueDynamic
+				if hoisted, ok := state.hoistedVarSlots[stmt.Name]; ok {
+					slot = hoisted.ptr
+					state.slots[stmt.Name] = hoisted
+				} else {
+					slot = state.nextTemp()
+				}
+			} else {
+				slot = state.nextTemp()
 			}
 			typ := llvmStorageType(storageKind)
-			fmt.Fprintf(buf, "  %s = alloca %s\n", slot, typ)
-			storeRef := value.ref
-			if storageKind == ir.ValueDynamic {
-				boxed, err := g.emitBoxedValue(buf, state, value)
-				if err != nil {
-					return false, err
-				}
-				storeRef = boxed
+			if stmt.Kind != ir.DeclarationVar || state.hoistedVarSlots[stmt.Name].ptr == "" {
+				fmt.Fprintf(buf, "  %s = alloca %s\n", slot, typ)
 			}
-			fmt.Fprintf(buf, "  store %s %s, ptr %s\n", typ, storeRef, slot)
-			state.slots[stmt.Name] = variableSlot{kind: storageKind, ptr: slot}
+			slotState := variableSlot{kind: storageKind, ptr: slot}
+			if stmt.Kind == ir.DeclarationVar {
+				if hoisted, ok := state.hoistedVarSlots[stmt.Name]; ok && hoisted.ptr == slot {
+					slotState = hoisted
+				}
+			}
+			if stmt.Kind == ir.DeclarationVar && storageKind == ir.ValueDynamic && state.hoistedVarSlots[stmt.Name].ptr != "" && shouldScheduleDynamicLocalCleanup(stmt.Value, value) {
+				previous := state.nextTemp()
+				fmt.Fprintf(buf, "  %s = load ptr, ptr %s\n", previous, slot)
+				fmt.Fprintf(buf, "  call void @jayess_value_free_unshared(ptr %s)\n", previous)
+			}
+			slotState, err = g.emitStoreIntoVariableSlot(buf, state, slotState, value, stmt.Value)
+			if err != nil {
+				return false, err
+			}
+			if stmt.Kind == ir.DeclarationVar {
+				state.slots[stmt.Name] = slotState
+				if _, ok := state.hoistedVarSlots[stmt.Name]; ok {
+					state.hoistedVarSlots[stmt.Name] = slotState
+				}
+			} else {
+				state.declareSlot(stmt.Name, slotState)
+			}
+			if storageKind == ir.ValueDynamic && state.isEligibleLocal(stmt.Name, stmt.Line, stmt.Column) && slotState.ownsCleanup {
+				if stmt.Kind == ir.DeclarationVar {
+					if state.isFunctionScopedVarCleanupEligible(stmt.Name, stmt.Line, stmt.Column) && state.hoistedVarSlots[stmt.Name].ptr == "" {
+						state.addRootCleanup(variableSlot{kind: storageKind, ptr: slot, ownsCleanup: true})
+					}
+				} else {
+					state.addCleanup(variableSlot{kind: storageKind, ptr: slot, ownsCleanup: true})
+				}
+			}
 		case *ir.AssignmentStatement:
 			if err := g.emitAssignment(buf, state, stmt); err != nil {
 				return false, err
 			}
 		case *ir.ExpressionStatement:
-			if _, err := g.emitExpression(buf, state, stmt.Expression); err != nil {
+			value, err := g.emitExpression(buf, state, stmt.Expression)
+			if err != nil {
 				return false, err
+			}
+			if state.shouldCleanupDiscardedExpression(stmt.Expression, value) {
+				boxed, err := g.emitBoxedValue(buf, state, value)
+				if err != nil {
+					return false, err
+				}
+				g.emitCleanupBoxedUse(buf, boxedUse{ref: boxed, cleanup: true})
 			}
 		case *ir.DeleteStatement:
 			if err := g.emitDelete(buf, state, stmt); err != nil {
@@ -747,6 +752,7 @@ func (g *LLVMIRGenerator) emitStatements(buf *bytes.Buffer, state *functionState
 			if err != nil {
 				return false, err
 			}
+			g.emitCleanupAllScopes(buf, state)
 			buf.WriteString("  call void @jayess_pop_call_frame()\n")
 			if state.isMain {
 				numberRef, err := g.emitNumberOperand(buf, state, value)
@@ -767,7 +773,7 @@ func (g *LLVMIRGenerator) emitStatements(buf *bytes.Buffer, state *functionState
 				return false, err
 			}
 		case *ir.BlockStatement:
-			terminated, err := g.emitStatements(buf, state, stmt.Body)
+			terminated, err := g.emitScopedStatements(buf, state, stmt.Body)
 			if err != nil {
 				return false, err
 			}
@@ -795,17 +801,19 @@ func (g *LLVMIRGenerator) emitStatements(buf *bytes.Buffer, state *functionState
 				return false, err
 			}
 		case *ir.BreakStatement:
-			target, ok := state.resolveBreak(stmt.Label)
+			target, depth, ok := state.resolveBreak(stmt.Label)
 			if !ok {
 				return false, fmt.Errorf("break used outside a valid target")
 			}
+			g.emitCleanupScopesToDepth(buf, state, depth)
 			fmt.Fprintf(buf, "  br label %%%s\n", target)
 			return true, nil
 		case *ir.ContinueStatement:
-			target, ok := state.resolveContinue(stmt.Label)
+			target, depth, ok := state.resolveContinue(stmt.Label)
 			if !ok {
 				return false, fmt.Errorf("continue used outside loop")
 			}
+			g.emitCleanupScopesToDepth(buf, state, depth)
 			fmt.Fprintf(buf, "  br label %%%s\n", target)
 			return true, nil
 		default:
@@ -818,36 +826,46 @@ func (g *LLVMIRGenerator) emitStatements(buf *bytes.Buffer, state *functionState
 	return false, nil
 }
 
-func (state *functionState) resolveBreak(label string) (string, bool) {
+func (g *LLVMIRGenerator) emitScopedStatements(buf *bytes.Buffer, state *functionState, statements []ir.Statement) (bool, error) {
+	state.pushScope()
+	terminated, err := g.emitStatements(buf, state, statements)
+	if err == nil && !terminated {
+		g.emitCurrentScopeCleanup(buf, state)
+	}
+	state.popScope()
+	return terminated, err
+}
+
+func (state *functionState) resolveBreak(label string) (string, int, bool) {
 	for i := len(state.controlStack) - 1; i >= 0; i-- {
 		target := state.controlStack[i]
 		if label == "" {
 			if target.allowsUnlabeledBreak && target.breakTarget != "" {
-				return target.breakTarget, true
+				return target.breakTarget, target.cleanupScopeDepth, true
 			}
 			continue
 		}
 		if target.label == label && target.breakTarget != "" {
-			return target.breakTarget, true
+			return target.breakTarget, target.cleanupScopeDepth, true
 		}
 	}
-	return "", false
+	return "", 0, false
 }
 
-func (state *functionState) resolveContinue(label string) (string, bool) {
+func (state *functionState) resolveContinue(label string) (string, int, bool) {
 	for i := len(state.controlStack) - 1; i >= 0; i-- {
 		target := state.controlStack[i]
 		if label == "" {
 			if target.label == "" && target.allowsContinue && target.continueTarget != "" {
-				return target.continueTarget, true
+				return target.continueTarget, target.cleanupScopeDepth, true
 			}
 			continue
 		}
 		if target.label == label && target.allowsContinue && target.continueTarget != "" {
-			return target.continueTarget, true
+			return target.continueTarget, target.cleanupScopeDepth, true
 		}
 	}
-	return "", false
+	return "", 0, false
 }
 
 func (g *LLVMIRGenerator) emitIf(buf *bytes.Buffer, state *functionState, stmt *ir.IfStatement) error {
@@ -860,7 +878,7 @@ func (g *LLVMIRGenerator) emitIf(buf *bytes.Buffer, state *functionState, stmt *
 	endLabel := state.nextLabel("if.end")
 	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", cond, thenLabel, elseLabel)
 	fmt.Fprintf(buf, "%s:\n", thenLabel)
-	thenTerminated, err := g.emitStatements(buf, state, stmt.Consequence)
+	thenTerminated, err := g.emitScopedStatements(buf, state, stmt.Consequence)
 	if err != nil {
 		return err
 	}
@@ -868,7 +886,7 @@ func (g *LLVMIRGenerator) emitIf(buf *bytes.Buffer, state *functionState, stmt *
 		fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
 	}
 	fmt.Fprintf(buf, "%s:\n", elseLabel)
-	elseTerminated, err := g.emitStatements(buf, state, stmt.Alternative)
+	elseTerminated, err := g.emitScopedStatements(buf, state, stmt.Alternative)
 	if err != nil {
 		return err
 	}
@@ -892,6 +910,7 @@ func (g *LLVMIRGenerator) emitThrow(buf *bytes.Buffer, state *functionState, stm
 	if state.exceptionTarget == "" {
 		return fmt.Errorf("throw used without an exception target")
 	}
+	g.emitCleanupScopesToDepth(buf, state, state.exceptionCleanupDepth)
 	fmt.Fprintf(buf, "  br label %%%s\n", state.exceptionTarget)
 	return nil
 }
@@ -917,12 +936,15 @@ func (g *LLVMIRGenerator) emitTry(buf *bytes.Buffer, state *functionState, stmt 
 	fmt.Fprintf(buf, "  br label %%%s\n", tryLabel)
 	fmt.Fprintf(buf, "%s:\n", tryLabel)
 	outerTarget := state.exceptionTarget
+	outerDepth := state.exceptionCleanupDepth
 	state.exceptionTarget = tryExceptionTarget
-	tryTerminated, err := g.emitStatements(buf, state, stmt.TryBody)
+	state.exceptionCleanupDepth = len(state.scopeStack)
+	tryTerminated, err := g.emitScopedStatements(buf, state, stmt.TryBody)
 	if err != nil {
 		return err
 	}
 	state.exceptionTarget = outerTarget
+	state.exceptionCleanupDepth = outerDepth
 	if !tryTerminated {
 		if finallyLabel != "" {
 			fmt.Fprintf(buf, "  br label %%%s\n", finallyLabel)
@@ -950,7 +972,8 @@ func (g *LLVMIRGenerator) emitTry(buf *bytes.Buffer, state *functionState, stmt 
 			catchTarget = finallyLabel
 		}
 		state.exceptionTarget = catchTarget
-		catchTerminated, err := g.emitStatements(buf, state, stmt.CatchBody)
+		state.exceptionCleanupDepth = len(state.scopeStack)
+		catchTerminated, err := g.emitScopedStatements(buf, state, stmt.CatchBody)
 		if stmt.CatchName != "" {
 			delete(state.slots, stmt.CatchName)
 		}
@@ -958,6 +981,7 @@ func (g *LLVMIRGenerator) emitTry(buf *bytes.Buffer, state *functionState, stmt 
 			return err
 		}
 		state.exceptionTarget = outerTarget
+		state.exceptionCleanupDepth = outerDepth
 		if !catchTerminated {
 			if finallyLabel != "" {
 				fmt.Fprintf(buf, "  br label %%%s\n", finallyLabel)
@@ -970,11 +994,13 @@ func (g *LLVMIRGenerator) emitTry(buf *bytes.Buffer, state *functionState, stmt 
 	if finallyLabel != "" {
 		fmt.Fprintf(buf, "%s:\n", finallyLabel)
 		state.exceptionTarget = outerTarget
-		finallyTerminated, err := g.emitStatements(buf, state, stmt.FinallyBody)
+		state.exceptionCleanupDepth = outerDepth
+		finallyTerminated, err := g.emitScopedStatements(buf, state, stmt.FinallyBody)
 		if err != nil {
 			return err
 		}
 		state.exceptionTarget = outerTarget
+		state.exceptionCleanupDepth = outerDepth
 		if !finallyTerminated {
 			if outerTarget != "" {
 				g.emitExceptionCheck(buf, state, outerTarget)
@@ -992,9 +1018,9 @@ func (g *LLVMIRGenerator) emitWhile(buf *bytes.Buffer, state *functionState, stm
 	bodyLabel := state.nextLabel("while.body")
 	endLabel := state.nextLabel("while.end")
 	if label != "" {
-		state.controlStack = append(state.controlStack, controlLabels{label: label, breakTarget: endLabel, continueTarget: condLabel, allowsContinue: true})
+		state.controlStack = append(state.controlStack, controlLabels{label: label, breakTarget: endLabel, continueTarget: condLabel, cleanupScopeDepth: len(state.scopeStack), allowsContinue: true})
 	}
-	state.controlStack = append(state.controlStack, controlLabels{breakTarget: endLabel, continueTarget: condLabel, allowsUnlabeledBreak: true, allowsContinue: true})
+	state.controlStack = append(state.controlStack, controlLabels{breakTarget: endLabel, continueTarget: condLabel, cleanupScopeDepth: len(state.scopeStack), allowsUnlabeledBreak: true, allowsContinue: true})
 	fmt.Fprintf(buf, "  br label %%%s\n", condLabel)
 	fmt.Fprintf(buf, "%s:\n", condLabel)
 	cond, err := g.emitCondition(buf, state, stmt.Condition)
@@ -1003,7 +1029,7 @@ func (g *LLVMIRGenerator) emitWhile(buf *bytes.Buffer, state *functionState, stm
 	}
 	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", cond, bodyLabel, endLabel)
 	fmt.Fprintf(buf, "%s:\n", bodyLabel)
-	terminated, err := g.emitStatements(buf, state, stmt.Body)
+	terminated, err := g.emitScopedStatements(buf, state, stmt.Body)
 	if err != nil {
 		return err
 	}
@@ -1023,12 +1049,12 @@ func (g *LLVMIRGenerator) emitDoWhile(buf *bytes.Buffer, state *functionState, s
 	condLabel := state.nextLabel("dowhile.cond")
 	endLabel := state.nextLabel("dowhile.end")
 	if label != "" {
-		state.controlStack = append(state.controlStack, controlLabels{label: label, breakTarget: endLabel, continueTarget: condLabel, allowsContinue: true})
+		state.controlStack = append(state.controlStack, controlLabels{label: label, breakTarget: endLabel, continueTarget: condLabel, cleanupScopeDepth: len(state.scopeStack), allowsContinue: true})
 	}
-	state.controlStack = append(state.controlStack, controlLabels{breakTarget: endLabel, continueTarget: condLabel, allowsUnlabeledBreak: true, allowsContinue: true})
+	state.controlStack = append(state.controlStack, controlLabels{breakTarget: endLabel, continueTarget: condLabel, cleanupScopeDepth: len(state.scopeStack), allowsUnlabeledBreak: true, allowsContinue: true})
 	fmt.Fprintf(buf, "  br label %%%s\n", bodyLabel)
 	fmt.Fprintf(buf, "%s:\n", bodyLabel)
-	terminated, err := g.emitStatements(buf, state, stmt.Body)
+	terminated, err := g.emitScopedStatements(buf, state, stmt.Body)
 	if err != nil {
 		return err
 	}
@@ -1070,9 +1096,9 @@ func (g *LLVMIRGenerator) emitFor(buf *bytes.Buffer, state *functionState, stmt 
 	}
 
 	if label != "" {
-		state.controlStack = append(state.controlStack, controlLabels{label: label, breakTarget: endLabel, continueTarget: continueTarget, allowsContinue: true})
+		state.controlStack = append(state.controlStack, controlLabels{label: label, breakTarget: endLabel, continueTarget: continueTarget, cleanupScopeDepth: len(state.scopeStack), allowsContinue: true})
 	}
-	state.controlStack = append(state.controlStack, controlLabels{breakTarget: endLabel, continueTarget: continueTarget, allowsUnlabeledBreak: true, allowsContinue: true})
+	state.controlStack = append(state.controlStack, controlLabels{breakTarget: endLabel, continueTarget: continueTarget, cleanupScopeDepth: len(state.scopeStack), allowsUnlabeledBreak: true, allowsContinue: true})
 	fmt.Fprintf(buf, "  br label %%%s\n", condLabel)
 	fmt.Fprintf(buf, "%s:\n", condLabel)
 	if stmt.Condition != nil {
@@ -1085,7 +1111,7 @@ func (g *LLVMIRGenerator) emitFor(buf *bytes.Buffer, state *functionState, stmt 
 		fmt.Fprintf(buf, "  br label %%%s\n", bodyLabel)
 	}
 	fmt.Fprintf(buf, "%s:\n", bodyLabel)
-	terminated, err := g.emitStatements(buf, state, stmt.Body)
+	terminated, err := g.emitScopedStatements(buf, state, stmt.Body)
 	if err != nil {
 		return err
 	}
@@ -1134,9 +1160,9 @@ func (g *LLVMIRGenerator) emitSwitch(buf *bytes.Buffer, state *functionState, st
 	}
 
 	if label != "" {
-		state.controlStack = append(state.controlStack, controlLabels{label: label, breakTarget: endLabel})
+		state.controlStack = append(state.controlStack, controlLabels{label: label, breakTarget: endLabel, cleanupScopeDepth: len(state.scopeStack)})
 	}
-	state.controlStack = append(state.controlStack, controlLabels{breakTarget: endLabel, allowsUnlabeledBreak: true})
+	state.controlStack = append(state.controlStack, controlLabels{breakTarget: endLabel, cleanupScopeDepth: len(state.scopeStack), allowsUnlabeledBreak: true})
 
 	if len(stmt.Cases) == 0 {
 		fmt.Fprintf(buf, "  br label %%%s\n", defaultLabel)
@@ -1156,7 +1182,7 @@ func (g *LLVMIRGenerator) emitSwitch(buf *bytes.Buffer, state *functionState, st
 		}
 		fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", cond, caseLabels[i], nextLabels[i])
 		fmt.Fprintf(buf, "%s:\n", caseLabels[i])
-		terminated, err := g.emitStatements(buf, state, switchCase.Consequent)
+		terminated, err := g.emitScopedStatements(buf, state, switchCase.Consequent)
 		if err != nil {
 			return err
 		}
@@ -1169,7 +1195,7 @@ func (g *LLVMIRGenerator) emitSwitch(buf *bytes.Buffer, state *functionState, st
 	}
 
 	fmt.Fprintf(buf, "%s:\n", defaultLabel)
-	terminated, err := g.emitStatements(buf, state, stmt.Default)
+	terminated, err := g.emitScopedStatements(buf, state, stmt.Default)
 	if err != nil {
 		return err
 	}
@@ -1177,6 +1203,13 @@ func (g *LLVMIRGenerator) emitSwitch(buf *bytes.Buffer, state *functionState, st
 		fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
 	}
 	fmt.Fprintf(buf, "%s:\n", endLabel)
+	if state.shouldCleanupDiscardedExpression(stmt.Discriminant, discriminant) {
+		boxed, err := g.emitBoxedValue(buf, state, discriminant)
+		if err != nil {
+			return err
+		}
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: boxed, cleanup: true})
+	}
 
 	state.controlStack = state.controlStack[:len(state.controlStack)-1]
 	if label != "" {
@@ -1197,8 +1230,8 @@ func (g *LLVMIRGenerator) emitLabeled(buf *bytes.Buffer, state *functionState, s
 		return g.emitSwitch(buf, state, inner, stmt.Label)
 	default:
 		endLabel := state.nextLabel("label.end")
-		state.controlStack = append(state.controlStack, controlLabels{label: stmt.Label, breakTarget: endLabel})
-		terminated, err := g.emitStatements(buf, state, []ir.Statement{stmt.Statement})
+		state.controlStack = append(state.controlStack, controlLabels{label: stmt.Label, breakTarget: endLabel, cleanupScopeDepth: len(state.scopeStack)})
+		terminated, err := g.emitScopedStatements(buf, state, []ir.Statement{stmt.Statement})
 		if err != nil {
 			return err
 		}
@@ -1221,15 +1254,14 @@ func (g *LLVMIRGenerator) emitAssignment(buf *bytes.Buffer, state *functionState
 	case *ir.VariableRef:
 		slot, ok := state.slots[target.Name]
 		if ok {
-			storeRef := value.ref
-			if slot.kind == ir.ValueDynamic {
-				boxed, err := g.emitBoxedValue(buf, state, value)
-				if err != nil {
-					return err
-				}
-				storeRef = boxed
+			slot, err = g.emitStoreIntoVariableSlot(buf, state, slot, value, stmt.Value)
+			if err != nil {
+				return err
 			}
-			fmt.Fprintf(buf, "  store %s %s, ptr %s\n", llvmStorageType(slot.kind), storeRef, slot.ptr)
+			state.slots[target.Name] = slot
+			if _, hoisted := state.hoistedVarSlots[target.Name]; hoisted {
+				state.hoistedVarSlots[target.Name] = slot
+			}
 			return nil
 		}
 		if _, ok := state.globals[target.Name]; ok {
@@ -1360,7 +1392,7 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", tmp)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case *ir.StringLiteral:
-		return emittedValue{kind: ir.ValueString, ref: state.stringRefs[expr.Value]}, nil
+		return emittedValue{kind: ir.ValueString, ref: state.stringRefs[expr.Value], staticString: true}, nil
 	case *ir.ObjectLiteral:
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_object_new()\n", tmp)
@@ -1421,7 +1453,7 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", partsArray)
 		for i, part := range expr.Parts {
 			boxedPart := state.nextTemp()
-			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_string(ptr %s)\n", boxedPart, state.stringRefs[part])
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_static_string(ptr %s)\n", boxedPart, state.stringRefs[part])
 			fmt.Fprintf(buf, "  call void @jayess_array_set_value(ptr %s, i32 %d, ptr %s)\n", partsArray, i, boxedPart)
 		}
 		valuesArray := state.nextTemp()
@@ -1441,9 +1473,13 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_array(ptr %s)\n", partsBoxed, partsArray)
 		valuesBoxed := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_array(ptr %s)\n", valuesBoxed, valuesArray)
+		raw := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_template_string(ptr %s, ptr %s)\n", raw, partsBoxed, valuesBoxed)
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: partsBoxed, cleanup: true})
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: valuesBoxed, cleanup: true})
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_template_string(ptr %s, ptr %s)\n", tmp, partsBoxed, valuesBoxed)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_owned_string(ptr %s)\n", tmp, raw)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case *ir.SpreadExpression:
 		return emittedValue{}, fmt.Errorf("spread expressions are only valid inside arrays and call arguments")
 	case *ir.FunctionValue:
@@ -1468,7 +1504,7 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 			paramCount--
 		}
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_function(ptr @%s, ptr %s, ptr %s, ptr %s, i32 %d, i1 %s)\n", tmp, expr.Name, envRef, state.stringRefs[expr.Name], classRef, paramCount, hasRest)
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_function(ptr @%s, ptr %s, ptr %s, ptr %s, i32 %d, i1 %s)\n", tmp, emittedFunctionName(expr.Name), envRef, state.stringRefs[expr.Name], classRef, paramCount, hasRest)
 		return emittedValue{kind: ir.ValueFunction, ref: tmp}, nil
 	case *ir.VariableRef:
 		slot, ok := state.slots[expr.Name]
@@ -1501,9 +1537,13 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 			if err != nil {
 				return emittedValue{}, err
 			}
+			raw := state.nextTemp()
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_concat_values(ptr %s, ptr %s)\n", raw, leftBoxed, rightBoxed)
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: leftBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Left, left)})
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: rightBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Right, right)})
 			tmp := state.nextTemp()
-			fmt.Fprintf(buf, "  %s = call ptr @jayess_concat_values(ptr %s, ptr %s)\n", tmp, leftBoxed, rightBoxed)
-			return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_owned_string(ptr %s)\n", tmp, raw)
+			return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 		}
 		if expr.Operator == ir.OperatorAdd && (left.kind == ir.ValueDynamic || right.kind == ir.ValueDynamic) {
 			leftBoxed, err := g.emitBoxedValue(buf, state, left)
@@ -1516,6 +1556,8 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 			}
 			tmp := state.nextTemp()
 			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_add(ptr %s, ptr %s)\n", tmp, leftBoxed, rightBoxed)
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: leftBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Left, left)})
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: rightBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Right, right)})
 			return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 		}
 		switch expr.Operator {
@@ -1543,10 +1585,13 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 			default:
 				fmt.Fprintf(buf, "  %s = call ptr @jayess_value_bitwise_ushr(ptr %s, ptr %s)\n", tmp, leftBoxed, rightBoxed)
 			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: leftBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Left, left)})
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: rightBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Right, right)})
 			switch expr.Kind {
 			case ir.ValueNumber:
 				numberResult := state.nextTemp()
 				fmt.Fprintf(buf, "  %s = call double @jayess_value_to_number(ptr %s)\n", numberResult, tmp)
+				g.emitCleanupBoxedUse(buf, boxedUse{ref: tmp, cleanup: true})
 				return emittedValue{kind: ir.ValueNumber, ref: numberResult}, nil
 			case ir.ValueBigInt, ir.ValueDynamic:
 				return emittedValue{kind: expr.Kind, ref: tmp}, nil
@@ -1581,18 +1626,21 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 		}
 		resultPtr := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = alloca ptr\n", resultPtr)
+		useLeftLabel := state.nextLabel("nullish.left")
 		useRightLabel := state.nextLabel("nullish.right")
 		endLabel := state.nextLabel("nullish.end")
 		leftNullish, err := g.emitNullishCheck(buf, state, left)
 		if err != nil {
 			return emittedValue{}, err
 		}
-		fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", leftNullish, useRightLabel, endLabel)
+		fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", leftNullish, useRightLabel, useLeftLabel)
+		fmt.Fprintf(buf, "%s:\n", useLeftLabel)
 		boxedLeft, err := g.emitBoxedValue(buf, state, left)
 		if err != nil {
 			return emittedValue{}, err
 		}
 		fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", boxedLeft, resultPtr)
+		fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
 		fmt.Fprintf(buf, "%s:\n", useRightLabel)
 		right, err := g.emitExpression(buf, state, expr.Right)
 		if err != nil {
@@ -1609,8 +1657,16 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 		fmt.Fprintf(buf, "  %s = load ptr, ptr %s\n", result, resultPtr)
 		return emittedValue{kind: ir.ValueDynamic, ref: result}, nil
 	case *ir.CommaExpression:
-		if _, err := g.emitExpression(buf, state, expr.Left); err != nil {
+		left, err := g.emitExpression(buf, state, expr.Left)
+		if err != nil {
 			return emittedValue{}, err
+		}
+		if state.shouldCleanupDiscardedExpression(expr.Left, left) {
+			boxedLeft, err := g.emitBoxedValue(buf, state, left)
+			if err != nil {
+				return emittedValue{}, err
+			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedLeft, cleanup: true})
 		}
 		right, err := g.emitExpression(buf, state, expr.Right)
 		if err != nil {
@@ -1670,10 +1726,12 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 			}
 			tmp := state.nextTemp()
 			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_bitwise_not(ptr %s)\n", tmp, boxedRight)
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedRight, cleanup: shouldCleanupBoxedValueAfterUse(expr.Right, right)})
 			switch expr.Kind {
 			case ir.ValueNumber:
 				numberResult := state.nextTemp()
 				fmt.Fprintf(buf, "  %s = call double @jayess_value_to_number(ptr %s)\n", numberResult, tmp)
+				g.emitCleanupBoxedUse(buf, boxedUse{ref: tmp, cleanup: true})
 				return emittedValue{kind: ir.ValueNumber, ref: numberResult}, nil
 			case ir.ValueBigInt, ir.ValueDynamic:
 				return emittedValue{kind: expr.Kind, ref: tmp}, nil
@@ -1685,6 +1743,13 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 		if err != nil {
 			return emittedValue{}, err
 		}
+		if state.shouldCleanupDiscardedExpression(expr.Right, right) {
+			boxedRight, err := g.emitBoxedValue(buf, state, right)
+			if err != nil {
+				return emittedValue{}, err
+			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedRight, cleanup: true})
+		}
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = xor i1 %s, true\n", tmp, cond)
 		return emittedValue{kind: ir.ValueBoolean, ref: tmp}, nil
@@ -1692,7 +1757,7 @@ func (g *LLVMIRGenerator) emitExpression(buf *bytes.Buffer, state *functionState
 		if state.classNames[state.functionName] {
 			paramCount, hasRest := functionMetadata(state.functionName, state.functions, state.externs)
 			tmp := state.nextTemp()
-			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_function(ptr @%s, ptr null, ptr %s, ptr %s, i32 %d, i1 %s)\n", tmp, state.functionName, state.stringRefs[state.functionName], state.stringRefs[state.functionName], paramCount, hasRest)
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_function(ptr @%s, ptr null, ptr %s, ptr %s, i32 %d, i1 %s)\n", tmp, emittedFunctionName(state.functionName), state.stringRefs[state.functionName], state.stringRefs[state.functionName], paramCount, hasRest)
 			return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 		}
 		tmp := state.nextTemp()
@@ -1817,6 +1882,13 @@ func (g *LLVMIRGenerator) emitLogical(buf *bytes.Buffer, state *functionState, e
 	if expr.Operator == ir.OperatorAnd {
 		fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", leftCond, rightLabel, shortLabel)
 		fmt.Fprintf(buf, "%s:\n", rightLabel)
+		if state.shouldCleanupDiscardedExpression(expr.Left, left) {
+			boxedLeft, err := g.emitBoxedValue(buf, state, left)
+			if err != nil {
+				return emittedValue{}, err
+			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedLeft, cleanup: true})
+		}
 		right, err := g.emitExpression(buf, state, expr.Right)
 		if err != nil {
 			return emittedValue{}, err
@@ -1825,17 +1897,45 @@ func (g *LLVMIRGenerator) emitLogical(buf *bytes.Buffer, state *functionState, e
 		if err != nil {
 			return emittedValue{}, err
 		}
+		if state.shouldCleanupDiscardedExpression(expr.Right, right) {
+			boxedRight, err := g.emitBoxedValue(buf, state, right)
+			if err != nil {
+				return emittedValue{}, err
+			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedRight, cleanup: true})
+		}
 		fmt.Fprintf(buf, "  store i1 %s, ptr %s\n", rightCond, resultPtr)
 		fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
 		fmt.Fprintf(buf, "%s:\n", shortLabel)
+		if state.shouldCleanupDiscardedExpression(expr.Left, left) {
+			boxedLeft, err := g.emitBoxedValue(buf, state, left)
+			if err != nil {
+				return emittedValue{}, err
+			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedLeft, cleanup: true})
+		}
 		fmt.Fprintf(buf, "  store i1 false, ptr %s\n", resultPtr)
 		fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
 	} else {
 		fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", leftCond, shortLabel, rightLabel)
 		fmt.Fprintf(buf, "%s:\n", shortLabel)
+		if state.shouldCleanupDiscardedExpression(expr.Left, left) {
+			boxedLeft, err := g.emitBoxedValue(buf, state, left)
+			if err != nil {
+				return emittedValue{}, err
+			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedLeft, cleanup: true})
+		}
 		fmt.Fprintf(buf, "  store i1 true, ptr %s\n", resultPtr)
 		fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
 		fmt.Fprintf(buf, "%s:\n", rightLabel)
+		if state.shouldCleanupDiscardedExpression(expr.Left, left) {
+			boxedLeft, err := g.emitBoxedValue(buf, state, left)
+			if err != nil {
+				return emittedValue{}, err
+			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedLeft, cleanup: true})
+		}
 		right, err := g.emitExpression(buf, state, expr.Right)
 		if err != nil {
 			return emittedValue{}, err
@@ -1843,6 +1943,13 @@ func (g *LLVMIRGenerator) emitLogical(buf *bytes.Buffer, state *functionState, e
 		rightCond, err := g.emitTruthyFromValue(buf, state, right)
 		if err != nil {
 			return emittedValue{}, err
+		}
+		if state.shouldCleanupDiscardedExpression(expr.Right, right) {
+			boxedRight, err := g.emitBoxedValue(buf, state, right)
+			if err != nil {
+				return emittedValue{}, err
+			}
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedRight, cleanup: true})
 		}
 		fmt.Fprintf(buf, "  store i1 %s, ptr %s\n", rightCond, resultPtr)
 		fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
@@ -1877,6 +1984,7 @@ func (g *LLVMIRGenerator) emitTypeof(buf *bytes.Buffer, state *functionState, ex
 	case ir.ValueDynamic:
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_typeof(ptr %s)\n", tmp, value.ref)
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: value.ref, cleanup: shouldCleanupBoxedValueAfterUse(expr.Value, value)})
 		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
 	default:
 		return emittedValue{kind: ir.ValueString, ref: state.stringRefs["undefined"]}, nil
@@ -1907,9 +2015,11 @@ func (g *LLVMIRGenerator) emitInstanceof(buf *bytes.Buffer, state *functionState
 		}
 		classNameRef = state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_class_name(ptr %s)\n", classNameRef, rightBoxed)
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: rightBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Right, right)})
 	}
 	tmp := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call i1 @jayess_value_instanceof(ptr %s, ptr %s)\n", tmp, leftBoxed, classNameRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: leftBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Left, left)})
 	return emittedValue{kind: ir.ValueBoolean, ref: tmp}, nil
 }
 
@@ -1944,7 +2054,7 @@ func (g *LLVMIRGenerator) emitLiteralTypeCheck(buf *bytes.Buffer, state *functio
 				return "", err
 			}
 			literalBoxed = state.nextTemp()
-			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_string(ptr %s)\n", literalBoxed, state.stringRefs[text])
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_static_string(ptr %s)\n", literalBoxed, state.stringRefs[text])
 		} else {
 			number, err := strconv.ParseFloat(literal, 64)
 			if err != nil {
@@ -1956,6 +2066,7 @@ func (g *LLVMIRGenerator) emitLiteralTypeCheck(buf *bytes.Buffer, state *functio
 	}
 	result := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call i1 @jayess_value_eq(ptr %s, ptr %s)\n", result, boxedRef, literalBoxed)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: literalBoxed, cleanup: true})
 	return result, nil
 }
 
@@ -2148,6 +2259,8 @@ func (g *LLVMIRGenerator) emitComparison(buf *bytes.Buffer, state *functionState
 			}
 			tmp := state.nextTemp()
 			fmt.Fprintf(buf, "  %s = call i1 @jayess_value_eq(ptr %s, ptr %s)\n", tmp, leftBoxed, rightBoxed)
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: leftBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Left, left)})
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: rightBoxed, cleanup: shouldCleanupBoxedValueAfterUse(expr.Right, right)})
 			if expr.Operator == ir.OperatorNe || expr.Operator == ir.OperatorStrictNe {
 				neg := state.nextTemp()
 				fmt.Fprintf(buf, "  %s = xor i1 %s, true\n", neg, tmp)
@@ -2202,6 +2315,7 @@ func (g *LLVMIRGenerator) emitEqualityComparisonValue(buf *bytes.Buffer, state *
 		}
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call i1 @jayess_value_eq(ptr %s, ptr %s)\n", tmp, leftBoxed, rightBoxed)
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: rightBoxed, cleanup: shouldCleanupBoxedValueAfterUse(rightExpr, right)})
 		return emittedValue{kind: ir.ValueBoolean, ref: tmp}, nil
 	}
 	if left.kind == ir.ValueString && right.kind == ir.ValueString {
@@ -2248,6 +2362,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		if err != nil {
 			return emittedValue{}, err
 		}
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: boxed, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[0], value)})
 		return emittedValue{kind: ir.ValueBoolean, ref: matchRef}, nil
 	case "print":
 		if len(call.Arguments) == 1 {
@@ -2318,6 +2433,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		}
 		runtimeName := strings.TrimPrefix(call.Callee, "__jayess_")
 		fmt.Fprintf(buf, "  call void @jayess_%s(ptr %s)\n", runtimeName, argsBoxed)
+		fmt.Fprintf(buf, "  call void @jayess_value_free_unshared(ptr %s)\n", argsBoxed)
 		return emittedValue{}, nil
 	case "__jayess_process_cwd":
 		tmp := state.nextTemp()
@@ -2551,7 +2667,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_https_backend()\n", tmp)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
-	case "__jayess_compression_create_gzip_stream", "__jayess_compression_create_gunzip_stream", "__jayess_compression_create_deflate_stream", "__jayess_compression_create_inflate_stream", "__jayess_compression_create_brotli_stream", "__jayess_compression_create_unbrotli_stream":
+	case "__jayess_compression_create_gzip_stream", "__jayess_compression_create_gunzip_stream", "__jayess_compression_create_deflate_stream", "__jayess_compression_create_inflate_stream", "__jayess_compression_create_brotli_stream", "__jayess_compression_create_unbrotli_stream", "__jayess_dns_clear_resolver":
 		tmp := state.nextTemp()
 		runtimeName := strings.TrimPrefix(call.Callee, "__jayess_")
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_%s()\n", tmp, runtimeName)
@@ -2569,7 +2685,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		runtimeName := strings.TrimPrefix(call.Callee, "__jayess_")
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_%s(ptr %s)\n", tmp, runtimeName, boxedPath)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
-	case "__jayess_url_parse", "__jayess_url_format", "__jayess_querystring_parse", "__jayess_querystring_stringify", "__jayess_dns_lookup", "__jayess_dns_lookup_all", "__jayess_dns_reverse", "__jayess_child_process_exec", "__jayess_child_process_spawn", "__jayess_child_process_kill", "__jayess_worker_create", "__jayess_shared_array_buffer_new", "__jayess_crypto_random_bytes", "__jayess_crypto_encrypt", "__jayess_crypto_decrypt", "__jayess_crypto_generate_key_pair", "__jayess_crypto_public_encrypt", "__jayess_crypto_private_decrypt", "__jayess_crypto_sign", "__jayess_crypto_verify", "__jayess_compression_gzip", "__jayess_compression_gunzip", "__jayess_compression_deflate", "__jayess_compression_inflate", "__jayess_compression_brotli", "__jayess_compression_unbrotli", "__jayess_net_is_ip", "__jayess_net_create_datagram_socket", "__jayess_net_connect", "__jayess_net_listen", "__jayess_http_parse_request", "__jayess_http_format_request", "__jayess_http_parse_response", "__jayess_http_format_response", "__jayess_http_request", "__jayess_http_create_server", "__jayess_http_request_stream", "__jayess_http_request_stream_async", "__jayess_http_get", "__jayess_http_get_stream", "__jayess_http_get_stream_async", "__jayess_http_request_async", "__jayess_http_get_async", "__jayess_https_request", "__jayess_https_request_stream", "__jayess_https_request_stream_async", "__jayess_https_get", "__jayess_https_get_stream", "__jayess_https_get_stream_async", "__jayess_https_request_async", "__jayess_https_get_async":
+	case "__jayess_url_parse", "__jayess_url_format", "__jayess_querystring_parse", "__jayess_querystring_stringify", "__jayess_dns_lookup", "__jayess_dns_lookup_all", "__jayess_dns_reverse", "__jayess_dns_set_resolver", "__jayess_child_process_exec", "__jayess_child_process_spawn", "__jayess_child_process_kill", "__jayess_worker_create", "__jayess_shared_array_buffer_new", "__jayess_crypto_random_bytes", "__jayess_crypto_encrypt", "__jayess_crypto_decrypt", "__jayess_crypto_generate_key_pair", "__jayess_crypto_public_encrypt", "__jayess_crypto_private_decrypt", "__jayess_crypto_sign", "__jayess_crypto_verify", "__jayess_compression_gzip", "__jayess_compression_gunzip", "__jayess_compression_deflate", "__jayess_compression_inflate", "__jayess_compression_brotli", "__jayess_compression_unbrotli", "__jayess_net_is_ip", "__jayess_net_create_datagram_socket", "__jayess_net_connect", "__jayess_net_listen", "__jayess_http_parse_request", "__jayess_http_format_request", "__jayess_http_parse_response", "__jayess_http_format_response", "__jayess_http_request", "__jayess_http_create_server", "__jayess_http_request_stream", "__jayess_http_request_stream_async", "__jayess_http_get", "__jayess_http_get_stream", "__jayess_http_get_stream_async", "__jayess_http_request_async", "__jayess_http_get_async", "__jayess_https_request", "__jayess_https_request_stream", "__jayess_https_request_stream_async", "__jayess_https_get", "__jayess_https_get_stream", "__jayess_https_get_stream_async", "__jayess_https_request_async", "__jayess_https_get_async":
 		argValue, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
 			return emittedValue{}, err
@@ -2783,8 +2899,9 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			return emittedValue{}, err
 		}
 		encodingRef := "null"
+		encodingValue := emittedValue{kind: ir.ValueUndefined}
 		if len(call.Arguments) > 1 {
-			encodingValue, err := g.emitExpression(buf, state, call.Arguments[1])
+			encodingValue, err = g.emitExpression(buf, state, call.Arguments[1])
 			if err != nil {
 				return emittedValue{}, err
 			}
@@ -2804,6 +2921,12 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			runtimeName = "jayess_std_fs_read_file_async"
 		}
 		fmt.Fprintf(buf, "  %s = call ptr @%s(ptr %s, ptr %s)\n", tmp, runtimeName, boxedPath, encodingRef)
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedPath, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[0], pathValue)})
+		if len(call.Arguments) > 1 {
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: encodingRef, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[1], encodingValue)})
+		} else {
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: encodingRef, cleanup: true})
+		}
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_fs_write_file", "__jayess_fs_append_file", "__jayess_fs_write_file_async":
 		pathValue, err := g.emitExpression(buf, state, call.Arguments[0])
@@ -2985,17 +3108,29 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		if err != nil {
 			return emittedValue{}, err
 		}
+		boxedPrompt, err := g.emitBoxedValue(buf, state, prompt)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		raw := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_read_line_value(ptr %s)\n", raw, boxedPrompt)
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_read_line(ptr %s)\n", tmp, prompt.ref)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_owned_string(ptr %s)\n", tmp, raw)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "readKey":
 		prompt, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
 			return emittedValue{}, err
 		}
+		boxedPrompt, err := g.emitBoxedValue(buf, state, prompt)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		raw := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_read_key_value(ptr %s)\n", raw, boxedPrompt)
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_read_key(ptr %s)\n", tmp, prompt.ref)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_owned_string(ptr %s)\n", tmp, raw)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "sleep":
 		arg, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -3542,6 +3677,26 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_json_parse(ptr %s)\n", tmp, boxed)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
+	case "__jayess_constructor_return":
+		selfValue, err := g.emitExpression(buf, state, call.Arguments[0])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		returnValue, err := g.emitExpression(buf, state, call.Arguments[1])
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedSelf, err := g.emitBoxedValue(buf, state, selfValue)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		boxedReturn, err := g.emitBoxedValue(buf, state, returnValue)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		tmp := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_constructor_return(ptr %s, ptr %s)\n", tmp, boxedSelf, boxedReturn)
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_iter_values":
 		value, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -3613,7 +3768,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		}
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_std_string_from_char_code(ptr %s)\n", tmp, argsBoxed)
-		return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	case "__jayess_array_is_array":
 		value, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -3716,6 +3871,10 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		if err := g.emitForEachCall(buf, state, itemsRef, callbackBoxed); err != nil {
 			return emittedValue{}, err
 		}
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: callbackBoxed, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[1], callback)})
+		if target.kind == ir.ValueArgsArray {
+			fmt.Fprintf(buf, "  call void @jayess_value_free_array_shallow(ptr %s)\n", itemsRef)
+		}
 		return emittedValue{kind: ir.ValueUndefined, ref: ""}, nil
 	case "__jayess_array_map":
 		target, err := g.emitExpression(buf, state, call.Arguments[0])
@@ -3734,7 +3893,15 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		if err != nil {
 			return emittedValue{}, err
 		}
-		return g.emitArrayMapCall(buf, state, itemsRef, callbackBoxed)
+		result, err := g.emitArrayMapCall(buf, state, itemsRef, callbackBoxed)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: callbackBoxed, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[1], callback)})
+		if target.kind == ir.ValueArgsArray {
+			fmt.Fprintf(buf, "  call void @jayess_value_free_array_shallow(ptr %s)\n", itemsRef)
+		}
+		return result, nil
 	case "__jayess_array_filter":
 		target, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -3752,7 +3919,15 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		if err != nil {
 			return emittedValue{}, err
 		}
-		return g.emitArrayFilterCall(buf, state, itemsRef, callbackBoxed)
+		result, err := g.emitArrayFilterCall(buf, state, itemsRef, callbackBoxed)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: callbackBoxed, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[1], callback)})
+		if target.kind == ir.ValueArgsArray {
+			fmt.Fprintf(buf, "  call void @jayess_value_free_array_shallow(ptr %s)\n", itemsRef)
+		}
+		return result, nil
 	case "__jayess_array_find":
 		target, err := g.emitExpression(buf, state, call.Arguments[0])
 		if err != nil {
@@ -3770,7 +3945,15 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 		if err != nil {
 			return emittedValue{}, err
 		}
-		return g.emitArrayFindCall(buf, state, itemsRef, callbackBoxed)
+		result, err := g.emitArrayFindCall(buf, state, itemsRef, callbackBoxed)
+		if err != nil {
+			return emittedValue{}, err
+		}
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: callbackBoxed, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[1], callback)})
+		if target.kind == ir.ValueArgsArray {
+			fmt.Fprintf(buf, "  call void @jayess_value_free_array_shallow(ptr %s)\n", itemsRef)
+		}
+		return result, nil
 	case "__jayess_current_this":
 		tmp := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_current_this()\n", tmp)
@@ -3778,6 +3961,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 	default:
 		if ext, ok := state.externs[call.Callee]; ok {
 			var args []string
+			var cleanupUses []boxedUse
 			for _, argExpr := range call.Arguments {
 				argValue, err := g.emitExpression(buf, state, argExpr)
 				if err != nil {
@@ -3788,12 +3972,19 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 					return emittedValue{}, err
 				}
 				args = append(args, "ptr "+boxed)
+				cleanupUses = append(cleanupUses, boxedUse{
+					ref:     boxed,
+					cleanup: ext.BorrowsArgs && shouldCleanupBoxedValueAfterUse(argExpr, argValue),
+				})
 			}
 			tmp := state.nextTemp()
 			if len(args) == 0 {
 				fmt.Fprintf(buf, "  %s = call ptr @%s()\n", tmp, ext.SymbolName)
 			} else {
 				fmt.Fprintf(buf, "  %s = call ptr @%s(%s)\n", tmp, ext.SymbolName, strings.Join(args, ", "))
+			}
+			for _, use := range cleanupUses {
+				g.emitCleanupBoxedUse(buf, use)
 			}
 			return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 		}
@@ -3815,6 +4006,7 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 			return g.emitApplyFromValues(buf, state, calleeValue.ref, undefThis, emittedValue{kind: ir.ValueDynamic, ref: argsBoxed})
 		}
 		var args []string
+		var cleanupUses []boxedUse
 		for _, argExpr := range call.Arguments {
 			argValue, err := g.emitExpression(buf, state, argExpr)
 			if err != nil {
@@ -3825,14 +4017,52 @@ func (g *LLVMIRGenerator) emitCall(buf *bytes.Buffer, state *functionState, call
 				return emittedValue{}, err
 			}
 			args = append(args, fmt.Sprintf("ptr %s", boxed))
+			cleanupUses = append(cleanupUses, boxedUse{ref: boxed, cleanup: shouldCleanupTransientParserArgAfterUse(call.Callee, argExpr, argValue)})
 		}
 		undefThis := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", undefThis)
-		return g.emitDirectJayessCallWithThis(buf, state, call.Callee, fn, undefThis, args)
+		return g.emitDirectJayessCallWithThis(buf, state, call.Callee, fn, undefThis, args, cleanupUses)
 	}
 }
 
 func (g *LLVMIRGenerator) emitInvoke(buf *bytes.Buffer, state *functionState, call *ir.InvokeExpression) (emittedValue, error) {
+	if member, ok := call.Callee.(*ir.MemberExpression); ok && !member.Optional && isDirectFunctionReceiver(member.Target) {
+		switch member.Property {
+		case "bind":
+			thisArg := ir.Expression(&ir.UndefinedLiteral{})
+			if len(call.Arguments) > 0 {
+				thisArg = call.Arguments[0]
+			}
+			boundArgs := &ir.ArrayLiteral{Elements: append([]ir.Expression(nil), call.Arguments[1:]...)}
+			return g.emitBind(buf, state, &ir.CallExpression{
+				Callee:    "__jayess_bind",
+				Arguments: []ir.Expression{member.Target, thisArg, boundArgs},
+			})
+		case "apply":
+			thisArg := ir.Expression(&ir.UndefinedLiteral{})
+			if len(call.Arguments) > 0 {
+				thisArg = call.Arguments[0]
+			}
+			argsArray := ir.Expression(&ir.ArrayLiteral{})
+			if len(call.Arguments) > 1 {
+				argsArray = call.Arguments[1]
+			}
+			return g.emitApply(buf, state, &ir.CallExpression{
+				Callee:    "__jayess_apply",
+				Arguments: []ir.Expression{member.Target, thisArg, argsArray},
+			})
+		case "call":
+			thisArg := ir.Expression(&ir.UndefinedLiteral{})
+			if len(call.Arguments) > 0 {
+				thisArg = call.Arguments[0]
+			}
+			argsArray := &ir.ArrayLiteral{Elements: append([]ir.Expression(nil), call.Arguments[1:]...)}
+			return g.emitApply(buf, state, &ir.CallExpression{
+				Callee:    "__jayess_apply",
+				Arguments: []ir.Expression{member.Target, thisArg, argsArray},
+			})
+		}
+	}
 	callee, err := g.emitExpression(buf, state, call.Callee)
 	if err != nil {
 		return emittedValue{}, err
@@ -3870,6 +4100,8 @@ func (g *LLVMIRGenerator) emitInvoke(buf *bytes.Buffer, state *functionState, ca
 		if err != nil {
 			return emittedValue{}, err
 		}
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: directArgsBoxed, cleanup: true, shallow: true})
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: mergedArgs, cleanup: true, shallow: true})
 		fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", result.ref, resultPtr)
 		fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
 		fmt.Fprintf(buf, "%s:\n", endLabel)
@@ -3890,7 +4122,13 @@ func (g *LLVMIRGenerator) emitInvoke(buf *bytes.Buffer, state *functionState, ca
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_merge_bound_args(ptr %s, ptr %s)\n", mergedArgs, boxed, directArgsBoxed)
 	boundThis := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_this(ptr %s)\n", boundThis, boxed)
-	return g.emitApplyFromValues(buf, state, boxed, boundThis, emittedValue{kind: ir.ValueDynamic, ref: mergedArgs})
+	result, err := g.emitApplyFromValues(buf, state, boxed, boundThis, emittedValue{kind: ir.ValueDynamic, ref: mergedArgs})
+	if err != nil {
+		return emittedValue{}, err
+	}
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: directArgsBoxed, cleanup: true, shallow: true})
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: mergedArgs, cleanup: true, shallow: true})
+	return result, nil
 }
 
 func (g *LLVMIRGenerator) emitApply(buf *bytes.Buffer, state *functionState, call *ir.CallExpression) (emittedValue, error) {
@@ -3921,7 +4159,15 @@ func (g *LLVMIRGenerator) emitApply(buf *bytes.Buffer, state *functionState, cal
 	}
 	mergedArgs := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_merge_bound_args(ptr %s, ptr %s)\n", mergedArgs, boxedCallee, boxedArgs)
-	return g.emitApplyFromValues(buf, state, boxedCallee, boxedThis, emittedValue{kind: ir.ValueDynamic, ref: mergedArgs})
+	result, err := g.emitApplyFromValues(buf, state, boxedCallee, boxedThis, emittedValue{kind: ir.ValueDynamic, ref: mergedArgs})
+	if err != nil {
+		return emittedValue{}, err
+	}
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedCallee, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[0], callee)})
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedThis, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[1], thisValue)})
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedArgs, cleanup: argsValue.kind != ir.ValueDynamic || shouldCleanupBoxedValueAfterUse(call.Arguments[2], argsValue), shallow: true})
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: mergedArgs, cleanup: true, shallow: true})
+	return result, nil
 }
 
 func (g *LLVMIRGenerator) emitBind(buf *bytes.Buffer, state *functionState, call *ir.CallExpression) (emittedValue, error) {
@@ -3951,6 +4197,8 @@ func (g *LLVMIRGenerator) emitBind(buf *bytes.Buffer, state *functionState, call
 	}
 	tmp := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_bind(ptr %s, ptr %s, ptr %s)\n", tmp, boxedCallee, boxedThis, boxedArgs)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedCallee, cleanup: shouldCleanupBoxedValueAfterUse(call.Arguments[0], callee)})
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedArgs, cleanup: boundArgs.kind != ir.ValueDynamic || shouldCleanupBoxedValueAfterUse(call.Arguments[2], boundArgs)})
 	return emittedValue{kind: ir.ValueFunction, ref: tmp}, nil
 }
 
@@ -3973,14 +4221,7 @@ func (g *LLVMIRGenerator) emitForEachCall(buf *bytes.Buffer, state *functionStat
 	fmt.Fprintf(buf, "%s:\n", bodyLabel)
 	item := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_get_index(ptr %s, i32 %s)\n", item, itemsRef, index)
-	argsArray := state.nextTemp()
-	fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", argsArray)
-	fmt.Fprintf(buf, "  call void @jayess_array_set_value(ptr %s, i32 0, ptr %s)\n", argsArray, item)
-	boxedArgs := state.nextTemp()
-	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_array(ptr %s)\n", boxedArgs, argsArray)
-	undefinedThis := state.nextTemp()
-	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", undefinedThis)
-	if _, err := g.emitApplyFromValues(buf, state, callbackRef, undefinedThis, emittedValue{kind: ir.ValueDynamic, ref: boxedArgs}); err != nil {
+	if err := g.emitArrayCallbackInvocationDiscardingResult(buf, state, callbackRef, item); err != nil {
 		return err
 	}
 	nextIndex := state.nextTemp()
@@ -3991,18 +4232,362 @@ func (g *LLVMIRGenerator) emitForEachCall(buf *bytes.Buffer, state *functionStat
 	return nil
 }
 
+func (g *LLVMIRGenerator) emitArrayCallbackInvocationDiscardingResult(buf *bytes.Buffer, state *functionState, callbackRef string, itemRef string) error {
+	undefinedThis := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", undefinedThis)
+	boundCount := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call i32 @jayess_value_function_bound_arg_count(ptr %s)\n", boundCount, callbackRef)
+	hasBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp sgt i32 %s, 0\n", hasBound, boundCount)
+	fastLabel := state.nextLabel("array.callback.fast")
+	oneBoundLabel := state.nextLabel("array.callback.onebound")
+	oneBoundCallLabel := state.nextLabel("array.callback.onebound.call")
+	twoBoundCallLabel := state.nextLabel("array.callback.twobound.call")
+	threeBoundCallLabel := state.nextLabel("array.callback.threebound.call")
+	fourBoundCallLabel := state.nextLabel("array.callback.fourbound.call")
+	fiveBoundCallLabel := state.nextLabel("array.callback.fivebound.call")
+	sixBoundCallLabel := state.nextLabel("array.callback.sixbound.call")
+	sevenBoundCallLabel := state.nextLabel("array.callback.sevenbound.call")
+	eightBoundCallLabel := state.nextLabel("array.callback.eightbound.call")
+	nineBoundCallLabel := state.nextLabel("array.callback.ninebound.call")
+	tenBoundCallLabel := state.nextLabel("array.callback.tenbound.call")
+	elevenBoundCallLabel := state.nextLabel("array.callback.elevenbound.call")
+	twelveBoundCallLabel := state.nextLabel("array.callback.twelvebound.call")
+	slowLabel := state.nextLabel("array.callback.slow")
+	endLabel := state.nextLabel("array.callback.end")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", hasBound, oneBoundLabel, fastLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fastLabel)
+	fastResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_call_with_this(ptr %s, ptr %s, ptr %s, i32 1)\n", fastResult, callbackRef, undefinedThis, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: fastResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", oneBoundLabel)
+	isOneBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 1\n", isOneBound, boundCount)
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isOneBound, oneBoundCallLabel, twoBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", oneBoundCallLabel)
+	boundArg := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArg, callbackRef)
+	oneBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function2(ptr %s, ptr %s, ptr %s)\n", oneBoundResult, callbackRef, boundArg, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: oneBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", twoBoundCallLabel)
+	isTwoBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 2\n", isTwoBound, boundCount)
+	twoBoundFastLabel := state.nextLabel("array.callback.twobound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isTwoBound, twoBoundFastLabel, threeBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", twoBoundFastLabel)
+	boundArg0 := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArg0, callbackRef)
+	boundArg1 := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArg1, callbackRef)
+	twoBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function3(ptr %s, ptr %s, ptr %s, ptr %s)\n", twoBoundResult, callbackRef, boundArg0, boundArg1, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: twoBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", threeBoundCallLabel)
+	isThreeBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 3\n", isThreeBound, boundCount)
+	threeBoundFastLabel := state.nextLabel("array.callback.threebound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isThreeBound, threeBoundFastLabel, fourBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", threeBoundFastLabel)
+	boundArgA := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgA, callbackRef)
+	boundArgB := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgB, callbackRef)
+	boundArgC := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgC, callbackRef)
+	threeBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function4(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", threeBoundResult, callbackRef, boundArgA, boundArgB, boundArgC, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: threeBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fourBoundCallLabel)
+	isFourBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 4\n", isFourBound, boundCount)
+	fourBoundFastLabel := state.nextLabel("array.callback.fourbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isFourBound, fourBoundFastLabel, fiveBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fourBoundFastLabel)
+	boundArgD := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgD, callbackRef)
+	boundArgE := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgE, callbackRef)
+	boundArgF := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgF, callbackRef)
+	boundArgG := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgG, callbackRef)
+	fourBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function5(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", fourBoundResult, callbackRef, boundArgD, boundArgE, boundArgF, boundArgG, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: fourBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fiveBoundCallLabel)
+	isFiveBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 5\n", isFiveBound, boundCount)
+	fiveBoundFastLabel := state.nextLabel("array.callback.fivebound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isFiveBound, fiveBoundFastLabel, sixBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fiveBoundFastLabel)
+	boundArgH := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgH, callbackRef)
+	boundArgI := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgI, callbackRef)
+	boundArgJ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgJ, callbackRef)
+	boundArgK := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgK, callbackRef)
+	boundArgL := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgL, callbackRef)
+	fiveBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function6(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", fiveBoundResult, callbackRef, boundArgH, boundArgI, boundArgJ, boundArgK, boundArgL, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: fiveBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", sixBoundCallLabel)
+	isSixBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 6\n", isSixBound, boundCount)
+	sixBoundFastLabel := state.nextLabel("array.callback.sixbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isSixBound, sixBoundFastLabel, sevenBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", sixBoundFastLabel)
+	boundArgM := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgM, callbackRef)
+	boundArgN := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgN, callbackRef)
+	boundArgO := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgO, callbackRef)
+	boundArgP := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgP, callbackRef)
+	boundArgQ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgQ, callbackRef)
+	boundArgR := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgR, callbackRef)
+	sixBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function7(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", sixBoundResult, callbackRef, boundArgM, boundArgN, boundArgO, boundArgP, boundArgQ, boundArgR, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: sixBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", sevenBoundCallLabel)
+	isSevenBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 7\n", isSevenBound, boundCount)
+	sevenBoundFastLabel := state.nextLabel("array.callback.sevenbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isSevenBound, sevenBoundFastLabel, eightBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", sevenBoundFastLabel)
+	boundArgS := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgS, callbackRef)
+	boundArgT := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgT, callbackRef)
+	boundArgU := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgU, callbackRef)
+	boundArgV := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgV, callbackRef)
+	boundArgW := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgW, callbackRef)
+	boundArgX := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgX, callbackRef)
+	boundArgY := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgY, callbackRef)
+	sevenBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function8(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", sevenBoundResult, callbackRef, boundArgS, boundArgT, boundArgU, boundArgV, boundArgW, boundArgX, boundArgY, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: sevenBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", eightBoundCallLabel)
+	isEightBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 8\n", isEightBound, boundCount)
+	eightBoundFastLabel := state.nextLabel("array.callback.eightbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isEightBound, eightBoundFastLabel, nineBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", eightBoundFastLabel)
+	boundArgZ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgZ, callbackRef)
+	boundArgAA := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgAA, callbackRef)
+	boundArgAB := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgAB, callbackRef)
+	boundArgAC := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgAC, callbackRef)
+	boundArgAD := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgAD, callbackRef)
+	boundArgAE := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgAE, callbackRef)
+	boundArgAF := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgAF, callbackRef)
+	boundArgAG := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgAG, callbackRef)
+	eightBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function9(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", eightBoundResult, callbackRef, boundArgZ, boundArgAA, boundArgAB, boundArgAC, boundArgAD, boundArgAE, boundArgAF, boundArgAG, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: eightBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", nineBoundCallLabel)
+	isNineBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 9\n", isNineBound, boundCount)
+	nineBoundFastLabel := state.nextLabel("array.callback.ninebound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isNineBound, nineBoundFastLabel, tenBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", nineBoundFastLabel)
+	boundArgAH := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgAH, callbackRef)
+	boundArgAI := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgAI, callbackRef)
+	boundArgAJ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgAJ, callbackRef)
+	boundArgAK := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgAK, callbackRef)
+	boundArgAL := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgAL, callbackRef)
+	boundArgAM := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgAM, callbackRef)
+	boundArgAN := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgAN, callbackRef)
+	boundArgAO := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgAO, callbackRef)
+	boundArgAP := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 8)\n", boundArgAP, callbackRef)
+	nineBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function10(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", nineBoundResult, callbackRef, boundArgAH, boundArgAI, boundArgAJ, boundArgAK, boundArgAL, boundArgAM, boundArgAN, boundArgAO, boundArgAP, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: nineBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", tenBoundCallLabel)
+	isTenBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 10\n", isTenBound, boundCount)
+	tenBoundFastLabel := state.nextLabel("array.callback.tenbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isTenBound, tenBoundFastLabel, elevenBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", tenBoundFastLabel)
+	boundArgAQ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgAQ, callbackRef)
+	boundArgAR := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgAR, callbackRef)
+	boundArgAS := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgAS, callbackRef)
+	boundArgAT := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgAT, callbackRef)
+	boundArgAU := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgAU, callbackRef)
+	boundArgAV := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgAV, callbackRef)
+	boundArgAW := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgAW, callbackRef)
+	boundArgAX := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgAX, callbackRef)
+	boundArgAY := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 8)\n", boundArgAY, callbackRef)
+	boundArgAZ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 9)\n", boundArgAZ, callbackRef)
+	tenBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function11(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", tenBoundResult, callbackRef, boundArgAQ, boundArgAR, boundArgAS, boundArgAT, boundArgAU, boundArgAV, boundArgAW, boundArgAX, boundArgAY, boundArgAZ, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: tenBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", elevenBoundCallLabel)
+	isElevenBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 11\n", isElevenBound, boundCount)
+	elevenBoundFastLabel := state.nextLabel("array.callback.elevenbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isElevenBound, elevenBoundFastLabel, twelveBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", elevenBoundFastLabel)
+	boundArgBA := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgBA, callbackRef)
+	boundArgBB := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgBB, callbackRef)
+	boundArgBC := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgBC, callbackRef)
+	boundArgBD := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgBD, callbackRef)
+	boundArgBE := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgBE, callbackRef)
+	boundArgBF := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgBF, callbackRef)
+	boundArgBG := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgBG, callbackRef)
+	boundArgBH := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgBH, callbackRef)
+	boundArgBI := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 8)\n", boundArgBI, callbackRef)
+	boundArgBJ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 9)\n", boundArgBJ, callbackRef)
+	boundArgBK := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 10)\n", boundArgBK, callbackRef)
+	elevenBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function12(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", elevenBoundResult, callbackRef, boundArgBA, boundArgBB, boundArgBC, boundArgBD, boundArgBE, boundArgBF, boundArgBG, boundArgBH, boundArgBI, boundArgBJ, boundArgBK, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: elevenBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", twelveBoundCallLabel)
+	isTwelveBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 12\n", isTwelveBound, boundCount)
+	twelveBoundFastLabel := state.nextLabel("array.callback.twelvebound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isTwelveBound, twelveBoundFastLabel, slowLabel)
+
+	fmt.Fprintf(buf, "%s:\n", twelveBoundFastLabel)
+	boundArgBL := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgBL, callbackRef)
+	boundArgBM := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgBM, callbackRef)
+	boundArgBN := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgBN, callbackRef)
+	boundArgBO := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgBO, callbackRef)
+	boundArgBP := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgBP, callbackRef)
+	boundArgBQ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgBQ, callbackRef)
+	boundArgBR := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgBR, callbackRef)
+	boundArgBS := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgBS, callbackRef)
+	boundArgBT := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 8)\n", boundArgBT, callbackRef)
+	boundArgBU := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 9)\n", boundArgBU, callbackRef)
+	boundArgBV := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 10)\n", boundArgBV, callbackRef)
+	boundArgBW := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 11)\n", boundArgBW, callbackRef)
+	twelveBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function13(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", twelveBoundResult, callbackRef, boundArgBL, boundArgBM, boundArgBN, boundArgBO, boundArgBP, boundArgBQ, boundArgBR, boundArgBS, boundArgBT, boundArgBU, boundArgBV, boundArgBW, itemRef)
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: twelveBoundResult, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", slowLabel)
+	argsArray := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", argsArray)
+	fmt.Fprintf(buf, "  call void @jayess_array_set_value(ptr %s, i32 0, ptr %s)\n", argsArray, itemRef)
+	boxedArgs := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_array(ptr %s)\n", boxedArgs, argsArray)
+	mergedArgs := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_merge_bound_args(ptr %s, ptr %s)\n", mergedArgs, callbackRef, boxedArgs)
+	result, err := g.emitApplyFromValues(buf, state, callbackRef, undefinedThis, emittedValue{kind: ir.ValueDynamic, ref: mergedArgs})
+	if err != nil {
+		return err
+	}
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedArgs, cleanup: true, shallow: true})
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: mergedArgs, cleanup: true, shallow: true})
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: result.ref, cleanup: true})
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", endLabel)
+	return nil
+}
+
 func (g *LLVMIRGenerator) emitArrayMapCall(buf *bytes.Buffer, state *functionState, itemsRef string, callbackRef string) (emittedValue, error) {
 	resultArray := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", resultArray)
 	if err := g.emitArrayCallbackLoop(buf, state, itemsRef, callbackRef, func(item string) error {
-		argsArray := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", argsArray)
-		fmt.Fprintf(buf, "  call void @jayess_array_set_value(ptr %s, i32 0, ptr %s)\n", argsArray, item)
-		boxedArgs := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_array(ptr %s)\n", boxedArgs, argsArray)
-		undefinedThis := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", undefinedThis)
-		result, err := g.emitApplyFromValues(buf, state, callbackRef, undefinedThis, emittedValue{kind: ir.ValueDynamic, ref: boxedArgs})
+		result, err := g.emitArrayCallbackInvocation(buf, state, callbackRef, item)
 		if err != nil {
 			return err
 		}
@@ -4022,14 +4607,7 @@ func (g *LLVMIRGenerator) emitArrayFilterCall(buf *bytes.Buffer, state *function
 	resultArray := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", resultArray)
 	if err := g.emitArrayCallbackLoop(buf, state, itemsRef, callbackRef, func(item string) error {
-		argsArray := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", argsArray)
-		fmt.Fprintf(buf, "  call void @jayess_array_set_value(ptr %s, i32 0, ptr %s)\n", argsArray, item)
-		boxedArgs := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_array(ptr %s)\n", boxedArgs, argsArray)
-		undefinedThis := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", undefinedThis)
-		result, err := g.emitApplyFromValues(buf, state, callbackRef, undefinedThis, emittedValue{kind: ir.ValueDynamic, ref: boxedArgs})
+		result, err := g.emitArrayCallbackInvocation(buf, state, callbackRef, item)
 		if err != nil {
 			return err
 		}
@@ -4037,6 +4615,7 @@ func (g *LLVMIRGenerator) emitArrayFilterCall(buf *bytes.Buffer, state *function
 		if err != nil {
 			return err
 		}
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: result.ref, cleanup: result.kind == ir.ValueDynamic})
 		thenLabel := state.nextLabel("array.filter.then")
 		endLabel := state.nextLabel("array.filter.end")
 		fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", cond, thenLabel, endLabel)
@@ -4077,14 +4656,7 @@ func (g *LLVMIRGenerator) emitArrayFindCall(buf *bytes.Buffer, state *functionSt
 	fmt.Fprintf(buf, "%s:\n", bodyLabel)
 	item := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_get_index(ptr %s, i32 %s)\n", item, itemsRef, index)
-	argsArray := state.nextTemp()
-	fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", argsArray)
-	fmt.Fprintf(buf, "  call void @jayess_array_set_value(ptr %s, i32 0, ptr %s)\n", argsArray, item)
-	boxedArgs := state.nextTemp()
-	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_array(ptr %s)\n", boxedArgs, argsArray)
-	undefinedThis := state.nextTemp()
-	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", undefinedThis)
-	result, err := g.emitApplyFromValues(buf, state, callbackRef, undefinedThis, emittedValue{kind: ir.ValueDynamic, ref: boxedArgs})
+	result, err := g.emitArrayCallbackInvocation(buf, state, callbackRef, item)
 	if err != nil {
 		return emittedValue{}, err
 	}
@@ -4092,6 +4664,7 @@ func (g *LLVMIRGenerator) emitArrayFindCall(buf *bytes.Buffer, state *functionSt
 	if err != nil {
 		return emittedValue{}, err
 	}
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: result.ref, cleanup: result.kind == ir.ValueDynamic})
 	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", cond, matchLabel, nextLabel)
 	fmt.Fprintf(buf, "%s:\n", matchLabel)
 	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", item, resultPtr)
@@ -4137,6 +4710,361 @@ func (g *LLVMIRGenerator) emitArrayCallbackLoop(buf *bytes.Buffer, state *functi
 	return nil
 }
 
+func (g *LLVMIRGenerator) emitArrayCallbackInvocation(buf *bytes.Buffer, state *functionState, callbackRef string, itemRef string) (emittedValue, error) {
+	resultPtr := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = alloca ptr\n", resultPtr)
+	undefinedThis := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", undefinedThis)
+	boundCount := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call i32 @jayess_value_function_bound_arg_count(ptr %s)\n", boundCount, callbackRef)
+	hasBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp sgt i32 %s, 0\n", hasBound, boundCount)
+	fastLabel := state.nextLabel("array.callback.fast")
+	oneBoundLabel := state.nextLabel("array.callback.onebound")
+	oneBoundCallLabel := state.nextLabel("array.callback.onebound.call")
+	twoBoundCallLabel := state.nextLabel("array.callback.twobound.call")
+	threeBoundCallLabel := state.nextLabel("array.callback.threebound.call")
+	fourBoundCallLabel := state.nextLabel("array.callback.fourbound.call")
+	fiveBoundCallLabel := state.nextLabel("array.callback.fivebound.call")
+	sixBoundCallLabel := state.nextLabel("array.callback.sixbound.call")
+	sevenBoundCallLabel := state.nextLabel("array.callback.sevenbound.call")
+	eightBoundCallLabel := state.nextLabel("array.callback.eightbound.call")
+	nineBoundCallLabel := state.nextLabel("array.callback.ninebound.call")
+	tenBoundCallLabel := state.nextLabel("array.callback.tenbound.call")
+	elevenBoundCallLabel := state.nextLabel("array.callback.elevenbound.call")
+	twelveBoundCallLabel := state.nextLabel("array.callback.twelvebound.call")
+	slowLabel := state.nextLabel("array.callback.slow")
+	endLabel := state.nextLabel("array.callback.end")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", hasBound, oneBoundLabel, fastLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fastLabel)
+	fastResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_call_with_this(ptr %s, ptr %s, ptr %s, i32 1)\n", fastResult, callbackRef, undefinedThis, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", fastResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", oneBoundLabel)
+	isOneBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 1\n", isOneBound, boundCount)
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isOneBound, oneBoundCallLabel, twoBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", oneBoundCallLabel)
+	boundArg := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArg, callbackRef)
+	oneBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function2(ptr %s, ptr %s, ptr %s)\n", oneBoundResult, callbackRef, boundArg, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", oneBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", twoBoundCallLabel)
+	isTwoBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 2\n", isTwoBound, boundCount)
+	twoBoundFastLabel := state.nextLabel("array.callback.twobound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isTwoBound, twoBoundFastLabel, threeBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", twoBoundFastLabel)
+	boundArg0 := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArg0, callbackRef)
+	boundArg1 := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArg1, callbackRef)
+	twoBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function3(ptr %s, ptr %s, ptr %s, ptr %s)\n", twoBoundResult, callbackRef, boundArg0, boundArg1, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", twoBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", threeBoundCallLabel)
+	isThreeBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 3\n", isThreeBound, boundCount)
+	threeBoundFastLabel := state.nextLabel("array.callback.threebound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isThreeBound, threeBoundFastLabel, fourBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", threeBoundFastLabel)
+	boundArgA := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgA, callbackRef)
+	boundArgB := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgB, callbackRef)
+	boundArgC := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgC, callbackRef)
+	threeBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function4(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", threeBoundResult, callbackRef, boundArgA, boundArgB, boundArgC, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", threeBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fourBoundCallLabel)
+	isFourBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 4\n", isFourBound, boundCount)
+	fourBoundFastLabel := state.nextLabel("array.callback.fourbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isFourBound, fourBoundFastLabel, fiveBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fourBoundFastLabel)
+	boundArgD := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgD, callbackRef)
+	boundArgE := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgE, callbackRef)
+	boundArgF := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgF, callbackRef)
+	boundArgG := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgG, callbackRef)
+	fourBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function5(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", fourBoundResult, callbackRef, boundArgD, boundArgE, boundArgF, boundArgG, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", fourBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fiveBoundCallLabel)
+	isFiveBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 5\n", isFiveBound, boundCount)
+	fiveBoundFastLabel := state.nextLabel("array.callback.fivebound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isFiveBound, fiveBoundFastLabel, sixBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", fiveBoundFastLabel)
+	boundArgH := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgH, callbackRef)
+	boundArgI := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgI, callbackRef)
+	boundArgJ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgJ, callbackRef)
+	boundArgK := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgK, callbackRef)
+	boundArgL := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgL, callbackRef)
+	fiveBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function6(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", fiveBoundResult, callbackRef, boundArgH, boundArgI, boundArgJ, boundArgK, boundArgL, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", fiveBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", sixBoundCallLabel)
+	isSixBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 6\n", isSixBound, boundCount)
+	sixBoundFastLabel := state.nextLabel("array.callback.sixbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isSixBound, sixBoundFastLabel, sevenBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", sixBoundFastLabel)
+	boundArgM := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgM, callbackRef)
+	boundArgN := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgN, callbackRef)
+	boundArgO := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgO, callbackRef)
+	boundArgP := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgP, callbackRef)
+	boundArgQ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgQ, callbackRef)
+	boundArgR := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgR, callbackRef)
+	sixBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function7(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", sixBoundResult, callbackRef, boundArgM, boundArgN, boundArgO, boundArgP, boundArgQ, boundArgR, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", sixBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", sevenBoundCallLabel)
+	isSevenBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 7\n", isSevenBound, boundCount)
+	sevenBoundFastLabel := state.nextLabel("array.callback.sevenbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isSevenBound, sevenBoundFastLabel, eightBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", sevenBoundFastLabel)
+	boundArgS := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgS, callbackRef)
+	boundArgT := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgT, callbackRef)
+	boundArgU := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgU, callbackRef)
+	boundArgV := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgV, callbackRef)
+	boundArgW := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgW, callbackRef)
+	boundArgX := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgX, callbackRef)
+	boundArgY := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgY, callbackRef)
+	sevenBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function8(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", sevenBoundResult, callbackRef, boundArgS, boundArgT, boundArgU, boundArgV, boundArgW, boundArgX, boundArgY, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", sevenBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", eightBoundCallLabel)
+	isEightBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 8\n", isEightBound, boundCount)
+	eightBoundFastLabel := state.nextLabel("array.callback.eightbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isEightBound, eightBoundFastLabel, nineBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", eightBoundFastLabel)
+	boundArgZ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgZ, callbackRef)
+	boundArgAA := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgAA, callbackRef)
+	boundArgAB := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgAB, callbackRef)
+	boundArgAC := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgAC, callbackRef)
+	boundArgAD := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgAD, callbackRef)
+	boundArgAE := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgAE, callbackRef)
+	boundArgAF := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgAF, callbackRef)
+	boundArgAG := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgAG, callbackRef)
+	eightBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function9(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", eightBoundResult, callbackRef, boundArgZ, boundArgAA, boundArgAB, boundArgAC, boundArgAD, boundArgAE, boundArgAF, boundArgAG, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", eightBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", nineBoundCallLabel)
+	isNineBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 9\n", isNineBound, boundCount)
+	nineBoundFastLabel := state.nextLabel("array.callback.ninebound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isNineBound, nineBoundFastLabel, tenBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", nineBoundFastLabel)
+	boundArgAH := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgAH, callbackRef)
+	boundArgAI := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgAI, callbackRef)
+	boundArgAJ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgAJ, callbackRef)
+	boundArgAK := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgAK, callbackRef)
+	boundArgAL := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgAL, callbackRef)
+	boundArgAM := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgAM, callbackRef)
+	boundArgAN := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgAN, callbackRef)
+	boundArgAO := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgAO, callbackRef)
+	boundArgAP := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 8)\n", boundArgAP, callbackRef)
+	nineBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function10(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", nineBoundResult, callbackRef, boundArgAH, boundArgAI, boundArgAJ, boundArgAK, boundArgAL, boundArgAM, boundArgAN, boundArgAO, boundArgAP, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", nineBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", tenBoundCallLabel)
+	isTenBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 10\n", isTenBound, boundCount)
+	tenBoundFastLabel := state.nextLabel("array.callback.tenbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isTenBound, tenBoundFastLabel, elevenBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", tenBoundFastLabel)
+	boundArgAQ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgAQ, callbackRef)
+	boundArgAR := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgAR, callbackRef)
+	boundArgAS := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgAS, callbackRef)
+	boundArgAT := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgAT, callbackRef)
+	boundArgAU := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgAU, callbackRef)
+	boundArgAV := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgAV, callbackRef)
+	boundArgAW := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgAW, callbackRef)
+	boundArgAX := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgAX, callbackRef)
+	boundArgAY := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 8)\n", boundArgAY, callbackRef)
+	boundArgAZ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 9)\n", boundArgAZ, callbackRef)
+	tenBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function11(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", tenBoundResult, callbackRef, boundArgAQ, boundArgAR, boundArgAS, boundArgAT, boundArgAU, boundArgAV, boundArgAW, boundArgAX, boundArgAY, boundArgAZ, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", tenBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", elevenBoundCallLabel)
+	isElevenBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 11\n", isElevenBound, boundCount)
+	elevenBoundFastLabel := state.nextLabel("array.callback.elevenbound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isElevenBound, elevenBoundFastLabel, twelveBoundCallLabel)
+
+	fmt.Fprintf(buf, "%s:\n", elevenBoundFastLabel)
+	boundArgBA := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgBA, callbackRef)
+	boundArgBB := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgBB, callbackRef)
+	boundArgBC := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgBC, callbackRef)
+	boundArgBD := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgBD, callbackRef)
+	boundArgBE := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgBE, callbackRef)
+	boundArgBF := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgBF, callbackRef)
+	boundArgBG := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgBG, callbackRef)
+	boundArgBH := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgBH, callbackRef)
+	boundArgBI := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 8)\n", boundArgBI, callbackRef)
+	boundArgBJ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 9)\n", boundArgBJ, callbackRef)
+	boundArgBK := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 10)\n", boundArgBK, callbackRef)
+	elevenBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function12(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", elevenBoundResult, callbackRef, boundArgBA, boundArgBB, boundArgBC, boundArgBD, boundArgBE, boundArgBF, boundArgBG, boundArgBH, boundArgBI, boundArgBJ, boundArgBK, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", elevenBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", twelveBoundCallLabel)
+	isTwelveBound := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = icmp eq i32 %s, 12\n", isTwelveBound, boundCount)
+	twelveBoundFastLabel := state.nextLabel("array.callback.twelvebound.fast")
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", isTwelveBound, twelveBoundFastLabel, slowLabel)
+
+	fmt.Fprintf(buf, "%s:\n", twelveBoundFastLabel)
+	boundArgBL := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 0)\n", boundArgBL, callbackRef)
+	boundArgBM := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 1)\n", boundArgBM, callbackRef)
+	boundArgBN := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 2)\n", boundArgBN, callbackRef)
+	boundArgBO := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 3)\n", boundArgBO, callbackRef)
+	boundArgBP := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 4)\n", boundArgBP, callbackRef)
+	boundArgBQ := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 5)\n", boundArgBQ, callbackRef)
+	boundArgBR := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 6)\n", boundArgBR, callbackRef)
+	boundArgBS := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 7)\n", boundArgBS, callbackRef)
+	boundArgBT := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 8)\n", boundArgBT, callbackRef)
+	boundArgBU := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 9)\n", boundArgBU, callbackRef)
+	boundArgBV := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 10)\n", boundArgBV, callbackRef)
+	boundArgBW := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_bound_arg(ptr %s, i32 11)\n", boundArgBW, callbackRef)
+	twelveBoundResult := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_call_function13(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)\n", twelveBoundResult, callbackRef, boundArgBL, boundArgBM, boundArgBN, boundArgBO, boundArgBP, boundArgBQ, boundArgBR, boundArgBS, boundArgBT, boundArgBU, boundArgBV, boundArgBW, itemRef)
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", twelveBoundResult, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", slowLabel)
+	argsArray := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_array_new()\n", argsArray)
+	fmt.Fprintf(buf, "  call void @jayess_array_set_value(ptr %s, i32 0, ptr %s)\n", argsArray, itemRef)
+	boxedArgs := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_array(ptr %s)\n", boxedArgs, argsArray)
+	mergedArgs := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_merge_bound_args(ptr %s, ptr %s)\n", mergedArgs, callbackRef, boxedArgs)
+	result, err := g.emitApplyFromValues(buf, state, callbackRef, undefinedThis, emittedValue{kind: ir.ValueDynamic, ref: mergedArgs})
+	if err != nil {
+		return emittedValue{}, err
+	}
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: boxedArgs, cleanup: true, shallow: true})
+	g.emitCleanupBoxedUse(buf, boxedUse{ref: mergedArgs, cleanup: true, shallow: true})
+	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", result.ref, resultPtr)
+	fmt.Fprintf(buf, "  br label %%%s\n", endLabel)
+
+	fmt.Fprintf(buf, "%s:\n", endLabel)
+	final := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = load ptr, ptr %s\n", final, resultPtr)
+	return emittedValue{kind: ir.ValueDynamic, ref: final}, nil
+}
+
 func (g *LLVMIRGenerator) emitApplyFromValues(buf *bytes.Buffer, state *functionState, boxedCallee string, thisRef string, argsValue emittedValue) (emittedValue, error) {
 	fnPtr := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_function_ptr(ptr %s)\n", fnPtr, boxedCallee)
@@ -4155,17 +5083,17 @@ func (g *LLVMIRGenerator) emitApplyFromValues(buf *bytes.Buffer, state *function
 	endLabel := state.nextLabel("apply.end")
 	defaultLabel := state.nextLabel("apply.default")
 
-	caseLabels := make([]string, 9)
-	checkLabels := make([]string, 9)
-	for i := 0; i <= 8; i++ {
+	caseLabels := make([]string, indirectApplyMaxArgs+1)
+	checkLabels := make([]string, indirectApplyMaxArgs+1)
+	for i := 0; i <= indirectApplyMaxArgs; i++ {
 		caseLabels[i] = state.nextLabel(fmt.Sprintf("apply.%d", i))
 		checkLabels[i] = state.nextLabel(fmt.Sprintf("apply.check.%d", i))
 	}
 
 	fmt.Fprintf(buf, "  br label %%%s\n", checkLabels[0])
-	for i := 0; i <= 8; i++ {
+	for i := 0; i <= indirectApplyMaxArgs; i++ {
 		next := defaultLabel
-		if i < 8 {
+		if i < indirectApplyMaxArgs {
 			next = checkLabels[i+1]
 		}
 		fmt.Fprintf(buf, "%s:\n", checkLabels[i])
@@ -4174,7 +5102,7 @@ func (g *LLVMIRGenerator) emitApplyFromValues(buf *bytes.Buffer, state *function
 		fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", match, caseLabels[i], next)
 	}
 
-	for i := 0; i <= 8; i++ {
+	for i := 0; i <= indirectApplyMaxArgs; i++ {
 		fmt.Fprintf(buf, "%s:\n", caseLabels[i])
 		var args []string
 		for index := 0; index < i; index++ {
@@ -4219,7 +5147,7 @@ func (g *LLVMIRGenerator) emitIndirectApplyCase(buf *bytes.Buffer, state *functi
 
 func (g *LLVMIRGenerator) emitApplySignatureDispatch(buf *bytes.Buffer, state *functionState, fnPtr, envPtr, thisRef, paramCountRef string, hasRest bool, args []string, resultPtr, endLabel string) error {
 	defaultLabel := state.nextLabel("apply.sig.default")
-	maxParams := 8
+	maxParams := indirectApplyMaxArgs
 	for paramCount := 0; paramCount <= maxParams; paramCount++ {
 		checkLabel := state.nextLabel(fmt.Sprintf("apply.sig.check.%d", paramCount))
 		matchLabel := state.nextLabel(fmt.Sprintf("apply.sig.match.%d", paramCount))
@@ -4291,7 +5219,7 @@ func (g *LLVMIRGenerator) emitPreparedArguments(buf *bytes.Buffer, state *functi
 	return out, nil
 }
 
-func (g *LLVMIRGenerator) emitDirectJayessCallWithThis(buf *bytes.Buffer, state *functionState, callee string, fn ir.Function, thisRef string, args []string) (emittedValue, error) {
+func (g *LLVMIRGenerator) emitDirectJayessCallWithThis(buf *bytes.Buffer, state *functionState, callee string, fn ir.Function, thisRef string, args []string, cleanupUses []boxedUse) (emittedValue, error) {
 	resultPtr := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = alloca ptr\n", resultPtr)
 	fmt.Fprintf(buf, "  call void @jayess_push_this(ptr %s)\n", thisRef)
@@ -4304,10 +5232,14 @@ func (g *LLVMIRGenerator) emitDirectJayessCallWithThis(buf *bytes.Buffer, state 
 	if err != nil {
 		return emittedValue{}, err
 	}
+	calleeName := emittedFunctionName(callee)
 	if len(callArgs) == 0 {
-		fmt.Fprintf(buf, "  %s = call ptr @%s()\n", result, callee)
+		fmt.Fprintf(buf, "  %s = call ptr @%s()\n", result, calleeName)
 	} else {
-		fmt.Fprintf(buf, "  %s = call ptr @%s(%s)\n", result, callee, strings.Join(callArgs, ", "))
+		fmt.Fprintf(buf, "  %s = call ptr @%s(%s)\n", result, calleeName, strings.Join(callArgs, ", "))
+	}
+	for _, use := range cleanupUses {
+		g.emitCleanupBoxedUse(buf, use)
 	}
 	fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", result, resultPtr)
 	fmt.Fprintf(buf, "  call void @jayess_pop_this()\n")
@@ -4352,7 +5284,7 @@ func (g *LLVMIRGenerator) emitNamedFunctionValue(buf *bytes.Buffer, state *funct
 	}
 	paramCount, hasRest := functionMetadata(name, state.functions, state.externs)
 	tmp := state.nextTemp()
-	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_function(ptr @%s, ptr null, ptr %s, ptr %s, i32 %d, i1 %s)\n", tmp, name, state.stringRefs[name], classRef, paramCount, hasRest)
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_function(ptr @%s, ptr null, ptr %s, ptr %s, i32 %d, i1 %s)\n", tmp, emittedFunctionName(name), state.stringRefs[name], classRef, paramCount, hasRest)
 	return emittedValue{kind: ir.ValueFunction, ref: tmp}, nil
 }
 
@@ -4435,6 +5367,7 @@ func (g *LLVMIRGenerator) emitIndexAccess(buf *bytes.Buffer, state *functionStat
 			boxed := state.nextTemp()
 			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_object(ptr %s)\n", boxed, target.ref)
 			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_get_member(ptr %s, ptr %s)\n", tmp, boxed, index.ref)
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxed, cleanup: true})
 		} else {
 			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_get_member(ptr %s, ptr %s)\n", tmp, target.ref, index.ref)
 		}
@@ -4460,8 +5393,10 @@ func (g *LLVMIRGenerator) emitIndexAccess(buf *bytes.Buffer, state *functionStat
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_get_index(ptr %s, i32 %s)\n", tmp, target.ref, indexInt)
 		return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 	}
-	fmt.Fprintf(buf, "  %s = call ptr @jayess_args_get(ptr %s, i32 %s)\n", tmp, target.ref, indexInt)
-	return emittedValue{kind: ir.ValueString, ref: tmp}, nil
+	raw := state.nextTemp()
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_args_get(ptr %s, i32 %s)\n", raw, target.ref, indexInt)
+	fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_string(ptr %s)\n", tmp, raw)
+	return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 }
 
 func (g *LLVMIRGenerator) emitMemberAccess(buf *bytes.Buffer, state *functionState, target emittedValue, property string) (emittedValue, error) {
@@ -4492,6 +5427,7 @@ func (g *LLVMIRGenerator) emitMemberAccess(buf *bytes.Buffer, state *functionSta
 			}
 			tmp := state.nextTemp()
 			fmt.Fprintf(buf, "  %s = call i32 @jayess_value_array_length(ptr %s)\n", tmp, boxed)
+			g.emitCleanupBoxedUse(buf, boxedUse{ref: boxed, cleanup: true})
 			num := state.nextTemp()
 			fmt.Fprintf(buf, "  %s = sitofp i32 %s to double\n", num, tmp)
 			return emittedValue{kind: ir.ValueNumber, ref: num}, nil
@@ -4502,6 +5438,7 @@ func (g *LLVMIRGenerator) emitMemberAccess(buf *bytes.Buffer, state *functionSta
 		boxed := state.nextTemp()
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_object(ptr %s)\n", boxed, target.ref)
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_get_member(ptr %s, ptr %s)\n", tmp, boxed, state.stringRefs[property])
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: boxed, cleanup: true})
 	} else if target.kind == ir.ValueDynamic {
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_get_member(ptr %s, ptr %s)\n", tmp, target.ref, state.stringRefs[property])
 	} else {
@@ -4510,6 +5447,7 @@ func (g *LLVMIRGenerator) emitMemberAccess(buf *bytes.Buffer, state *functionSta
 			return emittedValue{}, err
 		}
 		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_get_member(ptr %s, ptr %s)\n", tmp, boxed, state.stringRefs[property])
+		g.emitCleanupBoxedUse(buf, boxedUse{ref: boxed, cleanup: target.kind != ir.ValueFunction})
 	}
 	return emittedValue{kind: ir.ValueDynamic, ref: tmp}, nil
 }
@@ -4599,10 +5537,14 @@ func (g *LLVMIRGenerator) emitCondition(buf *bytes.Buffer, state *functionState,
 }
 
 func (g *LLVMIRGenerator) emitExceptionCheck(buf *bytes.Buffer, state *functionState, target string) {
+	raisedLabel := state.nextLabel("throw.raise")
 	continueLabel := state.nextLabel("throw.cont")
 	hasException := state.nextTemp()
 	fmt.Fprintf(buf, "  %s = call i1 @jayess_has_exception()\n", hasException)
-	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", hasException, target, continueLabel)
+	fmt.Fprintf(buf, "  br i1 %s, label %%%s, label %%%s\n", hasException, raisedLabel, continueLabel)
+	fmt.Fprintf(buf, "%s:\n", raisedLabel)
+	g.emitCleanupScopesToDepth(buf, state, state.exceptionCleanupDepth)
+	fmt.Fprintf(buf, "  br label %%%s\n", target)
 	fmt.Fprintf(buf, "%s:\n", continueLabel)
 }
 
@@ -4647,7 +5589,11 @@ func (g *LLVMIRGenerator) emitBoxedValue(buf *bytes.Buffer, state *functionState
 		return value.ref, nil
 	case ir.ValueString:
 		tmp := state.nextTemp()
-		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_string(ptr %s)\n", tmp, value.ref)
+		if value.staticString {
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_static_string(ptr %s)\n", tmp, value.ref)
+		} else {
+			fmt.Fprintf(buf, "  %s = call ptr @jayess_value_from_string(ptr %s)\n", tmp, value.ref)
+		}
 		return tmp, nil
 	case ir.ValueNumber:
 		tmp := state.nextTemp()
@@ -4705,10 +5651,390 @@ func (s *functionState) nextTemp() string {
 	return name
 }
 
+func localEligibilityKey(name string, line, column int) string {
+	return fmt.Sprintf("%s:%d:%d", name, line, column)
+}
+
+func (s *functionState) isEligibleLocal(name string, line, column int) bool {
+	if s.eligibleLocals == nil {
+		return false
+	}
+	if strings.HasPrefix(name, "__jayess_") {
+		return false
+	}
+	_, ok := s.eligibleLocals[localEligibilityKey(name, line, column)]
+	return ok
+}
+
+func (s *functionState) isFunctionScopedVarCleanupEligible(name string, line, column int) bool {
+	if s.eligibleLocals == nil {
+		return false
+	}
+	item, ok := s.eligibleLocals[localEligibilityKey(name, line, column)]
+	if !ok {
+		return false
+	}
+	return item.Kind == ir.DeclarationVar
+}
+
+func collectHoistedVarNames(statements []ir.Statement, names map[string]bool) {
+	for _, stmt := range statements {
+		switch stmt := stmt.(type) {
+		case *ir.VariableDecl:
+			if stmt.Kind == ir.DeclarationVar && stmt.Name != "" {
+				names[stmt.Name] = true
+			}
+		case *ir.IfStatement:
+			collectHoistedVarNames(stmt.Consequence, names)
+			collectHoistedVarNames(stmt.Alternative, names)
+		case *ir.WhileStatement:
+			collectHoistedVarNames(stmt.Body, names)
+		case *ir.DoWhileStatement:
+			collectHoistedVarNames(stmt.Body, names)
+		case *ir.BlockStatement:
+			collectHoistedVarNames(stmt.Body, names)
+		case *ir.ForStatement:
+			if stmt.Init != nil {
+				collectHoistedVarNames([]ir.Statement{stmt.Init}, names)
+			}
+			if stmt.Update != nil {
+				collectHoistedVarNames([]ir.Statement{stmt.Update}, names)
+			}
+			collectHoistedVarNames(stmt.Body, names)
+		case *ir.SwitchStatement:
+			for _, switchCase := range stmt.Cases {
+				collectHoistedVarNames(switchCase.Consequent, names)
+			}
+			collectHoistedVarNames(stmt.Default, names)
+		case *ir.TryStatement:
+			collectHoistedVarNames(stmt.TryBody, names)
+			collectHoistedVarNames(stmt.CatchBody, names)
+			collectHoistedVarNames(stmt.FinallyBody, names)
+		case *ir.LabeledStatement:
+			if stmt.Statement != nil {
+				collectHoistedVarNames([]ir.Statement{stmt.Statement}, names)
+			}
+		}
+	}
+}
+
+func (g *LLVMIRGenerator) emitHoistedVarSlots(buf *bytes.Buffer, state *functionState, fn ir.Function) {
+	names := map[string]bool{}
+	collectHoistedVarNames(fn.Body, names)
+	for _, param := range fn.Params {
+		delete(names, param.Name)
+	}
+	for name := range names {
+		slot := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = alloca ptr\n", slot)
+		undef := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = call ptr @jayess_value_undefined()\n", undef)
+		fmt.Fprintf(buf, "  store ptr %s, ptr %s\n", undef, slot)
+		state.hoistedVarSlots[name] = variableSlot{kind: ir.ValueDynamic, ptr: slot}
+		state.slots[name] = variableSlot{kind: ir.ValueDynamic, ptr: slot}
+		if state.hasEligibleVarByName(name) {
+			state.addRootCleanup(variableSlot{kind: ir.ValueDynamic, ptr: slot})
+		}
+	}
+}
+
+func (s *functionState) hasEligibleVarByName(name string) bool {
+	if s.eligibleLocals == nil {
+		return false
+	}
+	for _, item := range s.eligibleLocals {
+		if item.Name == name && item.Kind == ir.DeclarationVar {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *functionState) pushScope() {
+	s.scopeStack = append(s.scopeStack, cleanupScope{})
+}
+
+func (s *functionState) popScope() {
+	if len(s.scopeStack) == 0 {
+		return
+	}
+	scope := s.scopeStack[len(s.scopeStack)-1]
+	s.scopeStack = s.scopeStack[:len(s.scopeStack)-1]
+	for i := len(scope.shadowed) - 1; i >= 0; i-- {
+		item := scope.shadowed[i]
+		if item.ok {
+			s.slots[item.name] = item.slot
+		} else {
+			delete(s.slots, item.name)
+		}
+	}
+}
+
+func (s *functionState) declareSlot(name string, slot variableSlot) {
+	if len(s.scopeStack) > 0 {
+		scope := &s.scopeStack[len(s.scopeStack)-1]
+		alreadyTracked := false
+		for _, item := range scope.shadowed {
+			if item.name == name {
+				alreadyTracked = true
+				break
+			}
+		}
+		if !alreadyTracked {
+			previous, ok := s.slots[name]
+			scope.shadowed = append(scope.shadowed, shadowedSlot{name: name, slot: previous, ok: ok})
+		}
+	}
+	s.slots[name] = slot
+}
+
+func (s *functionState) addCleanup(slot variableSlot) {
+	if len(s.scopeStack) == 0 {
+		return
+	}
+	scope := &s.scopeStack[len(s.scopeStack)-1]
+	scope.cleanups = append(scope.cleanups, slot)
+}
+
+func (s *functionState) addRootCleanup(slot variableSlot) {
+	if len(s.scopeStack) == 0 {
+		return
+	}
+	scope := &s.scopeStack[0]
+	scope.cleanups = append(scope.cleanups, slot)
+}
+
+func isTransientDynamicExpression(expr ir.Expression) bool {
+	switch expr.(type) {
+	case *ir.CallExpression, *ir.InvokeExpression, *ir.BinaryExpression, *ir.TemplateLiteral, *ir.NullishCoalesceExpression, *ir.LogicalExpression:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldCleanupBoxedValueAfterUse(expr ir.Expression, value emittedValue) bool {
+	if value.kind != ir.ValueDynamic {
+		return true
+	}
+	return isTransientDynamicExpression(expr)
+}
+
+func shouldCleanupTransientParserArgAfterUse(callee string, expr ir.Expression, value emittedValue) bool {
+	switch callee {
+	case "parseHtml", "parseHtmlFragment", "tokenizeHtml", "parseXml", "tokenizeXml", "parseCss", "tokenizeCss":
+		return shouldCleanupBoxedValueAfterUse(expr, value)
+	default:
+		return false
+	}
+}
+
+func isBorrowedAliasExpression(expr ir.Expression) bool {
+	switch expr.(type) {
+	case *ir.VariableRef, *ir.MemberExpression, *ir.IndexExpression:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldScheduleDynamicLocalCleanup(expr ir.Expression, value emittedValue) bool {
+	if value.kind != ir.ValueDynamic {
+		return false
+	}
+	return !isBorrowedAliasExpression(expr)
+}
+
+func isDirectFunctionReceiver(expr ir.Expression) bool {
+	switch expr := expr.(type) {
+	case *ir.VariableRef:
+		return expr.Kind == ir.ValueFunction
+	case *ir.FunctionValue:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *functionState) functionExpressionReturnsFresh(expr ir.Expression) bool {
+	switch expr := expr.(type) {
+	case *ir.VariableRef:
+		if expr.Kind != ir.ValueFunction {
+			return false
+		}
+		fn, ok := s.functions[expr.Name]
+		return ok && fn.ReturnFresh
+	case *ir.FunctionValue:
+		fn, ok := s.functions[expr.Name]
+		return ok && fn.ReturnFresh
+	case *ir.CallExpression:
+		if expr.Callee == "__jayess_bind" && len(expr.Arguments) > 0 {
+			return s.functionExpressionReturnsFresh(expr.Arguments[0])
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func (s *functionState) shouldCleanupDiscardedFreshCall(call *ir.CallExpression, value emittedValue) bool {
+	if value.ref == "" {
+		return false
+	}
+	switch call.Callee {
+	case "__jayess_bind":
+		return value.kind == ir.ValueFunction
+	case "__jayess_apply":
+		return value.kind == ir.ValueDynamic && len(call.Arguments) > 0 && s.functionExpressionReturnsFresh(call.Arguments[0])
+	case "__jayess_array_map", "__jayess_array_filter":
+		return value.kind == ir.ValueArray
+	}
+	if value.kind != ir.ValueDynamic {
+		return false
+	}
+	fn, ok := s.functions[call.Callee]
+	if !ok {
+		return false
+	}
+	return fn.ReturnFresh
+}
+
+func (s *functionState) shouldCleanupDiscardedExpression(expr ir.Expression, value emittedValue) bool {
+	if value.ref == "" {
+		return false
+	}
+	switch expr := expr.(type) {
+	case *ir.CallExpression:
+		return s.shouldCleanupDiscardedFreshCall(expr, value)
+	case *ir.TemplateLiteral, *ir.ObjectLiteral, *ir.ArrayLiteral, *ir.FunctionValue, *ir.BigIntLiteral, *ir.NullLiteral, *ir.UndefinedLiteral, *ir.NewTargetExpression:
+		return true
+	case *ir.BinaryExpression:
+		switch expr.Operator {
+		case ir.OperatorAdd, ir.OperatorBitAnd, ir.OperatorBitOr, ir.OperatorBitXor, ir.OperatorShl, ir.OperatorShr, ir.OperatorUShr:
+			return value.kind == ir.ValueDynamic || value.kind == ir.ValueBigInt
+		default:
+			return false
+		}
+	case *ir.ConditionalExpression:
+		return isDiscardableFreshExpression(expr.Consequent) && isDiscardableFreshExpression(expr.Alternative)
+	case *ir.NullishCoalesceExpression:
+		return isDiscardableFreshExpression(expr.Left) && isDiscardableFreshExpression(expr.Right)
+	case *ir.CommaExpression:
+		return isDiscardableFreshExpression(expr.Right)
+	default:
+		return false
+	}
+}
+
+func isDiscardableFreshExpression(expr ir.Expression) bool {
+	switch expr := expr.(type) {
+	case *ir.CallExpression:
+		return false
+	case *ir.TemplateLiteral, *ir.ObjectLiteral, *ir.ArrayLiteral, *ir.FunctionValue, *ir.BigIntLiteral, *ir.NullLiteral, *ir.UndefinedLiteral, *ir.NewTargetExpression:
+		return true
+	case *ir.BinaryExpression:
+		switch expr.Operator {
+		case ir.OperatorAdd, ir.OperatorBitAnd, ir.OperatorBitOr, ir.OperatorBitXor, ir.OperatorShl, ir.OperatorShr, ir.OperatorUShr:
+			return true
+		default:
+			return false
+		}
+	case *ir.ConditionalExpression:
+		return isDiscardableFreshExpression(expr.Consequent) && isDiscardableFreshExpression(expr.Alternative)
+	case *ir.NullishCoalesceExpression:
+		return isDiscardableFreshExpression(expr.Left) && isDiscardableFreshExpression(expr.Right)
+	case *ir.CommaExpression:
+		return isDiscardableFreshExpression(expr.Right)
+	default:
+		return false
+	}
+}
+
+func (g *LLVMIRGenerator) emitCleanupBoxedUse(buf *bytes.Buffer, use boxedUse) {
+	if !use.cleanup || use.ref == "" {
+		return
+	}
+	if use.shallow {
+		fmt.Fprintf(buf, "  call void @jayess_value_free_array_shallow(ptr %s)\n", use.ref)
+		return
+	}
+	fmt.Fprintf(buf, "  call void @jayess_value_free_unshared(ptr %s)\n", use.ref)
+}
+
 func (s *functionState) nextLabel(prefix string) string {
 	name := fmt.Sprintf("%s.%d", prefix, s.labelCounter)
 	s.labelCounter++
 	return name
+}
+
+func (g *LLVMIRGenerator) emitCleanupSlots(buf *bytes.Buffer, state *functionState, scope cleanupScope) {
+	for i := len(scope.cleanups) - 1; i >= 0; i-- {
+		slot := scope.cleanups[i]
+		switch slot.kind {
+		case ir.ValueDynamic:
+			if !state.slotOwnsCleanup(slot) {
+				continue
+			}
+			loaded := state.nextTemp()
+			fmt.Fprintf(buf, "  %s = load ptr, ptr %s\n", loaded, slot.ptr)
+			fmt.Fprintf(buf, "  call void @jayess_value_free_unshared(ptr %s)\n", loaded)
+		}
+	}
+}
+
+func (g *LLVMIRGenerator) emitCurrentScopeCleanup(buf *bytes.Buffer, state *functionState) {
+	if len(state.scopeStack) == 0 {
+		return
+	}
+	g.emitCleanupSlots(buf, state, state.scopeStack[len(state.scopeStack)-1])
+}
+
+func (g *LLVMIRGenerator) emitCleanupScopesToDepth(buf *bytes.Buffer, state *functionState, depth int) {
+	if depth < 0 {
+		depth = 0
+	}
+	for i := len(state.scopeStack) - 1; i >= depth; i-- {
+		g.emitCleanupSlots(buf, state, state.scopeStack[i])
+	}
+}
+
+func (g *LLVMIRGenerator) emitCleanupAllScopes(buf *bytes.Buffer, state *functionState) {
+	for i := len(state.scopeStack) - 1; i >= 0; i-- {
+		g.emitCleanupSlots(buf, state, state.scopeStack[i])
+	}
+}
+
+func (s *functionState) slotOwnsCleanup(slot variableSlot) bool {
+	for _, current := range s.slots {
+		if current.ptr == slot.ptr && current.kind == slot.kind {
+			return current.ownsCleanup
+		}
+	}
+	for _, current := range s.hoistedVarSlots {
+		if current.ptr == slot.ptr && current.kind == slot.kind {
+			return current.ownsCleanup
+		}
+	}
+	return slot.ownsCleanup
+}
+
+func (g *LLVMIRGenerator) emitStoreIntoVariableSlot(buf *bytes.Buffer, state *functionState, slot variableSlot, value emittedValue, expr ir.Expression) (variableSlot, error) {
+	if slot.kind == ir.ValueDynamic && slot.ownsCleanup {
+		previous := state.nextTemp()
+		fmt.Fprintf(buf, "  %s = load ptr, ptr %s\n", previous, slot.ptr)
+		fmt.Fprintf(buf, "  call void @jayess_value_free_unshared(ptr %s)\n", previous)
+	}
+	storeRef := value.ref
+	if slot.kind == ir.ValueDynamic {
+		boxed, err := g.emitBoxedValue(buf, state, value)
+		if err != nil {
+			return slot, err
+		}
+		storeRef = boxed
+		slot.ownsCleanup = shouldScheduleDynamicLocalCleanup(expr, value)
+	}
+	fmt.Fprintf(buf, "  store %s %s, ptr %s\n", llvmStorageType(slot.kind), storeRef, slot.ptr)
+	return slot, nil
 }
 
 func llvmStorageType(kind ir.ValueKind) string {

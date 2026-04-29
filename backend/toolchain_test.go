@@ -233,6 +233,371 @@ func copyDirRecursive(t *testing.T, srcDir, dstDir string) {
 	}
 }
 
+func copyFileForTest(t *testing.T, srcPath, dstPath string) {
+	t.Helper()
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) returned error: %v", srcPath, err)
+	}
+	if err := os.WriteFile(dstPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) returned error: %v", dstPath, err)
+	}
+}
+
+func rewriteAudioPackageToUseCubebStub(t *testing.T, repoRoot, pkgDir string) {
+	t.Helper()
+
+	nativeDir := filepath.Join(pkgDir, "native")
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "refs", "cubeb", "include"),
+		filepath.Join(nativeDir, "cubeb_include"),
+	)
+	data, err := os.ReadFile(filepath.Join(repoRoot, "refs", "miniaudio", "miniaudio.h"))
+	if err != nil {
+		t.Fatalf("ReadFile(miniaudio.h) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "miniaudio.h"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(miniaudio.h) returned error: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(repoRoot, "refs", "miniaudio", "miniaudio.c"))
+	if err != nil {
+		t.Fatalf("ReadFile(miniaudio.c) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "miniaudio.c"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(miniaudio.c) returned error: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(repoRoot, "refs", "miniaudio", "extras", "stb_vorbis.c"))
+	if err != nil {
+		t.Fatalf("ReadFile(stb_vorbis.c) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "stb_vorbis.c"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(stb_vorbis.c) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "cubeb_include", "cubeb", "cubeb_export.h"), []byte(`#ifndef CUBEB_EXPORT
+#define CUBEB_EXPORT
+#endif
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(cubeb_export.h) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "audio.bind.js"), []byte(`const f = () => {};
+export const createContextNative = f;
+export const destroyContextNative = f;
+export const backendIdNative = f;
+export const maxChannelCountNative = f;
+export const listOutputDevicesNative = f;
+export const listInputDevicesNative = f;
+export const preferredSampleRateNative = f;
+export const minLatencyNative = f;
+export const createPlaybackStreamNative = f;
+export const startPlaybackStreamNative = f;
+export const pausePlaybackStreamNative = f;
+export const stopPlaybackStreamNative = f;
+export const submitPlaybackSamplesNative = f;
+export const playbackStatsNative = f;
+export const closePlaybackStreamNative = f;
+export const nextStreamEventNative = f;
+export const createCaptureStreamNative = f;
+export const startCaptureStreamNative = f;
+export const stopCaptureStreamNative = f;
+export const readCapturedSamplesNative = f;
+export const captureStatsNative = f;
+export const closeCaptureStreamNative = f;
+export const loadWavNative = f;
+export const loadOggNative = f;
+export const loadMp3Native = f;
+export const loadFlacNative = f;
+
+export default {
+  sources: ["./audio.c", "./cubeb_stub.c", "./miniaudio.c"],
+  includeDirs: [".", "./cubeb_include"],
+  cflags: ["-DMA_NO_DEVICE_IO", "-DMA_NO_THREADING"],
+  ldflags: ["-pthread", "-ldl", "-lm"],
+  exports: {
+    createContextNative: { symbol: "jayess_audio_create_context", type: "function" },
+    destroyContextNative: { symbol: "jayess_audio_destroy_context", type: "function" },
+    backendIdNative: { symbol: "jayess_audio_backend_id", type: "function" },
+    maxChannelCountNative: { symbol: "jayess_audio_max_channel_count", type: "function" },
+    listOutputDevicesNative: { symbol: "jayess_audio_list_output_devices", type: "function" },
+    listInputDevicesNative: { symbol: "jayess_audio_list_input_devices", type: "function" },
+    preferredSampleRateNative: { symbol: "jayess_audio_preferred_sample_rate", type: "function" },
+    minLatencyNative: { symbol: "jayess_audio_min_latency", type: "function" },
+    createPlaybackStreamNative: { symbol: "jayess_audio_create_playback_stream", type: "function" },
+    startPlaybackStreamNative: { symbol: "jayess_audio_start_playback_stream", type: "function" },
+    pausePlaybackStreamNative: { symbol: "jayess_audio_pause_playback_stream", type: "function" },
+    stopPlaybackStreamNative: { symbol: "jayess_audio_stop_playback_stream", type: "function" },
+    submitPlaybackSamplesNative: { symbol: "jayess_audio_submit_playback_samples", type: "function" },
+    playbackStatsNative: { symbol: "jayess_audio_playback_stats", type: "function" },
+    closePlaybackStreamNative: { symbol: "jayess_audio_close_playback_stream", type: "function" },
+    nextStreamEventNative: { symbol: "jayess_audio_next_stream_event", type: "function" },
+    createCaptureStreamNative: { symbol: "jayess_audio_create_capture_stream", type: "function" },
+    startCaptureStreamNative: { symbol: "jayess_audio_start_capture_stream", type: "function" },
+    stopCaptureStreamNative: { symbol: "jayess_audio_stop_capture_stream", type: "function" },
+    readCapturedSamplesNative: { symbol: "jayess_audio_read_captured_samples", type: "function" },
+    captureStatsNative: { symbol: "jayess_audio_capture_stats", type: "function" },
+    closeCaptureStreamNative: { symbol: "jayess_audio_close_capture_stream", type: "function" },
+    loadWavNative: { symbol: "jayess_audio_load_wav", type: "function" },
+    loadOggNative: { symbol: "jayess_audio_load_ogg", type: "function" },
+    loadMp3Native: { symbol: "jayess_audio_load_mp3", type: "function" },
+    loadFlacNative: { symbol: "jayess_audio_load_flac", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(audio.bind.js) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "cubeb_stub.c"), []byte(`#include <cubeb/cubeb.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+struct cubeb {
+  int dummy;
+};
+
+struct cubeb_stream {
+  cubeb_stream_params input_params;
+  cubeb_stream_params output_params;
+  uint32_t latency_frames;
+  cubeb_data_callback data_cb;
+  cubeb_state_callback state_cb;
+  void * user_ptr;
+  pthread_t thread;
+  int running;
+  int thread_started;
+  int capture_mode;
+  int emit_error_once;
+};
+
+static void * cubeb_stub_playback_thread(void * ptr) {
+  cubeb_stream * stream = (cubeb_stream *) ptr;
+  long frames = stream->latency_frames > 0 ? (long) stream->latency_frames : 64;
+  long samples = frames * (long)(stream->capture_mode ? stream->input_params.channels : stream->output_params.channels);
+  while (stream->running) {
+    if (stream->emit_error_once) {
+      stream->emit_error_once = 0;
+      stream->running = 0;
+      if (stream->state_cb != NULL) {
+        stream->state_cb(stream, stream->user_ptr, CUBEB_STATE_ERROR);
+      }
+      break;
+    }
+    if (stream->data_cb != NULL) {
+      if (stream->capture_mode) {
+        long i = 0;
+        if (stream->input_params.format == CUBEB_SAMPLE_FLOAT32NE) {
+          float * in = (float *) calloc((size_t)samples, sizeof(float));
+          for (i = 0; i < samples; i++) {
+            in[i] = (i % 2 == 0) ? 0.25f : -0.25f;
+          }
+          stream->data_cb(stream, stream->user_ptr, in, NULL, frames);
+          free(in);
+        } else {
+          int16_t * in = (int16_t *) calloc((size_t)samples, sizeof(int16_t));
+          for (i = 0; i < samples; i++) {
+            in[i] = (i % 2 == 0) ? 8192 : -8192;
+          }
+          stream->data_cb(stream, stream->user_ptr, in, NULL, frames);
+          free(in);
+        }
+      } else if (stream->output_params.format == CUBEB_SAMPLE_FLOAT32NE) {
+        float * out = (float *) calloc((size_t)samples, sizeof(float));
+        stream->data_cb(stream, stream->user_ptr, NULL, out, frames);
+        free(out);
+      } else {
+        int16_t * out = (int16_t *) calloc((size_t)samples, sizeof(int16_t));
+        stream->data_cb(stream, stream->user_ptr, NULL, out, frames);
+        free(out);
+      }
+    }
+    usleep(1000);
+  }
+  return NULL;
+}
+
+int cubeb_init(cubeb ** context, char const * context_name, char const * backend_name) {
+  (void) context_name;
+  (void) backend_name;
+  if (context == NULL) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  *context = (cubeb *) calloc(1, sizeof(cubeb));
+  return *context != NULL ? CUBEB_OK : CUBEB_ERROR;
+}
+
+char const * cubeb_get_backend_id(cubeb * context) {
+  (void) context;
+  return "stub-cubeb";
+}
+
+int cubeb_get_max_channel_count(cubeb * context, uint32_t * max_channels) {
+  (void) context;
+  if (max_channels == NULL) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  *max_channels = 2;
+  return CUBEB_OK;
+}
+
+int cubeb_get_preferred_sample_rate(cubeb * context, uint32_t * rate) {
+  (void) context;
+  if (rate == NULL) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  *rate = 48000;
+  return CUBEB_OK;
+}
+
+int cubeb_get_min_latency(cubeb * context, cubeb_stream_params * params, uint32_t * latency_frames) {
+  (void) context;
+  (void) params;
+  if (latency_frames == NULL) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  *latency_frames = 64;
+  return CUBEB_OK;
+}
+
+int cubeb_stream_init(cubeb * context, cubeb_stream ** stream, char const * stream_name,
+                      cubeb_devid input_device, cubeb_stream_params * input_stream_params,
+                      cubeb_devid output_device, cubeb_stream_params * output_stream_params,
+                      uint32_t latency_frames, cubeb_data_callback data_callback,
+                      cubeb_state_callback state_callback, void * user_ptr) {
+  cubeb_stream * created = NULL;
+  (void) context;
+  (void) stream_name;
+  (void) input_device;
+  (void) output_device;
+  if (stream == NULL || (output_stream_params == NULL && input_stream_params == NULL)) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  created = (cubeb_stream *) calloc(1, sizeof(cubeb_stream));
+  if (created == NULL) {
+    return CUBEB_ERROR;
+  }
+  if (input_stream_params != NULL) {
+    created->input_params = *input_stream_params;
+  }
+  if (output_stream_params != NULL) {
+    created->output_params = *output_stream_params;
+  }
+  created->capture_mode = output_stream_params == NULL ? 1 : 0;
+  created->emit_error_once = stream_name != NULL && strstr(stream_name, "error") != NULL;
+  created->latency_frames = latency_frames;
+  created->data_cb = data_callback;
+  created->state_cb = state_callback;
+  created->user_ptr = user_ptr;
+  *stream = created;
+  return CUBEB_OK;
+}
+
+void cubeb_stream_destroy(cubeb_stream * stream) {
+  if (stream == NULL) {
+    return;
+  }
+  if (stream->running) {
+    stream->running = 0;
+  }
+  if (stream->thread_started) {
+    pthread_join(stream->thread, NULL);
+    stream->thread_started = 0;
+  }
+  free(stream);
+}
+
+int cubeb_stream_start(cubeb_stream * stream) {
+  if (stream == NULL) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  if (stream->running) {
+    return CUBEB_OK;
+  }
+  stream->running = 1;
+  if (stream->state_cb != NULL) {
+    stream->state_cb(stream, stream->user_ptr, CUBEB_STATE_STARTED);
+  }
+  if (pthread_create(&stream->thread, NULL, cubeb_stub_playback_thread, stream) != 0) {
+    stream->running = 0;
+    return CUBEB_ERROR;
+  }
+  stream->thread_started = 1;
+  return CUBEB_OK;
+}
+
+int cubeb_stream_stop(cubeb_stream * stream) {
+  if (stream == NULL) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  if (stream->running) {
+    stream->running = 0;
+  }
+  if (stream->thread_started) {
+    pthread_join(stream->thread, NULL);
+    stream->thread_started = 0;
+  }
+  if (stream->state_cb != NULL) {
+    stream->state_cb(stream, stream->user_ptr, CUBEB_STATE_STOPPED);
+  }
+  return CUBEB_OK;
+}
+
+int cubeb_enumerate_devices(cubeb * context, cubeb_device_type devtype, cubeb_device_collection * collection) {
+  cubeb_device_info * devices = NULL;
+  (void) context;
+  if (collection == NULL) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  collection->count = devtype == (CUBEB_DEVICE_TYPE_INPUT | CUBEB_DEVICE_TYPE_OUTPUT) ? 2 : 1;
+  devices = (cubeb_device_info *) calloc(collection->count, sizeof(cubeb_device_info));
+  if (devices == NULL) {
+    return CUBEB_ERROR;
+  }
+  devices[0].device_id = devtype == CUBEB_DEVICE_TYPE_INPUT ? "stub-input-0" : "stub-output-0";
+  devices[0].friendly_name = devtype == CUBEB_DEVICE_TYPE_INPUT ? "Stub Input" : "Stub Output";
+  devices[0].group_id = "stub-group";
+  devices[0].vendor_name = "jayess";
+  devices[0].type = devtype == CUBEB_DEVICE_TYPE_INPUT ? CUBEB_DEVICE_TYPE_INPUT : CUBEB_DEVICE_TYPE_OUTPUT;
+  devices[0].state = CUBEB_DEVICE_STATE_ENABLED;
+  devices[0].preferred = CUBEB_DEVICE_PREF_MULTIMEDIA;
+  devices[0].format = CUBEB_DEVICE_FMT_F32NE;
+  devices[0].default_format = CUBEB_DEVICE_FMT_F32NE;
+  devices[0].max_channels = 2;
+  devices[0].default_rate = 48000;
+  devices[0].max_rate = 48000;
+  devices[0].min_rate = 8000;
+  devices[0].latency_lo = 64;
+  devices[0].latency_hi = 256;
+  if (collection->count > 1) {
+    devices[1] = devices[0];
+    devices[1].device_id = "stub-output-0";
+    devices[1].friendly_name = "Stub Output";
+    devices[1].type = CUBEB_DEVICE_TYPE_OUTPUT;
+  }
+  collection->device = devices;
+  return CUBEB_OK;
+}
+
+int cubeb_device_collection_destroy(cubeb * context, cubeb_device_collection * collection) {
+  (void) context;
+  if (collection == NULL) {
+    return CUBEB_ERROR_INVALID_PARAMETER;
+  }
+  free(collection->device);
+  collection->device = NULL;
+  collection->count = 0;
+  return CUBEB_OK;
+}
+
+void cubeb_destroy(cubeb * context) {
+  free(context);
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(cubeb_stub.c) returned error: %v", err)
+	}
+}
+
 func TestFormatNativeBuildErrorReportsMissingLibrariesClearly(t *testing.T) {
 	err := errors.New("link failed")
 
@@ -258,6 +623,50 @@ func TestFormatNativeBuildErrorReportsMissingHeadersClearly(t *testing.T) {
 	gccStyle := formatNativeBuildError(err, "fatal error: webkit2/webkit2.h: No such file or directory")
 	if !strings.Contains(gccStyle.Error(), "native header dependency missing for webkit2/webkit2.h") {
 		t.Fatalf("expected gcc missing header diagnostic, got: %v", gccStyle)
+	}
+}
+
+func TestFormatNativeBuildErrorReportsMissingTargetSDKHeadersClearly(t *testing.T) {
+	err := errors.New("compile failed")
+
+	clangStyle := formatNativeBuildError(err, "fatal error: 'stdio.h' file not found")
+	if !strings.Contains(clangStyle.Error(), "native target SDK or C runtime headers missing for stdio.h") {
+		t.Fatalf("expected stdio.h SDK diagnostic, got: %v", clangStyle)
+	}
+
+	libcStyle := formatNativeBuildError(err, "fatal error: bits/libc-header-start.h: No such file or directory")
+	if !strings.Contains(libcStyle.Error(), "native target SDK or C runtime headers missing for bits/libc-header-start.h") {
+		t.Fatalf("expected libc header SDK diagnostic, got: %v", libcStyle)
+	}
+
+	windowsStyle := formatNativeBuildError(err, "fatal error: 'windows.h' file not found")
+	if !strings.Contains(windowsStyle.Error(), "native target SDK or C runtime headers missing for windows.h") {
+		t.Fatalf("expected windows.h SDK diagnostic, got: %v", windowsStyle)
+	}
+}
+
+func TestFormatNativeBuildErrorReportsTargetSpecificSDKHintsClearly(t *testing.T) {
+	err := errors.New("compile failed")
+
+	darwinStyle := formatNativeBuildErrorForTarget(err, "fatal error: 'stdio.h' file not found", "arm64-apple-darwin")
+	if !strings.Contains(darwinStyle.Error(), "Apple SDK/sysroot") {
+		t.Fatalf("expected darwin SDK hint, got: %v", darwinStyle)
+	}
+	if !strings.Contains(darwinStyle.Error(), "xcrun/SDKROOT") {
+		t.Fatalf("expected darwin xcrun/SDKROOT hint, got: %v", darwinStyle)
+	}
+
+	windowsStyle := formatNativeBuildErrorForTarget(err, "fatal error: 'windows.h' file not found", "x86_64-pc-windows-msvc")
+	if !strings.Contains(windowsStyle.Error(), "Windows SDK") {
+		t.Fatalf("expected windows SDK hint, got: %v", windowsStyle)
+	}
+	if !strings.Contains(windowsStyle.Error(), "MSVC/clang-cl environment") {
+		t.Fatalf("expected windows MSVC hint, got: %v", windowsStyle)
+	}
+
+	linuxStyle := formatNativeBuildErrorForTarget(err, "fatal error: 'stdio.h' file not found", "aarch64-unknown-linux-gnu")
+	if !strings.Contains(linuxStyle.Error(), "target libc/sysroot") {
+		t.Fatalf("expected linux sysroot hint, got: %v", linuxStyle)
 	}
 }
 
@@ -828,6 +1237,58 @@ function main(args) {
 	}
 }
 
+func TestBuildExecutablePreservesModuleStateAcrossLocalScopeExit(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	result, err := compiler.Compile(`
+var savedObject = undefined;
+var savedArray = undefined;
+
+function seedState() {
+  var localObject = { label: "module-object", count: 2 };
+  var localArray = [localObject, 7];
+  savedObject = localObject;
+  savedArray = localArray;
+}
+
+function main(args) {
+  seedState();
+  savedObject.count = savedObject.count + 5;
+  console.log("module-object:" + savedObject.label + ":" + savedObject.count);
+  console.log("module-array:" + savedArray.length + ":" + savedArray[0].count + ":" + savedArray[1]);
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(t.TempDir(), "module-state-lifetime-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{"module-object:module-object:7", "module-array:2:7:7"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected module-state lifetime output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
 func TestBuildExecutablePreservesNestedContainerAliases(t *testing.T) {
 	tc, err := DetectToolchain()
 	if err != nil {
@@ -930,6 +1391,257 @@ function main(args) {
 	}
 }
 
+func TestBuildExecutablePreservesPreviousValuesAcrossContainerReplacement(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	result, err := compiler.Compile(`
+function main(args) {
+  var oldObject = { count: 2 };
+  var oldArrayValue = { count: 4 };
+  var box = { value: oldObject };
+  var items = [oldArrayValue];
+
+  box.value = { count: 9 };
+  items[0] = { count: 8 };
+
+  oldObject.count = oldObject.count + 5;
+  oldArrayValue.count = oldArrayValue.count + 3;
+
+  console.log("old-object:" + oldObject.count);
+  console.log("new-object:" + box.value.count);
+  console.log("old-array:" + oldArrayValue.count);
+  console.log("new-array:" + items[0].count);
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(t.TempDir(), "container-replacement-lifetime-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{"old-object:7", "new-object:9", "old-array:7", "new-array:8"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected replacement lifetime output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableContainerReplacementDoesNotFinalizeExternallyAliasedValues(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, closeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function main(args) {
+  resetCleanupLog();
+  const oldObject = makeProbe("old-object");
+  const oldArrayValue = makeProbe("old-array");
+  const box = { value: oldObject };
+  const items = [oldArrayValue];
+
+  box.value = { replacement: true };
+  items[0] = { replacement: true };
+
+  console.log("after-replace:" + cleanupLog() + ":" + (oldObject != null) + ":" + (oldArrayValue != null));
+  console.log("close-object:" + closeProbe(oldObject) + ":" + cleanupLog());
+  console.log("close-array:" + closeProbe(oldArrayValue) + ":" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "container-replacement-alias-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"after-replace::true:true",
+		"close-object:true:old-object;",
+		"close-array:true:old-object;old-array;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected container replacement alias-cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableContainerRemovalDoesNotFinalizeExternallyAliasedValues(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, closeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function main(args) {
+  resetCleanupLog();
+  const removedObject = makeProbe("removed-object");
+  const removedArray = makeProbe("removed-array");
+  const box = { value: removedObject };
+  const items = [removedArray];
+  const alias = items[0];
+
+  delete box.value;
+  items.pop();
+
+  console.log("after-remove:" + cleanupLog() + ":" + (removedObject != null) + ":" + (alias != null));
+  console.log("close-object:" + closeProbe(removedObject) + ":" + cleanupLog());
+  console.log("close-array:" + closeProbe(alias) + ":" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "container-removal-alias-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"after-remove::true:true",
+		"close-object:true:removed-object;",
+		"close-array:true:removed-object;removed-array;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected container removal alias-cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableDestructuredAliasesSurviveContainerRemoval(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, closeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function main(args) {
+  resetCleanupLog();
+  const objectProbe = makeProbe("destructured-object");
+  const arrayProbe = makeProbe("destructured-array");
+  const box = { value: objectProbe };
+  const items = [arrayProbe];
+  const { value: objectAlias } = box;
+  const [arrayAlias] = items;
+
+  delete box.value;
+  items.pop();
+
+  console.log("after-remove:" + cleanupLog() + ":" + (objectAlias != null) + ":" + (arrayAlias != null));
+  console.log("close-object:" + closeProbe(objectAlias) + ":" + cleanupLog());
+  console.log("close-array:" + closeProbe(arrayAlias) + ":" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructured-container-removal-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"after-remove::true:true",
+		"close-object:true:destructured-object;",
+		"close-array:true:destructured-object;destructured-array;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected destructured removal output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
 func TestBuildExecutablePreservesClosuresAcrossComplexControlFlow(t *testing.T) {
 	tc, err := DetectToolchain()
 	if err != nil {
@@ -982,6 +1694,696 @@ function main(args) {
 	for _, want := range []string{"count:4", "values:0,2,3,4"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected complex control-flow closure output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableReleasesCapturedValuesWhenClosureEnvironmentDies(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function exerciseClosureCleanup() {
+  var closure = (() => {
+    const captured = makeProbe("captured-closure");
+    return () => captured;
+  })();
+
+  const alias = closure();
+  console.log("during-closure:" + cleanupLog() + ":" + (alias != null));
+}
+
+function main(args) {
+  resetCleanupLog();
+  console.log("before-closure:" + cleanupLog());
+  exerciseClosureCleanup();
+  console.log("after-closure:" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "closure-environment-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"before-closure:",
+		"during-closure::true",
+		"after-closure:captured-closure;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected closure-environment cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func prepareCleanupProbePackage(t *testing.T, workdir string) {
+	t.Helper()
+
+	pkgDir := filepath.Join(workdir, "node_modules", "@jayess", "cleanupprobe")
+	nativeDir := filepath.Join(pkgDir, "native")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"@jayess/cleanupprobe","main":"./index.js"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "index.js"), []byte(`
+import { makeProbeNative, closeProbeNative, cleanupLogNative, resetCleanupLogNative } from "./native/cleanupprobe.bind.js";
+
+export function makeProbe(label) {
+  return makeProbeNative(label);
+}
+
+export function closeProbe(value) {
+  return closeProbeNative(value);
+}
+
+export function cleanupLog() {
+  return cleanupLogNative();
+}
+
+export function resetCleanupLog() {
+  return resetCleanupLogNative();
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "cleanupprobe.bind.js"), []byte(`
+export const makeProbeNative = f;
+export const closeProbeNative = f;
+export const cleanupLogNative = f;
+export const resetCleanupLogNative = f;
+
+export default {
+  sources: ["./cleanupprobe.c"],
+  exports: {
+    makeProbeNative: { symbol: "jayess_cleanup_probe_make_native", type: "function", borrowsArgs: true },
+    closeProbeNative: { symbol: "jayess_cleanup_probe_close_native", type: "function" },
+    cleanupLogNative: { symbol: "jayess_cleanup_probe_log_native", type: "function" },
+    resetCleanupLogNative: { symbol: "jayess_cleanup_probe_reset_native", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "cleanupprobe.c"), []byte(`
+#include "jayess_runtime.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+struct jayess_cleanup_probe {
+  char *label;
+};
+
+static char jayess_cleanup_probe_log[256];
+
+static char *jayess_cleanup_probe_dup(const char *text) {
+  size_t length;
+  char *copy;
+  if (text == NULL) {
+    text = "";
+  }
+  length = strlen(text);
+  copy = (char *)malloc(length + 1);
+  if (copy == NULL) {
+    return NULL;
+  }
+  memcpy(copy, text, length + 1);
+  return copy;
+}
+
+static void jayess_cleanup_probe_append(const char *label) {
+  size_t current = strlen(jayess_cleanup_probe_log);
+  size_t extra = label != NULL ? strlen(label) : 0;
+  if (current + extra + 2 >= sizeof(jayess_cleanup_probe_log)) {
+    return;
+  }
+  if (extra > 0) {
+    memcpy(jayess_cleanup_probe_log + current, label, extra);
+    current += extra;
+  }
+  jayess_cleanup_probe_log[current++] = ';';
+  jayess_cleanup_probe_log[current] = '\0';
+}
+
+static void jayess_cleanup_probe_finalizer(void *handle) {
+  struct jayess_cleanup_probe *probe = (struct jayess_cleanup_probe *)handle;
+  if (probe == NULL) {
+    return;
+  }
+  jayess_cleanup_probe_append(probe->label);
+  free(probe->label);
+  free(probe);
+}
+
+jayess_value *jayess_cleanup_probe_make_native(jayess_value *label) {
+  const char *text = jayess_expect_string(label, "cleanup probe label");
+  struct jayess_cleanup_probe *probe;
+  if (jayess_has_exception()) {
+    return jayess_value_undefined();
+  }
+  probe = (struct jayess_cleanup_probe *)calloc(1, sizeof(struct jayess_cleanup_probe));
+  if (probe == NULL) {
+    return jayess_value_undefined();
+  }
+  probe->label = jayess_cleanup_probe_dup(text);
+  if (probe->label == NULL) {
+    free(probe);
+    return jayess_value_undefined();
+  }
+  return jayess_value_from_managed_native_handle("CleanupProbe", probe, jayess_cleanup_probe_finalizer);
+}
+
+jayess_value *jayess_cleanup_probe_close_native(jayess_value *value) {
+  return jayess_value_from_bool(jayess_value_close_native_handle(value));
+}
+
+jayess_value *jayess_cleanup_probe_log_native(void) {
+  return jayess_value_from_string(jayess_cleanup_probe_log);
+}
+
+jayess_value *jayess_cleanup_probe_reset_native(void) {
+  jayess_cleanup_probe_log[0] = '\0';
+  return jayess_value_undefined();
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+}
+
+func TestBuildExecutableDestroysValuesAtLexicalScopeExitByDefault(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function main(args) {
+  resetCleanupLog();
+  console.log("before-scope:" + cleanupLog());
+  {
+    const scoped = makeProbe("lexical-scope");
+    console.log("during-scope:" + cleanupLog() + ":" + (scoped != null));
+  }
+  console.log("after-scope:" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "lexical-scope-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"before-scope:",
+		"during-scope::true",
+		"after-scope:lexical-scope;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected lexical-scope cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableCleansUpEligibleDynamicLocalsOnScopeExit(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, closeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+class FreshBox {}
+class PlainCtorBox {
+  constructor() {
+    this.kind = "plain";
+  }
+}
+
+class FreshReturnCtorBox {
+  constructor() {
+    return { kind: "alt-fresh" };
+  }
+}
+
+function innerReturn() {
+  const value = makeProbe("return");
+  return 7;
+}
+
+function freshObjectTemp() {
+  return { kind: "fresh-call" };
+}
+
+function freshInvokeObject() {
+  return { kind: "invoke-fresh" };
+}
+
+function freshBox() {
+  return new FreshBox();
+}
+
+function freshSwitchCase() {
+  switch ("case-" + "a") {
+    case "case-a":
+      break;
+    case "case-b":
+      break;
+  }
+}
+
+function boundOffset(offset, x) {
+  return x + offset;
+}
+
+function largeOffset(x) {
+  return x + 20;
+}
+
+function boundGreaterThan(min, x) {
+  return x > min;
+}
+
+function boundEquals(expected, x) {
+  return x == expected;
+}
+
+function boundPairSum(a, b, x) {
+  return x + a + b;
+}
+
+function boundBetween(min, max, x) {
+  return x > min && x < max;
+}
+
+function boundTripleEquals(a, b, x) {
+  return x == a + b;
+}
+
+function boundTripleSum(a, b, c, x) {
+  return x + a + b + c;
+}
+
+function boundWindow(min, mid, max, x) {
+  return x > min && x < max && x != mid;
+}
+
+function boundQuadEquals(a, b, c, x) {
+  return x == a + b + c;
+}
+
+function boundQuadSum(a, b, c, d, x) {
+  return x + a + b + c + d;
+}
+
+function boundOuterWindow(min, low, high, max, x) {
+  return x > min && x >= low && x < max && x != high;
+}
+
+function boundQuintEquals(a, b, c, d, x) {
+  return x == a + b + c + d;
+}
+
+function boundQuintSum(a, b, c, d, e, x) {
+  return x + a + b + c + d + e;
+}
+
+function boundSextEquals(a, b, c, d, e, x) {
+  return x == a + b + c + d + e;
+}
+
+function boundSextSum(a, b, c, d, e, f, x) {
+  return x + a + b + c + d + e + f;
+}
+
+function boundSeptEquals(a, b, c, d, e, f, x) {
+  return x == a + b + c + d + e + f;
+}
+
+function boundSeptSum(a, b, c, d, e, f, g, x) {
+  return x + a + b + c + d + e + f + g;
+}
+
+function boundOctEquals(a, b, c, d, e, f, g, x) {
+  return x == a + b + c + d + e + f + g;
+}
+
+function boundOctSum(a, b, c, d, e, f, g, h, x) {
+  return x + a + b + c + d + e + f + g + h;
+}
+
+function boundNonetEquals(a, b, c, d, e, f, g, h, x) {
+  return x == a + b + c + d + e + f + g + h;
+}
+
+function boundNonetSum(a, b, c, d, e, f, g, h, i, x) {
+  return x + a + b + c + d + e + f + g + h + i;
+}
+
+function boundDecetEquals(a, b, c, d, e, f, g, h, i, x) {
+  return x == a + b + c + d + e + f + g + h + i;
+}
+
+function boundDecetSum(a, b, c, d, e, f, g, h, i, j, x) {
+  return x + a + b + c + d + e + f + g + h + i + j;
+}
+
+function boundUndecEquals(a, b, c, d, e, f, g, h, i, j, x) {
+  return x == a + b + c + d + e + f + g + h + i + j;
+}
+
+function boundUndecSum(a, b, c, d, e, f, g, h, i, j, k, x) {
+  return x + a + b + c + d + e + f + g + h + i + j + k;
+}
+
+function boundDuodecEquals(a, b, c, d, e, f, g, h, i, j, k, l, x) {
+  return x == a + b + c + d + e + f + g + h + i + j + k + l;
+}
+
+function boundDuodecSum(a, b, c, d, e, f, g, h, i, j, k, l, x) {
+  return x + a + b + c + d + e + f + g + h + i + j + k + l;
+}
+
+function boundTridecSum(a, b, c, d, e, f, g, h, i, j, k, l, m, x) {
+  return x + a + b + c + d + e + f + g + h + i + j + k + l + m;
+}
+
+function numericSlowPathMap() {
+  const items = [1, 2];
+  const mapped = items.map(boundTridecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1));
+  console.log("slow-numeric-map:" + mapped[0] + "," + mapped[1]);
+}
+
+
+function functionScopedCleanup() {
+  var scoped = makeProbe("function-var");
+  console.log("during-function-var:" + cleanupLog());
+  return 11;
+}
+
+function loopVarFunctionScopedCleanup() {
+  for (var n = 0; n < 3; n = n + 1) {
+    var scoped = makeProbe("loop-var" + n);
+  }
+  return 13;
+}
+
+function discardedFreshTemporaries() {
+  freshObjectTemp();
+  freshSwitchCase();
+  (() => "fresh-fn");
+  new PlainCtorBox();
+  new FreshReturnCtorBox();
+  ({ name: "kimchi" });
+  ({ answer: 41 }).answer;
+  ({ label: "index" })["label"];
+  ({ maybe: "opt-member" })?.maybe;
+  ({ maybe: "opt-index" })?.["maybe"];
+  "soup".length;
+  [1, 2, 3];
+  `+"`soup${1}`"+`;
+  "left" + "right";
+  ~1;
+  1n & 3n;
+  1n === 1n;
+  ("cmp-left" + "x") === ("cmp-right" + "y");
+  !("not-left" + "right");
+  ("and-left" + "x") && ("and-right" + "y");
+  ("or-left" + "x") || ("or-right" + "y");
+  typeof ("type" + "of");
+  freshBox() instanceof FreshBox;
+  ("ok" is "ok" | "error");
+  ([1, "ok"] is [number, string]);
+  ({ kind: "ok", value: 3 } is { kind: "ok", value: number } | { kind: "error", message: string });
+  true ? ({ kind: "conditional" }) : ({ kind: "fallback" });
+  null ?? ({ kind: "nullish" });
+  (({ kind: "comma-left" }), ({ kind: "comma-right" }));
+  freshInvokeObject.bind(null);
+  freshInvokeObject.call(null);
+  freshInvokeObject.apply(null, []);
+  [1, 2].forEach((x) => 0);
+  [1, 2].map((x) => x + 1);
+  [1, 2].filter((x) => x > 0);
+  [1, 2].find((x) => false);
+  [1, 2].forEach(boundOffset.bind(null, 1));
+  [1, 2].forEach(boundOffset.bind(null, 20));
+  [1, 2].forEach(largeOffset);
+  [1, 2].map(boundOffset.bind(null, 1));
+  [1, 2].map(boundOffset.bind(null, 20));
+  [1, 2].filter(largeOffset);
+  [1, 2].filter(boundGreaterThan.bind(null, 0));
+  [1, 2].filter(boundOffset.bind(null, 20));
+  [1, 2].find(largeOffset);
+  [1, 2].find(boundEquals.bind(null, 9));
+  [1, 2].find(boundOffset.bind(null, 20));
+  [1, 2].forEach(boundPairSum.bind(null, 1, 2));
+  [1, 2].map(boundPairSum.bind(null, 1, 2));
+  [1, 2].map(boundPairSum.bind(null, 10, 10));
+  [1, 2].filter(boundBetween.bind(null, 0, 3));
+  [1, 2].find(boundPairSum.bind(null, 10, 10));
+  [1, 2].find(boundTripleEquals.bind(null, 4, 5));
+  [1, 2].forEach(boundTripleSum.bind(null, 1, 2, 3));
+  [1, 2].forEach(boundPairSum.bind(null, 10, 10));
+  [1, 2].map(boundTripleSum.bind(null, 1, 2, 3));
+  [1, 2].map(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].filter(boundWindow.bind(null, 0, 1, 3));
+  [1, 2].filter(boundPairSum.bind(null, 10, 10));
+  [1, 2].find(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].find(boundQuadEquals.bind(null, 3, 4, 5));
+  [1, 2].forEach(boundQuadSum.bind(null, 1, 2, 3, 4));
+  [1, 2].forEach(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].forEach(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].map(boundQuadSum.bind(null, 1, 2, 3, 4));
+  [1, 2].filter(boundOuterWindow.bind(null, 0, 1, 4, 3));
+  [1, 2].filter(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].filter(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].find(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].forEach(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].map(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].find(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].find(boundQuintEquals.bind(null, 30, 30, 30, 30, 30));
+  [1, 2].find(boundQuintEquals.bind(null, 3, 4, 5, 6));
+  [1, 2].forEach(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSextEquals.bind(null, 40, 40, 40, 40, 40, 40));
+  [1, 2].forEach(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSeptEquals.bind(null, 50, 50, 50, 50, 50, 50, 50));
+  [1, 2].forEach(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundOctEquals.bind(null, 60, 60, 60, 60, 60, 60, 60, 60));
+  [1, 2].forEach(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundNonetEquals.bind(null, 70, 70, 70, 70, 70, 70, 70, 70, 70));
+  [1, 2].forEach(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDecetEquals.bind(null, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80));
+  [1, 2].forEach(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundUndecEquals.bind(null, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90));
+  [1, 2].forEach(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDuodecEquals.bind(null, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100));
+}
+
+function main(args) {
+  resetCleanupLog();
+  {
+    const scoped = makeProbe("block");
+    console.log("during-block:" + cleanupLog());
+  }
+  console.log("after-block:" + cleanupLog());
+  resetCleanupLog();
+  {
+    const closed = makeProbe("manual-close");
+    console.log("manual-close-call:" + closeProbe(closed) + ":" + cleanupLog());
+  }
+  console.log("after-manual-close:" + cleanupLog());
+  resetCleanupLog();
+  console.log("before-function-var:" + cleanupLog());
+  functionScopedCleanup();
+  console.log("after-function-var:" + cleanupLog());
+  resetCleanupLog();
+  loopVarFunctionScopedCleanup();
+  console.log("after-loop-var-function:" + cleanupLog());
+  discardedFreshTemporaries();
+  numericSlowPathMap();
+  resetCleanupLog();
+  console.log("before-return:" + cleanupLog());
+  innerReturn();
+  console.log("after-return:" + cleanupLog());
+  resetCleanupLog();
+  try {
+    const thrown = makeProbe("throw");
+    throw "boom";
+  } catch (err) {
+    console.log("after-throw:" + cleanupLog() + ":" + err);
+  }
+  resetCleanupLog();
+  for (var i = 0; i < 4; i = i + 1) {
+    const loopScoped = makeProbe("continue" + i);
+    if (i == 1) {
+      continue;
+    }
+    if (i == 2) {
+      break;
+    }
+  }
+  console.log("after-loop:" + cleanupLog());
+  resetCleanupLog();
+  for (var j = 0; j < 1; j = j + 1) {
+    const outerBreak = makeProbe("outer-break");
+    {
+      const innerBreak = makeProbe("inner-break");
+      break;
+    }
+  }
+  console.log("after-complex-break:" + cleanupLog());
+  resetCleanupLog();
+  for (var k = 0; k < 1; k = k + 1) {
+    const outerContinue = makeProbe("outer-continue");
+    {
+      const innerContinue = makeProbe("inner-continue");
+      continue;
+    }
+  }
+  console.log("after-complex-continue:" + cleanupLog());
+  resetCleanupLog();
+  for (var m = 0; m < 1; m = m + 1) {
+    const outerThrow = makeProbe("outer-throw");
+    try {
+      const innerThrow = makeProbe("inner-throw");
+      throw "nested";
+    } catch (err) {
+      console.log("during-complex-throw:" + cleanupLog() + ":" + err);
+    }
+  }
+  console.log("after-complex-throw:" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "scope-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled scope cleanup program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"during-block:",
+		"after-block:block;",
+		"manual-close-call:true:manual-close;",
+		"after-manual-close:manual-close;",
+		"before-function-var:",
+		"during-function-var:",
+		"after-function-var:function-var;",
+		"after-loop-var-function:loop-var0;loop-var1;loop-var2;",
+		"slow-numeric-map:14,15",
+		"before-return:",
+		"after-return:return;",
+		"after-throw:throw;:boom",
+		"after-loop:continue0;continue1;continue2;",
+		"after-complex-break:inner-break;outer-break;",
+		"after-complex-continue:inner-continue;outer-continue;",
+		"during-complex-throw:inner-throw;:nested",
+		"after-complex-throw:inner-throw;outer-throw;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected scope cleanup output to contain %q, got: %s", want, text)
 		}
 	}
 }
@@ -1041,6 +2443,100 @@ function main(args) {
 	for _, want := range []string{"first:0", "last:57", "total:570"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected nested-scope closure stress output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutablePreservesEscapingLocalsAcrossReturnsContainersAndClosures(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	result, err := compiler.Compile(`
+var globalBox = undefined;
+
+function makeReturnedObject() {
+  var local = { label: "object-ok", nested: { value: 41 } };
+  return local;
+}
+
+function makeReturnedArray() {
+  var local = [3, 4, 5];
+  return local;
+}
+
+function makeStoredObject() {
+  var local = { value: "stored-object" };
+  var holder = {};
+  holder.item = local;
+  return holder;
+}
+
+function makeStoredArray() {
+  var local = { value: "stored-array" };
+  var holder = [];
+  holder[0] = local;
+  return holder;
+}
+
+function makeClosure() {
+  var local = { value: 9 };
+  return () => local.value + 1;
+}
+
+function seedGlobal() {
+  var local = { value: "global-object" };
+  globalBox = local;
+}
+
+function main(args) {
+  var returnedObject = makeReturnedObject();
+  var returnedArray = makeReturnedArray();
+  var storedObject = makeStoredObject();
+  var storedArray = makeStoredArray();
+  var closure = makeClosure();
+  seedGlobal();
+
+  console.log("escape-object:" + returnedObject.label + ":" + returnedObject.nested.value);
+  console.log("escape-array:" + returnedArray.length + ":" + returnedArray[0] + ":" + returnedArray[2]);
+  console.log("escape-stored-object:" + storedObject.item.value);
+  console.log("escape-stored-array:" + storedArray[0].value);
+  console.log("escape-closure:" + closure());
+  console.log("escape-global:" + globalBox.value);
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(t.TempDir(), "escaping-locals-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"escape-object:object-ok:41",
+		"escape-array:3:3:5",
+		"escape-stored-object:stored-object",
+		"escape-stored-array:stored-array",
+		"escape-closure:10",
+		"escape-global:global-object",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected escaping-locals output to contain %q, got: %s", want, text)
 		}
 	}
 }
@@ -1404,6 +2900,10 @@ function main(args) {
   ints[0] = 1065353216;
   ints[1] = -1082130432;
   console.log("f32:" + floats[0] + ":" + floats[1]);
+  var intsBuffer = ints.buffer;
+  var viaBuffer = new Int32Array(intsBuffer);
+  viaBuffer[1] = 1077936128;
+  console.log("buffer-alias:" + intsBuffer.byteLength + ":" + ints[1] + ":" + floats[1]);
 
   var f64 = new Float64Array(1);
   f64[0] = 3.5;
@@ -1434,6 +2934,7 @@ function main(args) {
 		"u16:3:6:513:7:8",
 		"u16-slice:7:8",
 		"f32:1:-1",
+		"buffer-alias:8:1.07794e+09:3",
 		"f64:3.5",
 		"copy:513:7:2",
 	} {
@@ -1630,6 +3131,160 @@ function main(args) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected iterable protocol output to contain %q, got: %s", want, text)
 		}
+	}
+}
+
+func TestBuildExecutableSupportsFunctionBindCallApplyMethods(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	result, err := compiler.Compile(`
+function greet(name) {
+  return "hi:" + name;
+}
+
+function join(prefix, value) {
+  return prefix + ":" + value;
+}
+
+function main(args) {
+  const bound = greet.bind(null, "kimchi");
+  console.log("bind:" + bound());
+  console.log("call:" + greet.call(null, "mandu"));
+  console.log("apply:" + greet.apply(null, ["bibim"]));
+  const inc = join.bind(null, "left");
+  console.log("partial:" + inc("right"));
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(t.TempDir(), "function-bind-call-apply-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"bind:hi:kimchi",
+		"call:hi:mandu",
+		"apply:hi:bibim",
+		"partial:left:right",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected function bind/call/apply output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsHighArityBoundArrayMapAndFind(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	result, err := compiler.Compile(`
+function boundTridecSum(a, b, c, d, e, f, g, h, i, j, k, l, m, x) {
+  return x + a + b + c + d + e + f + g + h + i + j + k + l + m;
+}
+
+function boundTridecEquals(a, b, c, d, e, f, g, h, i, j, k, l, expected, x) {
+  return x == expected;
+}
+
+function main(args) {
+  const items = [1, 2];
+  const mapped = items.map(boundTridecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1));
+  const found = items.find(boundTridecEquals.bind(null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2));
+  console.log("mapped:" + mapped[0] + "," + mapped[1]);
+  console.log("found:" + found);
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(t.TempDir(), "high-arity-array-callbacks-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"mapped:14,15",
+		"found:2",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected high-arity bound array callback output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableConstructorCanReturnAlternateObject(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	result, err := compiler.Compile(`
+class Box {
+  constructor() {
+    return { aliased: "yes" };
+  }
+}
+
+function main(args) {
+  const value = new Box();
+  console.log("ctor-alias:" + value.aliased);
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(t.TempDir(), "constructor-alias-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	if !strings.Contains(string(out), "ctor-alias:yes") {
+		t.Fatalf("expected constructor alternate return output, got: %s", string(out))
 	}
 }
 
@@ -2464,12 +4119,27 @@ function main(args) {
   sleep(5);
   var finish = process.hrtime();
   var cpu = process.cpuInfo();
+  var beforeMemory = process.memoryInfo();
+  var objectValue = { answer: "ok" };
+  var arrayValue = [objectValue, "value"];
+  var functionValue = function() { return arrayValue; };
   var memory = process.memoryInfo();
   var user = process.userInfo();
   console.log("uptime:" + (uptime >= 0));
   console.log("hrtime:" + (start > 0) + ":" + (finish > start));
   console.log("cpu:" + (cpu.count >= 1) + ":" + (typeof cpu.arch));
   console.log("memory:" + (memory.total >= 0) + ":" + (memory.available >= 0));
+  console.log("jayess-memory:" +
+    (typeof memory.jayess.boxedValues) + ":" +
+    (memory.jayess.boxedValues > beforeMemory.jayess.boxedValues) + ":" +
+    (memory.jayess.objects > beforeMemory.jayess.objects) + ":" +
+    (memory.jayess.objectEntries > beforeMemory.jayess.objectEntries) + ":" +
+    (memory.jayess.arrays > beforeMemory.jayess.arrays) + ":" +
+    (memory.jayess.arraySlots > beforeMemory.jayess.arraySlots) + ":" +
+    (memory.jayess.functions > beforeMemory.jayess.functions) + ":" +
+    (memory.jayess.strings >= beforeMemory.jayess.strings) + ":" +
+    (memory.jayess.nativeHandleWrappers >= 0) + ":" +
+    (typeof functionValue));
   console.log("user:" + (typeof user.username) + ":" + (typeof user.home));
   return 0;
 }
@@ -2495,6 +4165,7 @@ function main(args) {
 		"hrtime:true:true",
 		"cpu:true:string",
 		"memory:true:true",
+		"jayess-memory:number:true:true:true:true:true:true:true:true:function",
 		"user:string:string",
 	} {
 		if !strings.Contains(text, want) {
@@ -2688,8 +4359,24 @@ function main(args) {
 	if !strings.HasPrefix(text, "perms:") {
 		t.Fatalf("expected permissions output, got: %s", text)
 	}
-	if strings.TrimPrefix(text, "perms:") == "" {
+	perms := strings.TrimPrefix(text, "perms:")
+	if perms == "" {
 		t.Fatalf("expected non-empty permissions text, got: %s", text)
+	}
+	if runtime.GOOS == "windows" {
+		if perms != "rwx" {
+			t.Fatalf("expected normalized windows permissions to be %q, got %q", "rwx", perms)
+		}
+	} else {
+		if len(perms) != 9 {
+			t.Fatalf("expected POSIX-style permission text length 9, got %q", perms)
+		}
+		for i, ch := range perms {
+			valid := ch == 'r' || ch == 'w' || ch == 'x' || ch == '-'
+			if !valid {
+				t.Fatalf("unexpected permission character %q at index %d in %q", ch, i, perms)
+			}
+		}
 	}
 }
 
@@ -2934,8 +4621,10 @@ function main(args) {
   view.setUint16(3, 4660, true);
   view.setUint32(5, 66051, false);
   var viewBytes = new Uint8Array(viewBuffer);
+  var viewAlias = new Uint8Array(view.buffer);
+  viewAlias[8] = 9;
   console.log("data-view-bytes:" + viewBytes.toString("hex"));
-  console.log("data-view-read:" + view.getUint8(0) + ":" + view.getUint16(1, false) + ":" + view.getUint16(3, true) + ":" + view.getUint32(5, false));
+  console.log("data-view-read:" + view.getUint8(0) + ":" + view.getUint16(1, false) + ":" + view.getUint16(3, true) + ":" + view.getUint32(5, false) + ":" + viewAlias[8] + ":" + view.buffer.byteLength);
   var signedBuffer = new ArrayBuffer(8);
   var signedView = new DataView(signedBuffer);
   signedView.setInt8(0, -1);
@@ -2979,7 +4668,7 @@ function main(args) {
 		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
 	}
 	text := string(out)
-	for _, want := range []string{"true", "kim", "chi", "null", "finish-count:3", "finish-event:true", "finished", "finished-two", "finished-once", "finished-late", "finished-once-late", "data:kimchi", "ended", "once-data:kimchi", "once-end-count:1", "once-ended", "once-end-after:0", "read-error:", "read-error-two:", "read-error-once:", "error-count:2", "error-event:true", "bytes-write:true", "bytes-read:4:65:0:255:66", "bytes-slice:2:0:255", "bytes-includes:true:false", "bytes-text:AB", "bytes-end:null", "from-string:6:106:jayess:jayess", "hex-bytes:3:65:66:255:4142ff", "utf8-bytes:kimchi", "base64-bytes:6:kimchi:a2ltY2hp", "base64-pad:A:AB", "bytes-concat:6:kimchi", "bytes-concat-method:jayess", "bytes-equals-same", "bytes-equals-diff", "bytes-equals-static", "bytes-compare-equal:0", "bytes-compare-less:-1", "bytes-compare-greater:1", "bytes-index-of-byte:3:-1", "bytes-index-of-seq:3:-1", "bytes-prefix-suffix:true:true", "bytes-prefix-suffix-byte:true:true", "bytes-set:6:006b696d4142", "bytes-copy-within:ababcf", "bytes-copy-overlap:aabcde", "data-view-bytes:ff1234341200010203", "data-view-read:255:4660:4660:66051", "data-view-signed-bytes:fffffefdfffe1dc0", "data-view-signed-read:-1:-2:-3:-123456", "data-view-float-bytes:3fc0000000000000000004c0", "data-view-float-read:1.5:-2.5", "write-error:"} {
+	for _, want := range []string{"true", "kim", "chi", "null", "finish-count:3", "finish-event:true", "finished", "finished-two", "finished-once", "finished-late", "finished-once-late", "data:kimchi", "ended", "once-data:kimchi", "once-end-count:1", "once-ended", "once-end-after:0", "read-error:", "read-error-two:", "read-error-once:", "error-count:2", "error-event:true", "bytes-write:true", "bytes-read:4:65:0:255:66", "bytes-slice:2:0:255", "bytes-includes:true:false", "bytes-text:AB", "bytes-end:null", "from-string:6:106:jayess:jayess", "hex-bytes:3:65:66:255:4142ff", "utf8-bytes:kimchi", "base64-bytes:6:kimchi:a2ltY2hp", "base64-pad:A:AB", "bytes-concat:6:kimchi", "bytes-concat-method:jayess", "bytes-equals-same", "bytes-equals-diff", "bytes-equals-static", "bytes-compare-equal:0", "bytes-compare-less:-1", "bytes-compare-greater:1", "bytes-index-of-byte:3:-1", "bytes-index-of-seq:3:-1", "bytes-prefix-suffix:true:true", "bytes-prefix-suffix-byte:true:true", "bytes-set:6:006b696d4142", "bytes-copy-within:ababcf", "bytes-copy-overlap:aabcde", "data-view-bytes:ff1234341200010209", "data-view-read:255:4660:4660:66051:9:9", "data-view-signed-bytes:fffffefdfffe1dc0", "data-view-signed-read:-1:-2:-3:-123456", "data-view-float-bytes:3fc0000000000000000004c0", "data-view-float-read:1.5:-2.5", "write-error:"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected fs stream output to contain %q, got: %s", want, text)
 		}
@@ -3626,6 +5315,1335 @@ function main(args) {
 	}
 	if !strings.Contains(string(out), "11") {
 		t.Fatalf("expected bind output to contain 11, got: %s", string(out))
+	}
+}
+
+func TestBuildExecutableSupportsManualSDLAudioBindFiles(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	nativeDir := filepath.Join(workdir, "native")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "refs", "SDL", "include"),
+		filepath.Join(nativeDir, "sdl_include"),
+	)
+	if err := os.WriteFile(filepath.Join(nativeDir, "sdl_audio.c"), []byte(`#include "jayess_runtime.h"
+#include <SDL3/SDL.h>
+#include <string.h>
+#include <stdlib.h>
+
+typedef struct jayess_sdl_audio_device {
+    SDL_AudioDeviceID id;
+} jayess_sdl_audio_device;
+
+static void jayess_sdl_audio_device_finalize(void *handle) {
+    jayess_sdl_audio_device *device = (jayess_sdl_audio_device *)handle;
+    if (device == NULL) {
+        return;
+    }
+    if (device->id != 0) {
+        SDL_CloseAudioDevice(device->id);
+        device->id = 0;
+    }
+    free(device);
+}
+
+static const char *jayess_sdl_audio_format_text(SDL_AudioFormat format) {
+    if (format == SDL_AUDIO_F32) {
+        return "f32";
+    }
+    if (format == SDL_AUDIO_S16) {
+        return "s16";
+    }
+    return "unknown";
+}
+
+jayess_value *jayess_sdl_audio_init(void) {
+    return jayess_value_from_bool(SDL_InitSubSystem(SDL_INIT_AUDIO));
+}
+
+jayess_value *jayess_sdl_audio_quit(void) {
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    return jayess_value_from_bool(1);
+}
+
+jayess_value *jayess_sdl_audio_driver_count(void) {
+    return jayess_value_from_number((double)SDL_GetNumAudioDrivers());
+}
+
+jayess_value *jayess_sdl_audio_driver_name(jayess_value *index_value) {
+    int index = (int)jayess_value_to_number(index_value);
+    const char *name = SDL_GetAudioDriver(index);
+    if (name == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(name);
+}
+
+jayess_value *jayess_sdl_audio_current_driver(void) {
+    const char *name = SDL_GetCurrentAudioDriver();
+    if (name == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(name);
+}
+
+jayess_value *jayess_sdl_audio_open_default_playback(jayess_value *rate_value, jayess_value *channels_value) {
+    SDL_AudioSpec spec;
+    SDL_AudioDeviceID id = 0;
+    jayess_sdl_audio_device *device = NULL;
+    memset(&spec, 0, sizeof(spec));
+    spec.format = SDL_AUDIO_F32;
+    spec.freq = (int)jayess_value_to_number(rate_value);
+    spec.channels = (int)jayess_value_to_number(channels_value);
+    if (spec.freq <= 0 || spec.channels <= 0) {
+        jayess_throw_named_error("SDLAudioError", "SDL playback rate and channels must be positive");
+        return jayess_value_undefined();
+    }
+    id = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec);
+    if (id == 0) {
+        return jayess_value_undefined();
+    }
+    device = (jayess_sdl_audio_device *)calloc(1, sizeof(jayess_sdl_audio_device));
+    if (device == NULL) {
+        SDL_CloseAudioDevice(id);
+        return jayess_value_undefined();
+    }
+    device->id = id;
+    return jayess_value_from_managed_native_handle("SDLAudioDevice", device, jayess_sdl_audio_device_finalize);
+}
+
+jayess_value *jayess_sdl_audio_describe_playback(jayess_value *device_value) {
+    jayess_sdl_audio_device *device = (jayess_sdl_audio_device *)jayess_expect_native_handle(device_value, "SDLAudioDevice", "jayess_sdl_audio_describe_playback");
+    SDL_AudioSpec spec;
+    int sample_frames = 0;
+    jayess_object *object = NULL;
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    memset(&spec, 0, sizeof(spec));
+    if (!SDL_GetAudioDeviceFormat(device->id, &spec, &sample_frames)) {
+        return jayess_value_undefined();
+    }
+    object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(object, "format", jayess_value_from_string(jayess_sdl_audio_format_text(spec.format)));
+    jayess_object_set_value(object, "channels", jayess_value_from_number((double)spec.channels));
+    jayess_object_set_value(object, "freq", jayess_value_from_number((double)spec.freq));
+    jayess_object_set_value(object, "sampleFrames", jayess_value_from_number((double)sample_frames));
+    return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_sdl_audio_close_playback(jayess_value *device_value) {
+    return jayess_value_from_bool(jayess_value_close_native_handle(device_value));
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "sdl_audio_stub.c"), []byte(`#include <SDL3/SDL.h>
+
+static const char *jayess_sdl_current_audio_driver = NULL;
+static SDL_AudioDeviceID jayess_sdl_open_audio_device = 0;
+static SDL_AudioSpec jayess_sdl_last_spec;
+
+bool SDL_InitSubSystem(SDL_InitFlags flags) {
+    if ((flags & SDL_INIT_AUDIO) == 0) {
+        return false;
+    }
+    jayess_sdl_current_audio_driver = "stub-sdl-audio";
+    return true;
+}
+
+void SDL_QuitSubSystem(SDL_InitFlags flags) {
+    (void)flags;
+    jayess_sdl_current_audio_driver = NULL;
+    jayess_sdl_open_audio_device = 0;
+}
+
+int SDL_GetNumAudioDrivers(void) {
+    return 1;
+}
+
+const char *SDL_GetAudioDriver(int index) {
+    return index == 0 ? "stub-sdl-audio" : NULL;
+}
+
+const char *SDL_GetCurrentAudioDriver(void) {
+    return jayess_sdl_current_audio_driver;
+}
+
+SDL_AudioDeviceID SDL_OpenAudioDevice(SDL_AudioDeviceID devid, const SDL_AudioSpec *spec) {
+    if (jayess_sdl_current_audio_driver == NULL || spec == NULL || devid != SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK) {
+        return 0;
+    }
+    jayess_sdl_last_spec = *spec;
+    jayess_sdl_open_audio_device = 7;
+    return jayess_sdl_open_audio_device;
+}
+
+bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID devid, SDL_AudioSpec *spec, int *sample_frames) {
+    if (devid != jayess_sdl_open_audio_device || spec == NULL || sample_frames == NULL) {
+        return false;
+    }
+    *spec = jayess_sdl_last_spec;
+    *sample_frames = 256;
+    return true;
+}
+
+void SDL_CloseAudioDevice(SDL_AudioDeviceID devid) {
+    if (devid == jayess_sdl_open_audio_device) {
+        jayess_sdl_open_audio_device = 0;
+    }
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "sdl_audio.bind.js"), []byte(`const f = () => {};
+export const initAudio = f;
+export const quitAudio = f;
+export const getNumAudioDrivers = f;
+export const getAudioDriver = f;
+export const getCurrentAudioDriver = f;
+export const openDefaultPlayback = f;
+export const describePlayback = f;
+export const closePlayback = f;
+
+export default {
+  sources: ["./sdl_audio.c", "./sdl_audio_stub.c"],
+  includeDirs: ["./sdl_include"],
+  cflags: [],
+  ldflags: [],
+  exports: {
+    initAudio: { symbol: "jayess_sdl_audio_init", type: "function" },
+    quitAudio: { symbol: "jayess_sdl_audio_quit", type: "function" },
+    getNumAudioDrivers: { symbol: "jayess_sdl_audio_driver_count", type: "function" },
+    getAudioDriver: { symbol: "jayess_sdl_audio_driver_name", type: "function" },
+    getCurrentAudioDriver: { symbol: "jayess_sdl_audio_current_driver", type: "function" },
+    openDefaultPlayback: { symbol: "jayess_sdl_audio_open_default_playback", type: "function" },
+    describePlayback: { symbol: "jayess_sdl_audio_describe_playback", type: "function" },
+    closePlayback: { symbol: "jayess_sdl_audio_close_playback", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	mainPath := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(mainPath, []byte(`
+import { initAudio, quitAudio, getNumAudioDrivers, getAudioDriver, getCurrentAudioDriver, openDefaultPlayback, describePlayback, closePlayback } from "./native/sdl_audio.bind.js";
+
+function main(args) {
+  console.log("sdl-audio-init:" + initAudio());
+  console.log("sdl-audio-driver-count:" + getNumAudioDrivers());
+  console.log("sdl-audio-driver-0:" + getAudioDriver(0));
+  console.log("sdl-audio-current-driver:" + getCurrentAudioDriver());
+  var device = openDefaultPlayback(48000, 2);
+  console.log("sdl-audio-open:" + (device != undefined));
+  var info = describePlayback(device);
+  console.log("sdl-audio-format:" + info.format);
+  console.log("sdl-audio-freq:" + info.freq);
+  console.log("sdl-audio-channels:" + info.channels);
+  console.log("sdl-audio-sample-frames:" + info.sampleFrames);
+  console.log("sdl-audio-close:" + closePlayback(device));
+  try {
+    describePlayback(device);
+  } catch (err) {
+    console.log(err.name + ":" + err.message);
+  }
+  console.log("sdl-audio-quit:" + quitAudio());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "manual-sdl-audio-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled SDL audio bind program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"sdl-audio-init:true",
+		"sdl-audio-driver-count:1",
+		"sdl-audio-driver-0:stub-sdl-audio",
+		"sdl-audio-current-driver:stub-sdl-audio",
+		"sdl-audio-open:true",
+		"sdl-audio-format:f32",
+		"sdl-audio-freq:48000",
+		"sdl-audio-channels:2",
+		"sdl-audio-sample-frames:256",
+		"sdl-audio-close:true",
+		"TypeError:jayess_sdl_audio_describe_playback expects a SDLAudioDevice native handle",
+		"sdl-audio-quit:true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected SDL audio bind output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsManualOpenALBindFiles(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	nativeDir := filepath.Join(workdir, "native")
+	includeDir := filepath.Join(nativeDir, "include", "AL")
+	if err := os.MkdirAll(includeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(includeDir, "al.h"), []byte(`#pragma once
+typedef char ALchar;
+typedef int ALenum;
+#define AL_VENDOR 0xB001
+const ALchar *alGetString(ALenum param);
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(includeDir, "alc.h"), []byte(`#pragma once
+typedef char ALCchar;
+typedef int ALCenum;
+typedef int ALCint;
+typedef struct ALCdevice_struct ALCdevice;
+typedef struct ALCcontext_struct ALCcontext;
+#define ALC_DEFAULT_DEVICE_SPECIFIER 0x1004
+#define ALC_FREQUENCY 0x1007
+#define ALC_MONO_SOURCES 0x1010
+#define ALC_STEREO_SOURCES 0x1011
+ALCdevice *alcOpenDevice(const ALCchar *devicename);
+int alcCloseDevice(ALCdevice *device);
+const ALCchar *alcGetString(ALCdevice *device, ALCenum param);
+ALCcontext *alcCreateContext(ALCdevice *device, const ALCint *attrlist);
+void alcDestroyContext(ALCcontext *context);
+int alcMakeContextCurrent(ALCcontext *context);
+void alcGetIntegerv(ALCdevice *device, ALCenum param, ALCint size, ALCint *values);
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "openal.c"), []byte(`#include "jayess_runtime.h"
+#include <AL/al.h>
+#include <AL/alc.h>
+#include <stdlib.h>
+
+typedef struct jayess_openal_device {
+    ALCdevice *device;
+} jayess_openal_device;
+
+typedef struct jayess_openal_context {
+    ALCcontext *context;
+    ALCdevice *device;
+} jayess_openal_context;
+
+static void jayess_openal_device_finalize(void *handle) {
+    jayess_openal_device *device = (jayess_openal_device *)handle;
+    if (device == NULL) {
+        return;
+    }
+    if (device->device != NULL) {
+        alcCloseDevice(device->device);
+        device->device = NULL;
+    }
+    free(device);
+}
+
+static void jayess_openal_context_finalize(void *handle) {
+    jayess_openal_context *context = (jayess_openal_context *)handle;
+    if (context == NULL) {
+        return;
+    }
+    if (context->context != NULL) {
+        alcMakeContextCurrent(NULL);
+        alcDestroyContext(context->context);
+        context->context = NULL;
+    }
+    context->device = NULL;
+    free(context);
+}
+
+jayess_value *jayess_openal_default_device_name(void) {
+    const ALCchar *name = alcGetString(NULL, ALC_DEFAULT_DEVICE_SPECIFIER);
+    if (name == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(name);
+}
+
+jayess_value *jayess_openal_open_default_device(void) {
+    jayess_openal_device *device = NULL;
+    ALCdevice *opened = alcOpenDevice(NULL);
+    if (opened == NULL) {
+        return jayess_value_undefined();
+    }
+    device = (jayess_openal_device *)calloc(1, sizeof(jayess_openal_device));
+    if (device == NULL) {
+        alcCloseDevice(opened);
+        return jayess_value_undefined();
+    }
+    device->device = opened;
+    return jayess_value_from_managed_native_handle("OpenALDevice", device, jayess_openal_device_finalize);
+}
+
+jayess_value *jayess_openal_create_context(jayess_value *device_value) {
+    jayess_openal_device *device = (jayess_openal_device *)jayess_expect_native_handle(device_value, "OpenALDevice", "jayess_openal_create_context");
+    jayess_openal_context *context = NULL;
+    ALCcontext *created = NULL;
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    created = alcCreateContext(device->device, NULL);
+    if (created == NULL) {
+        return jayess_value_undefined();
+    }
+    context = (jayess_openal_context *)calloc(1, sizeof(jayess_openal_context));
+    if (context == NULL) {
+        alcDestroyContext(created);
+        return jayess_value_undefined();
+    }
+    context->context = created;
+    context->device = device->device;
+    return jayess_value_from_managed_native_handle("OpenALContext", context, jayess_openal_context_finalize);
+}
+
+jayess_value *jayess_openal_make_context_current(jayess_value *context_value) {
+    jayess_openal_context *context = (jayess_openal_context *)jayess_expect_native_handle(context_value, "OpenALContext", "jayess_openal_make_context_current");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_bool(alcMakeContextCurrent(context->context));
+}
+
+jayess_value *jayess_openal_vendor_name(void) {
+    const ALchar *vendor = alGetString(AL_VENDOR);
+    if (vendor == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(vendor);
+}
+
+jayess_value *jayess_openal_describe_context(jayess_value *context_value) {
+    jayess_openal_context *context = (jayess_openal_context *)jayess_expect_native_handle(context_value, "OpenALContext", "jayess_openal_describe_context");
+    ALCint frequency = 0;
+    ALCint mono_sources = 0;
+    ALCint stereo_sources = 0;
+    jayess_object *object = NULL;
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    alcGetIntegerv(context->device, ALC_FREQUENCY, 1, &frequency);
+    alcGetIntegerv(context->device, ALC_MONO_SOURCES, 1, &mono_sources);
+    alcGetIntegerv(context->device, ALC_STEREO_SOURCES, 1, &stereo_sources);
+    object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(object, "frequency", jayess_value_from_number((double)frequency));
+    jayess_object_set_value(object, "monoSources", jayess_value_from_number((double)mono_sources));
+    jayess_object_set_value(object, "stereoSources", jayess_value_from_number((double)stereo_sources));
+    return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_openal_close_context(jayess_value *context_value) {
+    return jayess_value_from_bool(jayess_value_close_native_handle(context_value));
+}
+
+jayess_value *jayess_openal_close_device(jayess_value *device_value) {
+    return jayess_value_from_bool(jayess_value_close_native_handle(device_value));
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "openal_stub.c"), []byte(`#include <AL/al.h>
+#include <AL/alc.h>
+#include <stdlib.h>
+
+struct ALCdevice_struct {
+    int open;
+};
+
+struct ALCcontext_struct {
+    ALCdevice *device;
+};
+
+static ALCcontext *jayess_openal_current_context = NULL;
+
+ALCdevice *alcOpenDevice(const ALCchar *devicename) {
+    ALCdevice *device = NULL;
+    if (devicename != NULL && devicename[0] != '\0') {
+        return NULL;
+    }
+    device = (ALCdevice *)calloc(1, sizeof(ALCdevice));
+    if (device != NULL) {
+        device->open = 1;
+    }
+    return device;
+}
+
+int alcCloseDevice(ALCdevice *device) {
+    if (device == NULL || !device->open) {
+        return 0;
+    }
+    if (jayess_openal_current_context != NULL && jayess_openal_current_context->device == device) {
+        jayess_openal_current_context = NULL;
+    }
+    device->open = 0;
+    free(device);
+    return 1;
+}
+
+const ALCchar *alcGetString(ALCdevice *device, ALCenum param) {
+    (void)device;
+    return param == ALC_DEFAULT_DEVICE_SPECIFIER ? "stub-openal-device" : NULL;
+}
+
+ALCcontext *alcCreateContext(ALCdevice *device, const ALCint *attrlist) {
+    ALCcontext *context = NULL;
+    (void)attrlist;
+    if (device == NULL || !device->open) {
+        return NULL;
+    }
+    context = (ALCcontext *)calloc(1, sizeof(ALCcontext));
+    if (context != NULL) {
+        context->device = device;
+    }
+    return context;
+}
+
+void alcDestroyContext(ALCcontext *context) {
+    if (jayess_openal_current_context == context) {
+        jayess_openal_current_context = NULL;
+    }
+    free(context);
+}
+
+int alcMakeContextCurrent(ALCcontext *context) {
+    jayess_openal_current_context = context;
+    return 1;
+}
+
+void alcGetIntegerv(ALCdevice *device, ALCenum param, ALCint size, ALCint *values) {
+    (void)size;
+    if (device == NULL || values == NULL || !device->open) {
+        return;
+    }
+    if (param == ALC_FREQUENCY) {
+        *values = 48000;
+    } else if (param == ALC_MONO_SOURCES) {
+        *values = 32;
+    } else if (param == ALC_STEREO_SOURCES) {
+        *values = 16;
+    }
+}
+
+const ALchar *alGetString(ALenum param) {
+    if (jayess_openal_current_context == NULL) {
+        return NULL;
+    }
+    return param == AL_VENDOR ? "stub-openal" : NULL;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "openal.bind.js"), []byte(`const f = () => {};
+export const getDefaultDeviceName = f;
+export const openDefaultDevice = f;
+export const createContext = f;
+export const makeContextCurrent = f;
+export const getVendorName = f;
+export const describeContext = f;
+export const closeContext = f;
+export const closeDevice = f;
+
+export default {
+  sources: ["./openal.c", "./openal_stub.c"],
+  includeDirs: ["./include"],
+  cflags: [],
+  ldflags: [],
+  exports: {
+    getDefaultDeviceName: { symbol: "jayess_openal_default_device_name", type: "function" },
+    openDefaultDevice: { symbol: "jayess_openal_open_default_device", type: "function" },
+    createContext: { symbol: "jayess_openal_create_context", type: "function" },
+    makeContextCurrent: { symbol: "jayess_openal_make_context_current", type: "function" },
+    getVendorName: { symbol: "jayess_openal_vendor_name", type: "function" },
+    describeContext: { symbol: "jayess_openal_describe_context", type: "function" },
+    closeContext: { symbol: "jayess_openal_close_context", type: "function" },
+    closeDevice: { symbol: "jayess_openal_close_device", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	mainPath := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(mainPath, []byte(`
+import { getDefaultDeviceName, openDefaultDevice, createContext, makeContextCurrent, getVendorName, describeContext, closeContext, closeDevice } from "./native/openal.bind.js";
+
+function main(args) {
+  console.log("openal-default-device:" + getDefaultDeviceName());
+  var device = openDefaultDevice();
+  console.log("openal-open-device:" + (device != undefined));
+  var context = createContext(device);
+  console.log("openal-create-context:" + (context != undefined));
+  console.log("openal-make-current:" + makeContextCurrent(context));
+  console.log("openal-vendor:" + getVendorName());
+  var info = describeContext(context);
+  console.log("openal-frequency:" + info.frequency);
+  console.log("openal-mono-sources:" + info.monoSources);
+  console.log("openal-stereo-sources:" + info.stereoSources);
+  console.log("openal-close-context:" + closeContext(context));
+  try {
+    describeContext(context);
+  } catch (err) {
+    console.log(err.name + ":" + err.message);
+  }
+  console.log("openal-close-device:" + closeDevice(device));
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "manual-openal-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled OpenAL bind program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"openal-default-device:stub-openal-device",
+		"openal-open-device:true",
+		"openal-create-context:true",
+		"openal-make-current:true",
+		"openal-vendor:stub-openal",
+		"openal-frequency:48000",
+		"openal-mono-sources:32",
+		"openal-stereo-sources:16",
+		"openal-close-context:true",
+		"TypeError:jayess_openal_describe_context expects a OpenALContext native handle",
+		"openal-close-device:true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected OpenAL bind output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsManualMiniaudioBindFiles(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	nativeDir := filepath.Join(workdir, "native")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	for _, name := range []string{"miniaudio.h", "miniaudio.c"} {
+		data, err := os.ReadFile(filepath.Join(repoRoot, "refs", "miniaudio", name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) returned error: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(nativeDir, name), data, 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) returned error: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "miniaudio_wrapper.c"), []byte(`#include "jayess_runtime.h"
+#include "miniaudio.h"
+#include <stdlib.h>
+
+typedef struct jayess_miniaudio_context {
+    ma_context context;
+} jayess_miniaudio_context;
+
+typedef struct jayess_miniaudio_device {
+    ma_device device;
+} jayess_miniaudio_device;
+
+static void jayess_miniaudio_data_callback(ma_device *pDevice, void *pOutput, const void *pInput, ma_uint32 frameCount) {
+    (void)pDevice;
+    (void)pInput;
+    ma_silence_pcm_frames(pOutput, frameCount, ma_format_f32, 2);
+}
+
+static void jayess_miniaudio_context_finalize(void *handle) {
+    jayess_miniaudio_context *context = (jayess_miniaudio_context *)handle;
+    if (context == NULL) {
+        return;
+    }
+    ma_context_uninit(&context->context);
+    free(context);
+}
+
+static void jayess_miniaudio_device_finalize(void *handle) {
+    jayess_miniaudio_device *device = (jayess_miniaudio_device *)handle;
+    if (device == NULL) {
+        return;
+    }
+    ma_device_uninit(&device->device);
+    free(device);
+}
+
+jayess_value *jayess_miniaudio_create_context(void) {
+    ma_backend backends[] = { ma_backend_null };
+    jayess_miniaudio_context *context = (jayess_miniaudio_context *)calloc(1, sizeof(jayess_miniaudio_context));
+    if (context == NULL) {
+        return jayess_value_undefined();
+    }
+    if (ma_context_init(backends, 1, NULL, &context->context) != MA_SUCCESS) {
+        free(context);
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_managed_native_handle("MiniAudioContext", context, jayess_miniaudio_context_finalize);
+}
+
+jayess_value *jayess_miniaudio_get_backend_name(jayess_value *context_value) {
+    jayess_miniaudio_context *context = (jayess_miniaudio_context *)jayess_expect_native_handle(context_value, "MiniAudioContext", "jayess_miniaudio_get_backend_name");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(ma_get_backend_name(context->context.backend));
+}
+
+jayess_value *jayess_miniaudio_describe_playback_devices(jayess_value *context_value) {
+    jayess_miniaudio_context *context = (jayess_miniaudio_context *)jayess_expect_native_handle(context_value, "MiniAudioContext", "jayess_miniaudio_describe_playback_devices");
+    ma_device_info *playbackInfos = NULL;
+    ma_uint32 playbackCount = 0;
+    jayess_array *array = NULL;
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    if (ma_context_get_devices(&context->context, &playbackInfos, &playbackCount, NULL, NULL) != MA_SUCCESS) {
+        return jayess_value_undefined();
+    }
+    array = jayess_array_new();
+    if (array == NULL) {
+        return jayess_value_undefined();
+    }
+    for (ma_uint32 i = 0; i < playbackCount; ++i) {
+        jayess_object *entry = jayess_object_new();
+        if (entry == NULL) {
+            return jayess_value_undefined();
+        }
+        jayess_object_set_value(entry, "name", jayess_value_from_string(playbackInfos[i].name));
+        jayess_object_set_value(entry, "isDefault", jayess_value_from_bool(playbackInfos[i].isDefault));
+        jayess_array_push_value(array, jayess_value_from_object(entry));
+    }
+    return jayess_value_from_array(array);
+}
+
+jayess_value *jayess_miniaudio_open_playback_device(jayess_value *context_value) {
+    jayess_miniaudio_context *context = (jayess_miniaudio_context *)jayess_expect_native_handle(context_value, "MiniAudioContext", "jayess_miniaudio_open_playback_device");
+    jayess_miniaudio_device *device = NULL;
+    ma_device_config config;
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    device = (jayess_miniaudio_device *)calloc(1, sizeof(jayess_miniaudio_device));
+    if (device == NULL) {
+        return jayess_value_undefined();
+    }
+    config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format = ma_format_f32;
+    config.playback.channels = 2;
+    config.sampleRate = 48000;
+    config.dataCallback = jayess_miniaudio_data_callback;
+    if (ma_device_init(&context->context, &config, &device->device) != MA_SUCCESS) {
+        free(device);
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_managed_native_handle("MiniAudioDevice", device, jayess_miniaudio_device_finalize);
+}
+
+jayess_value *jayess_miniaudio_describe_playback_device(jayess_value *device_value) {
+    jayess_miniaudio_device *device = (jayess_miniaudio_device *)jayess_expect_native_handle(device_value, "MiniAudioDevice", "jayess_miniaudio_describe_playback_device");
+    jayess_object *object = NULL;
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(object, "name", jayess_value_from_string(device->device.playback.name));
+    jayess_object_set_value(object, "format", jayess_value_from_string(device->device.playback.format == ma_format_f32 ? "f32" : "unknown"));
+    jayess_object_set_value(object, "channels", jayess_value_from_number((double)device->device.playback.channels));
+    jayess_object_set_value(object, "sampleRate", jayess_value_from_number((double)device->device.sampleRate));
+    return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_miniaudio_start_playback_device(jayess_value *device_value) {
+    jayess_miniaudio_device *device = (jayess_miniaudio_device *)jayess_expect_native_handle(device_value, "MiniAudioDevice", "jayess_miniaudio_start_playback_device");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_bool(ma_device_start(&device->device) == MA_SUCCESS);
+}
+
+jayess_value *jayess_miniaudio_stop_playback_device(jayess_value *device_value) {
+    jayess_miniaudio_device *device = (jayess_miniaudio_device *)jayess_expect_native_handle(device_value, "MiniAudioDevice", "jayess_miniaudio_stop_playback_device");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_bool(ma_device_stop(&device->device) == MA_SUCCESS);
+}
+
+jayess_value *jayess_miniaudio_close_playback_device(jayess_value *device_value) {
+    return jayess_value_from_bool(jayess_value_close_native_handle(device_value));
+}
+
+jayess_value *jayess_miniaudio_destroy_context(jayess_value *context_value) {
+    return jayess_value_from_bool(jayess_value_close_native_handle(context_value));
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "miniaudio.bind.js"), []byte(`const f = () => {};
+export const createContext = f;
+export const getBackendName = f;
+export const describePlaybackDevices = f;
+export const openPlaybackDevice = f;
+export const describePlaybackDevice = f;
+export const startPlaybackDevice = f;
+export const stopPlaybackDevice = f;
+export const closePlaybackDevice = f;
+export const destroyContext = f;
+
+export default {
+  sources: ["./miniaudio_wrapper.c", "./miniaudio.c"],
+  includeDirs: ["."],
+  cflags: ["-DMA_ENABLE_ONLY_NULL"],
+  ldflags: ["-pthread", "-ldl", "-lm"],
+  exports: {
+    createContext: { symbol: "jayess_miniaudio_create_context", type: "function" },
+    getBackendName: { symbol: "jayess_miniaudio_get_backend_name", type: "function" },
+    describePlaybackDevices: { symbol: "jayess_miniaudio_describe_playback_devices", type: "function" },
+    openPlaybackDevice: { symbol: "jayess_miniaudio_open_playback_device", type: "function" },
+    describePlaybackDevice: { symbol: "jayess_miniaudio_describe_playback_device", type: "function" },
+    startPlaybackDevice: { symbol: "jayess_miniaudio_start_playback_device", type: "function" },
+    stopPlaybackDevice: { symbol: "jayess_miniaudio_stop_playback_device", type: "function" },
+    closePlaybackDevice: { symbol: "jayess_miniaudio_close_playback_device", type: "function" },
+    destroyContext: { symbol: "jayess_miniaudio_destroy_context", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	mainPath := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(mainPath, []byte(`
+import { createContext, getBackendName, describePlaybackDevices, openPlaybackDevice, describePlaybackDevice, startPlaybackDevice, stopPlaybackDevice, closePlaybackDevice, destroyContext } from "./native/miniaudio.bind.js";
+
+function main(args) {
+  var context = createContext();
+  console.log("miniaudio-context:" + (context != undefined));
+  console.log("miniaudio-backend:" + getBackendName(context));
+  var devices = describePlaybackDevices(context);
+  console.log("miniaudio-device-count:" + devices.length);
+  console.log("miniaudio-device-0:" + devices[0].name + ":" + devices[0].isDefault);
+  var device = openPlaybackDevice(context);
+  console.log("miniaudio-open:" + (device != undefined));
+  var info = describePlaybackDevice(device);
+  console.log("miniaudio-format:" + info.format);
+  console.log("miniaudio-channels:" + info.channels);
+  console.log("miniaudio-sample-rate:" + info.sampleRate);
+  console.log("miniaudio-start:" + startPlaybackDevice(device));
+  console.log("miniaudio-stop:" + stopPlaybackDevice(device));
+  console.log("miniaudio-close:" + closePlaybackDevice(device));
+  try {
+    describePlaybackDevice(device);
+  } catch (err) {
+    console.log(err.name + ":" + err.message);
+  }
+  console.log("miniaudio-destroy:" + destroyContext(context));
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "manual-miniaudio-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled miniaudio bind program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"miniaudio-context:true",
+		"miniaudio-backend:Null",
+		"miniaudio-device-count:1",
+		"miniaudio-device-0:NULL Playback Device:true",
+		"miniaudio-open:true",
+		"miniaudio-format:f32",
+		"miniaudio-channels:2",
+		"miniaudio-sample-rate:48000",
+		"miniaudio-start:true",
+		"miniaudio-stop:true",
+		"miniaudio-close:true",
+		"TypeError:jayess_miniaudio_describe_playback_device expects a MiniAudioDevice native handle",
+		"miniaudio-destroy:true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected miniaudio bind output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsManualPortAudioBindFiles(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	nativeDir := filepath.Join(workdir, "native")
+	includeDir := filepath.Join(nativeDir, "portaudio_include")
+	if err := os.MkdirAll(includeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(repoRoot, "refs", "portaudio", "include", "portaudio.h"))
+	if err != nil {
+		t.Fatalf("ReadFile(portaudio.h) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(includeDir, "portaudio.h"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(portaudio.h) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "portaudio_wrapper.c"), []byte(`#include "jayess_runtime.h"
+#include <portaudio.h>
+#include <stdlib.h>
+
+typedef struct jayess_portaudio_stream {
+    PaStream *stream;
+} jayess_portaudio_stream;
+
+static int jayess_portaudio_callback(const void *input, void *output, unsigned long frameCount,
+                                     const PaStreamCallbackTimeInfo *timeInfo, PaStreamCallbackFlags statusFlags,
+                                     void *userData) {
+    (void)input;
+    (void)output;
+    (void)frameCount;
+    (void)timeInfo;
+    (void)statusFlags;
+    (void)userData;
+    return paContinue;
+}
+
+static void jayess_portaudio_stream_finalize(void *handle) {
+    jayess_portaudio_stream *stream = (jayess_portaudio_stream *)handle;
+    if (stream == NULL) {
+        return;
+    }
+    if (stream->stream != NULL) {
+        Pa_CloseStream(stream->stream);
+        stream->stream = NULL;
+    }
+    free(stream);
+}
+
+static const char *jayess_portaudio_format_name(PaSampleFormat format) {
+    if (format == paFloat32) {
+        return "f32";
+    }
+    return "unknown";
+}
+
+jayess_value *jayess_portaudio_init(void) {
+    return jayess_value_from_bool(Pa_Initialize() == paNoError);
+}
+
+jayess_value *jayess_portaudio_terminate(void) {
+    return jayess_value_from_bool(Pa_Terminate() == paNoError);
+}
+
+jayess_value *jayess_portaudio_version_text(void) {
+    const char *text = Pa_GetVersionText();
+    if (text == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(text);
+}
+
+jayess_value *jayess_portaudio_device_count(void) {
+    return jayess_value_from_number((double)Pa_GetDeviceCount());
+}
+
+jayess_value *jayess_portaudio_default_output_device(void) {
+    PaDeviceIndex index = Pa_GetDefaultOutputDevice();
+    const PaDeviceInfo *info = NULL;
+    jayess_object *object = NULL;
+    if (index < 0) {
+        return jayess_value_undefined();
+    }
+    info = Pa_GetDeviceInfo(index);
+    if (info == NULL) {
+        return jayess_value_undefined();
+    }
+    object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(object, "name", jayess_value_from_string(info->name));
+    jayess_object_set_value(object, "maxOutputChannels", jayess_value_from_number((double)info->maxOutputChannels));
+    jayess_object_set_value(object, "defaultSampleRate", jayess_value_from_number(info->defaultSampleRate));
+    return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_portaudio_open_default_playback(jayess_value *sample_rate_value, jayess_value *frames_per_buffer_value) {
+    jayess_portaudio_stream *stream = NULL;
+    PaStream *opened = NULL;
+    double sample_rate = jayess_value_to_number(sample_rate_value);
+    unsigned long frames_per_buffer = (unsigned long)jayess_value_to_number(frames_per_buffer_value);
+    if (sample_rate <= 0 || frames_per_buffer == 0) {
+        jayess_throw_named_error("PortAudioError", "PortAudio sample rate and framesPerBuffer must be positive");
+        return jayess_value_undefined();
+    }
+    if (Pa_OpenDefaultStream(&opened, 0, 2, paFloat32, sample_rate, frames_per_buffer, jayess_portaudio_callback, NULL) != paNoError) {
+        return jayess_value_undefined();
+    }
+    stream = (jayess_portaudio_stream *)calloc(1, sizeof(jayess_portaudio_stream));
+    if (stream == NULL) {
+        Pa_CloseStream(opened);
+        return jayess_value_undefined();
+    }
+    stream->stream = opened;
+    return jayess_value_from_managed_native_handle("PortAudioStream", stream, jayess_portaudio_stream_finalize);
+}
+
+jayess_value *jayess_portaudio_describe_stream(jayess_value *stream_value) {
+    jayess_portaudio_stream *stream = (jayess_portaudio_stream *)jayess_expect_native_handle(stream_value, "PortAudioStream", "jayess_portaudio_describe_stream");
+    const PaStreamInfo *info = NULL;
+    jayess_object *object = NULL;
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    info = Pa_GetStreamInfo(stream->stream);
+    if (info == NULL) {
+        return jayess_value_undefined();
+    }
+    object = jayess_object_new();
+    if (object == NULL) {
+        return jayess_value_undefined();
+    }
+    jayess_object_set_value(object, "sampleRate", jayess_value_from_number(info->sampleRate));
+    jayess_object_set_value(object, "outputLatency", jayess_value_from_number(info->outputLatency));
+    jayess_object_set_value(object, "active", jayess_value_from_bool(Pa_IsStreamActive(stream->stream) == 1));
+    jayess_object_set_value(object, "format", jayess_value_from_string(jayess_portaudio_format_name(paFloat32)));
+    return jayess_value_from_object(object);
+}
+
+jayess_value *jayess_portaudio_start_stream(jayess_value *stream_value) {
+    jayess_portaudio_stream *stream = (jayess_portaudio_stream *)jayess_expect_native_handle(stream_value, "PortAudioStream", "jayess_portaudio_start_stream");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_bool(Pa_StartStream(stream->stream) == paNoError);
+}
+
+jayess_value *jayess_portaudio_stop_stream(jayess_value *stream_value) {
+    jayess_portaudio_stream *stream = (jayess_portaudio_stream *)jayess_expect_native_handle(stream_value, "PortAudioStream", "jayess_portaudio_stop_stream");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_bool(Pa_StopStream(stream->stream) == paNoError);
+}
+
+jayess_value *jayess_portaudio_close_stream(jayess_value *stream_value) {
+    return jayess_value_from_bool(jayess_value_close_native_handle(stream_value));
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "portaudio_stub.c"), []byte(`#include <portaudio.h>
+#include <stdlib.h>
+
+typedef struct jayess_portaudio_stream_stub {
+    int active;
+    double sampleRate;
+    unsigned long framesPerBuffer;
+} jayess_portaudio_stream_stub;
+
+static int jayess_portaudio_initialized = 0;
+static PaDeviceInfo jayess_portaudio_device_info = {
+    2,
+    "stub-portaudio-output",
+    0,
+    0,
+    2,
+    0.01,
+    0.02,
+    0.10,
+    0.20,
+    48000.0
+};
+
+static PaStreamInfo jayess_portaudio_stream_info = {
+    1,
+    0.0,
+    0.02,
+    48000.0
+};
+
+PaError Pa_Initialize(void) {
+    jayess_portaudio_initialized = 1;
+    return paNoError;
+}
+
+PaError Pa_Terminate(void) {
+    jayess_portaudio_initialized = 0;
+    return paNoError;
+}
+
+const char* Pa_GetVersionText(void) {
+    return "stub-portaudio";
+}
+
+PaDeviceIndex Pa_GetDeviceCount(void) {
+    return jayess_portaudio_initialized ? 1 : 0;
+}
+
+PaDeviceIndex Pa_GetDefaultOutputDevice(void) {
+    return jayess_portaudio_initialized ? 0 : paNoDevice;
+}
+
+const PaDeviceInfo* Pa_GetDeviceInfo(PaDeviceIndex device) {
+    if (!jayess_portaudio_initialized || device != 0) {
+        return NULL;
+    }
+    return &jayess_portaudio_device_info;
+}
+
+PaError Pa_OpenDefaultStream(PaStream** stream, int numInputChannels, int numOutputChannels, PaSampleFormat sampleFormat, double sampleRate, unsigned long framesPerBuffer, PaStreamCallback *streamCallback, void *userData) {
+    jayess_portaudio_stream_stub *opened = NULL;
+    (void)numInputChannels;
+    (void)streamCallback;
+    (void)userData;
+    if (!jayess_portaudio_initialized || stream == NULL || numOutputChannels != 2 || sampleFormat != paFloat32) {
+        return paInvalidDevice;
+    }
+    opened = (jayess_portaudio_stream_stub *)calloc(1, sizeof(jayess_portaudio_stream_stub));
+    if (opened == NULL) {
+        return paInsufficientMemory;
+    }
+    opened->sampleRate = sampleRate;
+    opened->framesPerBuffer = framesPerBuffer;
+    jayess_portaudio_stream_info.sampleRate = sampleRate;
+    *stream = (PaStream *)opened;
+    return paNoError;
+}
+
+PaError Pa_CloseStream(PaStream *stream) {
+    jayess_portaudio_stream_stub *state = (jayess_portaudio_stream_stub *)stream;
+    if (stream == NULL) {
+        return paBadStreamPtr;
+    }
+    free(state);
+    return paNoError;
+}
+
+PaError Pa_StartStream(PaStream *stream) {
+    jayess_portaudio_stream_stub *state = (jayess_portaudio_stream_stub *)stream;
+    if (stream == NULL) {
+        return paBadStreamPtr;
+    }
+    state->active = 1;
+    return paNoError;
+}
+
+PaError Pa_StopStream(PaStream *stream) {
+    jayess_portaudio_stream_stub *state = (jayess_portaudio_stream_stub *)stream;
+    if (stream == NULL) {
+        return paBadStreamPtr;
+    }
+    state->active = 0;
+    return paNoError;
+}
+
+PaError Pa_IsStreamActive(PaStream *stream) {
+    jayess_portaudio_stream_stub *state = (jayess_portaudio_stream_stub *)stream;
+    if (stream == NULL) {
+        return paBadStreamPtr;
+    }
+    return state->active ? 1 : 0;
+}
+
+const PaStreamInfo* Pa_GetStreamInfo(PaStream *stream) {
+    jayess_portaudio_stream_stub *state = (jayess_portaudio_stream_stub *)stream;
+    if (stream == NULL) {
+        return NULL;
+    }
+    jayess_portaudio_stream_info.sampleRate = state->sampleRate;
+    return &jayess_portaudio_stream_info;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "portaudio.bind.js"), []byte(`const f = () => {};
+export const initAudio = f;
+export const terminateAudio = f;
+export const getVersionText = f;
+export const getDeviceCount = f;
+export const getDefaultOutputDevice = f;
+export const openDefaultPlayback = f;
+export const describeStream = f;
+export const startStream = f;
+export const stopStream = f;
+export const closeStream = f;
+
+export default {
+  sources: ["./portaudio_wrapper.c", "./portaudio_stub.c"],
+  includeDirs: ["./portaudio_include"],
+  cflags: [],
+  ldflags: [],
+  exports: {
+    initAudio: { symbol: "jayess_portaudio_init", type: "function" },
+    terminateAudio: { symbol: "jayess_portaudio_terminate", type: "function" },
+    getVersionText: { symbol: "jayess_portaudio_version_text", type: "function" },
+    getDeviceCount: { symbol: "jayess_portaudio_device_count", type: "function" },
+    getDefaultOutputDevice: { symbol: "jayess_portaudio_default_output_device", type: "function" },
+    openDefaultPlayback: { symbol: "jayess_portaudio_open_default_playback", type: "function" },
+    describeStream: { symbol: "jayess_portaudio_describe_stream", type: "function" },
+    startStream: { symbol: "jayess_portaudio_start_stream", type: "function" },
+    stopStream: { symbol: "jayess_portaudio_stop_stream", type: "function" },
+    closeStream: { symbol: "jayess_portaudio_close_stream", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	mainPath := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(mainPath, []byte(`
+import { initAudio, terminateAudio, getVersionText, getDeviceCount, getDefaultOutputDevice, openDefaultPlayback, describeStream, startStream, stopStream, closeStream } from "./native/portaudio.bind.js";
+
+function main(args) {
+  console.log("portaudio-init:" + initAudio());
+  console.log("portaudio-version:" + getVersionText());
+  console.log("portaudio-device-count:" + getDeviceCount());
+  var device = getDefaultOutputDevice();
+  console.log("portaudio-device:" + device.name + ":" + device.maxOutputChannels + ":" + device.defaultSampleRate);
+  var stream = openDefaultPlayback(48000, 256);
+  console.log("portaudio-open:" + (stream != undefined));
+  var info = describeStream(stream);
+  console.log("portaudio-format:" + info.format);
+  console.log("portaudio-sample-rate:" + info.sampleRate);
+  console.log("portaudio-output-latency:" + info.outputLatency);
+  console.log("portaudio-active-before-start:" + info.active);
+  console.log("portaudio-start:" + startStream(stream));
+  console.log("portaudio-active-after-start:" + describeStream(stream).active);
+  console.log("portaudio-stop:" + stopStream(stream));
+  console.log("portaudio-close:" + closeStream(stream));
+  try {
+    describeStream(stream);
+  } catch (err) {
+    console.log(err.name + ":" + err.message);
+  }
+  console.log("portaudio-terminate:" + terminateAudio());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "manual-portaudio-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled PortAudio bind program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"portaudio-init:true",
+		"portaudio-version:stub-portaudio",
+		"portaudio-device-count:1",
+		"portaudio-device:stub-portaudio-output:2:48000",
+		"portaudio-open:true",
+		"portaudio-format:f32",
+		"portaudio-sample-rate:48000",
+		"portaudio-output-latency:0.02",
+		"portaudio-active-before-start:false",
+		"portaudio-start:true",
+		"portaudio-active-after-start:true",
+		"portaudio-stop:true",
+		"portaudio-close:true",
+		"TypeError:jayess_portaudio_describe_stream expects a PortAudioStream native handle",
+		"portaudio-terminate:true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected PortAudio bind output to contain %q, got: %s", want, text)
+		}
 	}
 }
 
@@ -4496,6 +7514,902 @@ function main(args) {
 	}
 }
 
+func TestBuildExecutableReassignmentReleasesPreviousOwnedLocalValue(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function main(args) {
+  resetCleanupLog();
+  var current = makeProbe("first-owned");
+  console.log("after-first:" + cleanupLog());
+  current = makeProbe("second-owned");
+  console.log("after-second:" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "reassignment-owned-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"after-first:",
+		"after-second:first-owned;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected reassignment-owned cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableDestructuredOwnedLocalReassignmentReleasesPreviousValue(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function main(args) {
+  resetCleanupLog();
+  var [fromArray] = [makeProbe("array-first")];
+  console.log("after-array-first:" + cleanupLog());
+  fromArray = makeProbe("array-second");
+  console.log("after-array-second:" + cleanupLog());
+
+  resetCleanupLog();
+  var { value: fromObject } = { value: makeProbe("object-first") };
+  console.log("after-object-first:" + cleanupLog());
+  fromObject = makeProbe("object-second");
+  console.log("after-object-second:" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructured-reassignment-owned-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"after-array-first:",
+		"after-array-second:array-first;",
+		"after-object-first:",
+		"after-object-second:object-first;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected destructured reassignment cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableDestructuringAssignmentFromLiteralReleasesPreviousOwnedValue(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function main(args) {
+  resetCleanupLog();
+  var fromArray = makeProbe("array-seed");
+  console.log("after-array-seed:" + cleanupLog());
+  [fromArray] = [makeProbe("array-next")];
+  console.log("after-array-assign:" + cleanupLog());
+
+  resetCleanupLog();
+  var fromObject = makeProbe("object-seed");
+  console.log("after-object-seed:" + cleanupLog());
+  [{ value: fromObject }] = [{ value: makeProbe("object-next") }];
+  console.log("after-object-assign:" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-assignment-owned-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"after-array-seed:",
+		"after-array-assign:array-seed;",
+		"after-object-seed:",
+		"after-object-assign:object-seed;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected destructuring-assignment cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableDestructuringWithRestKeepsNamedLiteralBindingsOwned(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+function main(args) {
+  resetCleanupLog();
+  var [fromArray, ...tail] = [makeProbe("array-first"), 2, 3];
+  console.log("after-array-first:" + cleanupLog() + ":" + tail.length);
+  fromArray = makeProbe("array-second");
+  console.log("after-array-second:" + cleanupLog() + ":" + tail.length);
+
+  resetCleanupLog();
+  var { value: fromObject, ...rest } = { value: makeProbe("object-first"), extra: 1 };
+  console.log("after-object-first:" + cleanupLog() + ":" + rest.extra);
+  fromObject = makeProbe("object-second");
+  console.log("after-object-second:" + cleanupLog() + ":" + rest.extra);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-rest-owned-cleanup-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"after-array-first::2",
+		"after-array-second:array-first;:2",
+		"after-object-first::1",
+		"after-object-second:object-first;:1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected destructuring-with-rest cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableDestructuringWithRestDoesNotReevaluateLiteralEntries(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var calls = 0;
+  const mark = (label) => {
+    calls = calls + 1;
+    console.log("mark:" + label + ":" + calls);
+    return label + "-" + calls;
+  };
+
+  var [head, ...tail] = [mark("array-head"), mark("array-tail-1"), mark("array-tail-2")];
+  console.log("array:" + head + ":" + tail.length + ":" + tail[0] + ":" + tail[1] + ":" + calls);
+
+  calls = 0;
+  var { value, ...rest } = { value: mark("object-value"), extra: mark("object-extra") };
+  console.log("object:" + value + ":" + rest.extra + ":" + calls);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-rest-single-eval-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"mark:array-head:1",
+		"mark:array-tail-1:2",
+		"mark:array-tail-2:3",
+		"array:array-head-1:2:array-tail-1-2:array-tail-2-3:3",
+		"mark:object-value:1",
+		"mark:object-extra:2",
+		"object:object-value-1:object-extra-2:2",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected destructuring-rest single-eval output to contain %q, got: %s", want, text)
+		}
+	}
+	if strings.Count(text, "mark:array-head:") != 1 || strings.Count(text, "mark:object-value:") != 1 {
+		t.Fatalf("expected fresh literal entries to be evaluated exactly once, got: %s", text)
+	}
+}
+
+func TestBuildExecutableObjectLiteralDestructuringFallsBackOnDuplicateKeys(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var calls = 0;
+  const mark = (label) => {
+    calls = calls + 1;
+    console.log("mark:" + label + ":" + calls);
+    return label + "-" + calls;
+  };
+
+  var { value, ...rest } = {
+    value: mark("first"),
+    value: mark("second"),
+    extra: mark("extra")
+  };
+
+  console.log("result:" + value + ":" + rest.extra + ":" + calls);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-duplicate-object-keys-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"mark:first:1",
+		"mark:second:2",
+		"mark:extra:3",
+		"result:second-2:extra-3:3",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected duplicate-key destructuring output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableArrayLiteralDestructuringFallsBackOnSourceSpreadEffects(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var calls = 0;
+  const mark = (label) => {
+    calls = calls + 1;
+    console.log("mark:" + label + ":" + calls);
+    return label + "-" + calls;
+  };
+  const buildTail = () => {
+    console.log("tail-build:" + calls);
+    calls = calls + 1;
+    console.log("tail-item-1:" + calls);
+    const first = "tail-1-" + calls;
+    calls = calls + 1;
+    console.log("tail-item-2:" + calls);
+    const second = "tail-2-" + calls;
+    return [first, second];
+  };
+
+  var [first] = [mark("head"), ...buildTail()];
+  console.log("result:" + first + ":" + calls);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-array-source-spread-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"mark:head:1",
+		"tail-build:1",
+		"tail-item-1:2",
+		"tail-item-2:3",
+		"result:head-1:3",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected array-source-spread destructuring output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableObjectLiteralDestructuringFallsBackOnSourceSpreadEffects(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var calls = 0;
+  const mark = (label) => {
+    calls = calls + 1;
+    console.log("mark:" + label + ":" + calls);
+    return label + "-" + calls;
+  };
+  const buildExtra = () => {
+    console.log("extra-build:" + calls);
+    calls = calls + 1;
+    console.log("extra-item:" + calls);
+    return { extra: "extra-" + calls };
+  };
+
+  var { value } = { value: mark("value"), ...buildExtra() };
+  console.log("result:" + value + ":" + calls);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-object-source-spread-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"mark:value:1",
+		"extra-build:1",
+		"extra-item:2",
+		"result:value-1:2",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected object-source-spread destructuring output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableNestedLiteralFallbackMaterializesSourceOnce(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var calls = 0;
+  const buildInner = () => {
+    calls = calls + 1;
+    console.log("build:" + calls);
+    return { a: "a-" + calls, b: "b-" + calls };
+  };
+
+  var { inner: { a: declA, b: declB } } = { inner: buildInner() };
+  console.log("decl:" + declA + ":" + declB + ":" + calls);
+
+  calls = 0;
+  var assignA = "";
+  var assignB = "";
+  [{ a: assignA, b: assignB }] = [buildInner()];
+  console.log("assign:" + assignA + ":" + assignB + ":" + calls);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-nested-literal-fallback-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"build:1",
+		"decl:a-1:b-1:1",
+		"assign:a-1:b-1:1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected nested literal fallback output to contain %q, got: %s", want, text)
+		}
+	}
+	if strings.Count(text, "build:1") != 2 {
+		t.Fatalf("expected nested fallback source to be materialized exactly once per destructuring site, got: %s", text)
+	}
+}
+
+func TestBuildExecutableSupportsDestructuringInForLoopInit(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var total = 0;
+  for (var [i, limit] = [0, 3]; i < limit; i = i + 1) {
+    total = total + i;
+  }
+  console.log("total:" + total);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-for-init-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	if !strings.Contains(text, "total:3") {
+		t.Fatalf("expected for-loop init destructuring output to contain total:3, got: %s", text)
+	}
+}
+
+func TestBuildExecutableSupportsDestructuringInForLoopUpdate(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var total = 0;
+  var i = 0;
+  for (; i < 4; [i] = [i + 1]) {
+    total = total + i;
+  }
+  console.log("total:" + total + ":" + i);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-for-update-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	if !strings.Contains(text, "total:6:4") {
+		t.Fatalf("expected for-loop update destructuring output to contain total:6:4, got: %s", text)
+	}
+}
+
+func TestBuildExecutableSupportsCompoundAssignmentInForLoopUpdate(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var total = 0;
+  for (var i = 0; i < 4; i += 1) {
+    total = total + i;
+  }
+  console.log("total:" + total);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "compound-for-update-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	if !strings.Contains(text, "total:6") {
+		t.Fatalf("expected compound for-loop update output to contain total:6, got: %s", text)
+	}
+}
+
+func TestBuildExecutableSupportsDestructuringInForOfBinding(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var total = 0;
+  for (var [a, b] of [[1, 2], [3, 4]]) {
+    total = total + a + b;
+  }
+  console.log("total:" + total);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-for-of-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	if !strings.Contains(text, "total:10") {
+		t.Fatalf("expected for...of destructuring output to contain total:10, got: %s", text)
+	}
+}
+
+func TestBuildExecutableSupportsObjectDestructuringInForOfBinding(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var total = 0;
+  for (var { value = 1, ...rest } of [{ extra: 2 }, { value: 3, extra: 4 }]) {
+    total = total + value + rest.extra;
+  }
+  console.log("total:" + total);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-for-of-object-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	if !strings.Contains(text, "total:10") {
+		t.Fatalf("expected for...of object destructuring output to contain total:10, got: %s", text)
+	}
+}
+
+func TestBuildExecutableForOfDestructuringTempDoesNotCollideWithUserName(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+function main(args) {
+  var total = 0;
+  for (var [value] of [[1], [2], [3]]) {
+    const __jayess_foreach_0 = 100;
+    total = total + value;
+    console.log("shadow:" + __jayess_foreach_0 + ":" + value);
+  }
+  console.log("total:" + total);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "destructuring-for-of-temp-collision-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"shadow:100:1",
+		"shadow:100:2",
+		"shadow:100:3",
+		"total:6",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected for...of temp-collision output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
 func TestBuildExecutableSupportsNativeWrapperTypeMismatchSafety(t *testing.T) {
 	tc, err := DetectToolchain()
 	if err != nil {
@@ -4525,6 +8439,22 @@ jayess_value *jayess_require_name(jayess_value *value) {
         return jayess_value_undefined();
     }
     return jayess_object_get(object, "name");
+}
+
+jayess_value *jayess_require_greeting(jayess_value *value) {
+    const char *text = jayess_expect_string(value, "jayess_require_greeting");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(text);
+}
+
+jayess_value *jayess_require_items_length(jayess_value *value) {
+    jayess_array *items = jayess_expect_array(value, "jayess_require_items_length");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_number((double)jayess_array_length(items));
 }
 
 jayess_value *jayess_require_bytes_sum(jayess_value *value) {
@@ -4564,6 +8494,8 @@ jayess_value *jayess_counter_checked_value(jayess_value *counter) {
 	}
 	if err := os.WriteFile(filepath.Join(nativeDir, "safe.bind.js"), []byte(`const f = () => {};
 export const requireName = f;
+export const requireGreeting = f;
+export const requireItemsLength = f;
 export const requireBytesSum = f;
 export const createCounter = f;
 export const counterValue = f;
@@ -4575,6 +8507,8 @@ export default {
   ldflags: [],
   exports: {
     requireName: { symbol: "jayess_require_name", type: "function" },
+    requireGreeting: { symbol: "jayess_require_greeting", type: "function" },
+    requireItemsLength: { symbol: "jayess_require_items_length", type: "function" },
     requireBytesSum: { symbol: "jayess_require_bytes_sum", type: "function" },
     createCounter: { symbol: "jayess_counter_new_checked", type: "function" },
     counterValue: { symbol: "jayess_counter_checked_value", type: "function" }
@@ -4585,11 +8519,21 @@ export default {
 	}
 	mainPath := filepath.Join(workdir, "main.js")
 	mainSource := `
-import { requireName, requireBytesSum, createCounter, counterValue } from "./native/safe.bind.js";
+import { requireName, requireGreeting, requireItemsLength, requireBytesSum, createCounter, counterValue } from "./native/safe.bind.js";
 
 function main(args) {
   try {
     requireName(1);
+  } catch (err) {
+    console.log(err.name + ":" + err.message);
+  }
+  try {
+    requireGreeting(1);
+  } catch (err) {
+    console.log(err.name + ":" + err.message);
+  }
+  try {
+    requireItemsLength({});
   } catch (err) {
     console.log(err.name + ":" + err.message);
   }
@@ -4630,6 +8574,8 @@ function main(args) {
 	text := string(out)
 	for _, want := range []string{
 		"TypeError:jayess_require_name expects an object",
+		"TypeError:jayess_require_greeting expects a string",
+		"TypeError:jayess_require_items_length expects an array",
 		"TypeError:jayess_require_bytes_sum expects a Uint8Array or byte buffer value",
 		"TypeError:jayess_counter_checked_value expects a CounterHandle native handle",
 		"counter-safe:5",
@@ -4637,6 +8583,33 @@ function main(args) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected native type-safety output to contain %q, got: %s", want, text)
 		}
+	}
+}
+
+func TestCompileRejectsUsingBlockScopedValueOutsideItsLexicalScope(t *testing.T) {
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	_, err = compiler.Compile(`
+function main(args) {
+  if (true) {
+    const scoped = 7;
+  }
+  return scoped;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err == nil {
+		t.Fatalf("expected compiler diagnostic for out-of-scope value access")
+	}
+
+	var compileErr *compiler.CompileError
+	if !errors.As(err, &compileErr) {
+		t.Fatalf("expected CompileError, got %T: %v", err, err)
+	}
+	if compileErr.Diagnostic.Line == 0 || compileErr.Diagnostic.Column == 0 {
+		t.Fatalf("expected compiler diagnostic location, got %#v", compileErr.Diagnostic)
 	}
 }
 
@@ -4826,13 +8799,51 @@ import { createCounter, counterValue, closeCounter, counterClosed, finalizeTotal
 
 function main(args) {
   var counter = createCounter(9);
+  var alias = counter;
+  var box = { value: counter };
+  var items = [counter];
+  var captured = function() {
+    return counter;
+  };
+  var boxed = function() {
+    return box.value;
+  };
+  var indexed = function() {
+    return items[0];
+  };
   console.log("owned-before:" + counterValue(counter) + ":" + counterClosed(counter));
+  console.log("owned-structured-before:" + counterClosed(box.value) + ":" + counterClosed(items[0]) + ":" + counterClosed(captured()));
   console.log("owned-close:" + closeCounter(counter) + ":" + counterClosed(counter) + ":" + finalizeTotal());
+  console.log("owned-alias-closed:" + counterClosed(alias));
+  console.log("owned-structured-closed:" + counterClosed(box.value) + ":" + counterClosed(items[0]) + ":" + counterClosed(captured()) + ":" + counterClosed(boxed()) + ":" + counterClosed(indexed()));
   console.log("owned-close-again:" + closeCounter(counter) + ":" + counterClosed(counter) + ":" + finalizeTotal());
+  console.log("owned-alias-close-again:" + closeCounter(alias) + ":" + counterClosed(alias) + ":" + finalizeTotal());
+  console.log("owned-box-close-again:" + closeCounter(box.value) + ":" + counterClosed(box.value) + ":" + finalizeTotal());
+  console.log("owned-array-close-again:" + closeCounter(items[0]) + ":" + counterClosed(items[0]) + ":" + finalizeTotal());
   try {
     counterValue(counter);
   } catch (err) {
     console.log(err.name + ":" + err.message);
+  }
+  try {
+    counterValue(alias);
+  } catch (err) {
+    console.log("alias-" + err.name + ":" + err.message);
+  }
+  try {
+    counterValue(box.value);
+  } catch (err) {
+    console.log("box-" + err.name + ":" + err.message);
+  }
+  try {
+    counterValue(items[0]);
+  } catch (err) {
+    console.log("array-" + err.name + ":" + err.message);
+  }
+  try {
+    counterValue(captured());
+  } catch (err) {
+    console.log("closure-" + err.name + ":" + err.message);
   }
   return 0;
 }
@@ -4859,9 +8870,19 @@ function main(args) {
 	text := string(out)
 	for _, want := range []string{
 		"owned-before:9:false",
+		"owned-structured-before:false:false:false",
 		"owned-close:true:true:1",
+		"owned-alias-closed:true",
+		"owned-structured-closed:true:true:true:true:true",
 		"owned-close-again:false:true:1",
+		"owned-alias-close-again:false:true:1",
+		"owned-box-close-again:false:true:1",
+		"owned-array-close-again:false:true:1",
 		"TypeError:jayess_owned_counter_value expects a OwnedCounter native handle",
+		"alias-TypeError:jayess_owned_counter_value expects a OwnedCounter native handle",
+		"box-TypeError:jayess_owned_counter_value expects a OwnedCounter native handle",
+		"array-TypeError:jayess_owned_counter_value expects a OwnedCounter native handle",
+		"closure-TypeError:jayess_owned_counter_value expects a OwnedCounter native handle",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected managed native handle output to contain %q, got: %s", want, text)
@@ -4891,6 +8912,11 @@ func TestBuildExecutableSupportsNativeWrapperLifetimeSafeCopies(t *testing.T) {
 typedef struct jayess_name_box {
     char *name;
 } jayess_name_box;
+
+typedef struct jayess_bytes_box {
+    unsigned char *bytes;
+    size_t length;
+} jayess_bytes_box;
 
 static void jayess_name_box_finalize(void *handle) {
     jayess_name_box *box = (jayess_name_box *)handle;
@@ -4924,6 +8950,39 @@ jayess_value *jayess_name_box_get(jayess_value *value) {
 jayess_value *jayess_name_box_close(jayess_value *value) {
     return jayess_value_from_bool(jayess_value_close_native_handle(value));
 }
+
+static void jayess_bytes_box_finalize(void *handle) {
+    jayess_bytes_box *box = (jayess_bytes_box *)handle;
+    if (box != NULL) {
+        jayess_bytes_free(box->bytes);
+        free(box);
+    }
+}
+
+jayess_value *jayess_bytes_box_new(jayess_value *value) {
+    jayess_bytes_box *box = (jayess_bytes_box *)malloc(sizeof(jayess_bytes_box));
+    if (box == NULL) {
+        return jayess_value_undefined();
+    }
+    box->bytes = jayess_expect_bytes_copy(value, &box->length, "jayess_bytes_box_new");
+    if (jayess_has_exception()) {
+        free(box);
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_managed_native_handle("BytesBox", box, jayess_bytes_box_finalize);
+}
+
+jayess_value *jayess_bytes_box_get(jayess_value *value) {
+    jayess_bytes_box *box = (jayess_bytes_box *)jayess_expect_native_handle(value, "BytesBox", "jayess_bytes_box_get");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_bytes_copy(box->bytes != NULL ? box->bytes : (const unsigned char *)"", box->length);
+}
+
+jayess_value *jayess_bytes_box_close(jayess_value *value) {
+    return jayess_value_from_bool(jayess_value_close_native_handle(value));
+}
 `
 	if err := os.WriteFile(filepath.Join(nativeDir, "lifetime.c"), []byte(nativeSource), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
@@ -4932,6 +8991,9 @@ jayess_value *jayess_name_box_close(jayess_value *value) {
 export const createBox = f;
 export const readBox = f;
 export const closeBox = f;
+export const createBytesBox = f;
+export const readBytesBox = f;
+export const closeBytesBox = f;
 
 export default {
   sources: ["./lifetime.c"],
@@ -4941,7 +9003,10 @@ export default {
   exports: {
     createBox: { symbol: "jayess_name_box_new", type: "function" },
     readBox: { symbol: "jayess_name_box_get", type: "function" },
-    closeBox: { symbol: "jayess_name_box_close", type: "function" }
+    closeBox: { symbol: "jayess_name_box_close", type: "function" },
+    createBytesBox: { symbol: "jayess_bytes_box_new", type: "function" },
+    readBytesBox: { symbol: "jayess_bytes_box_get", type: "function" },
+    closeBytesBox: { symbol: "jayess_bytes_box_close", type: "function" }
   }
 };
 `), 0o644); err != nil {
@@ -4949,7 +9014,7 @@ export default {
 	}
 	mainPath := filepath.Join(workdir, "main.js")
 	mainSource := `
-import { createBox, readBox, closeBox } from "./native/lifetime.bind.js";
+import { createBox, readBox, closeBox, createBytesBox, readBytesBox, closeBytesBox } from "./native/lifetime.bind.js";
 
 function makeBox() {
   var name = "Kimchi";
@@ -4958,12 +9023,27 @@ function makeBox() {
   return box;
 }
 
+function makeBytesBox() {
+  var bytes = Uint8Array.fromString("kimchi");
+  var box = createBytesBox(bytes);
+  bytes[0] = 106;
+  return box;
+}
+
 function main(args) {
   var box = makeBox();
+  var bytesBox = makeBytesBox();
   console.log("lifetime-copy:" + readBox(box));
+  console.log("lifetime-bytes-copy:" + readBytesBox(bytesBox).toString());
   console.log("lifetime-close:" + closeBox(box));
+  console.log("lifetime-bytes-close:" + closeBytesBox(bytesBox));
   try {
     readBox(box);
+  } catch (err) {
+    console.log(err.name + ":" + err.message);
+  }
+  try {
+    readBytesBox(bytesBox);
   } catch (err) {
     console.log(err.name + ":" + err.message);
   }
@@ -4992,11 +9072,197 @@ function main(args) {
 	text := string(out)
 	for _, want := range []string{
 		"lifetime-copy:Kimchi",
+		"lifetime-bytes-copy:kimchi",
 		"lifetime-close:true",
+		"lifetime-bytes-close:true",
 		"TypeError:jayess_name_box_get expects a NameBox native handle",
+		"TypeError:jayess_bytes_box_get expects a BytesBox native handle",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected lifetime-safe wrapper output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableRetainsJayessValuesOnWrapperObjectInsteadOfBorrowedNativePointers(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	nativeDir := filepath.Join(workdir, "native")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	nativeSource := `#include "jayess_runtime.h"
+#include <stdlib.h>
+
+typedef struct jayess_retained_box {
+    int marker;
+} jayess_retained_box;
+
+static void jayess_retained_box_finalize(void *handle) {
+    if (handle != NULL) {
+        free(handle);
+    }
+}
+
+jayess_value *jayess_retained_box_new(jayess_value *value) {
+    jayess_retained_box *box_state = (jayess_retained_box *)malloc(sizeof(jayess_retained_box));
+    jayess_value *box;
+    jayess_object *box_object;
+
+    if (box_state == NULL) {
+        return jayess_value_undefined();
+    }
+    box_state->marker = 1;
+    box = jayess_value_from_managed_native_handle("RetainedValueBox", box_state, jayess_retained_box_finalize);
+    box_object = jayess_value_as_object(box);
+    if (box_object == NULL) {
+        jayess_value_close_native_handle(box);
+        return jayess_value_undefined();
+    }
+    /*
+     * Keep the Jayess-managed value reachable from the wrapper object itself
+     * instead of storing a borrowed jayess_value* in native long-lived state.
+     */
+    jayess_object_set_value(box_object, "__jayess_retained", value);
+    return box;
+}
+
+static jayess_value *jayess_retained_box_value(jayess_value *box, const char *context) {
+    jayess_object *box_object;
+    jayess_retained_box *box_state = (jayess_retained_box *)jayess_expect_native_handle(box, "RetainedValueBox", context);
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    if (box_state == NULL || box_state->marker != 1) {
+        return jayess_value_undefined();
+    }
+    box_object = jayess_value_as_object(box);
+    if (box_object == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_object_get(box_object, "__jayess_retained");
+}
+
+jayess_value *jayess_retained_box_count(jayess_value *box) {
+    jayess_value *value = jayess_retained_box_value(box, "jayess_retained_box_count");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    jayess_object *object = jayess_expect_object(value, "jayess_retained_box_count");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_object_get(object, "count");
+}
+
+jayess_value *jayess_retained_box_label(jayess_value *box) {
+    jayess_value *value = jayess_retained_box_value(box, "jayess_retained_box_label");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    jayess_object *object = jayess_expect_object(value, "jayess_retained_box_label");
+    if (jayess_has_exception()) {
+        return jayess_value_undefined();
+    }
+    return jayess_object_get(object, "label");
+}
+
+jayess_value *jayess_retained_box_object(jayess_value *box) {
+    return jayess_retained_box_value(box, "jayess_retained_box_object");
+}
+
+jayess_value *jayess_retained_box_close(jayess_value *box) {
+    return jayess_value_from_bool(jayess_value_close_native_handle(box));
+}
+`
+	if err := os.WriteFile(filepath.Join(nativeDir, "retained.c"), []byte(nativeSource), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "retained.bind.js"), []byte(`const f = () => {};
+export const makeRetainedBox = f;
+export const retainedCount = f;
+export const retainedLabel = f;
+export const retainedObject = f;
+export const closeRetainedBox = f;
+
+export default {
+  sources: ["./retained.c"],
+  includeDirs: [],
+  cflags: [],
+  ldflags: [],
+  exports: {
+    makeRetainedBox: { symbol: "jayess_retained_box_new", type: "function" },
+    retainedCount: { symbol: "jayess_retained_box_count", type: "function" },
+    retainedLabel: { symbol: "jayess_retained_box_label", type: "function" },
+    retainedObject: { symbol: "jayess_retained_box_object", type: "function" },
+    closeRetainedBox: { symbol: "jayess_retained_box_close", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	mainPath := filepath.Join(workdir, "main.js")
+	mainSource := `
+import { makeRetainedBox, retainedCount, retainedLabel, retainedObject, closeRetainedBox } from "./native/retained.bind.js";
+
+function makeBox() {
+  var local = { count: 2, label: "kept" };
+  return makeRetainedBox(local);
+}
+
+function main(args) {
+  var box = makeBox();
+  console.log("retained-before:" + retainedCount(box) + ":" + retainedLabel(box));
+  var alias = retainedObject(box);
+  alias.count = alias.count + 5;
+  console.log("retained-after:" + retainedCount(box) + ":" + alias.count);
+  console.log("retained-close:" + closeRetainedBox(box));
+  try {
+    retainedCount(box);
+  } catch (err) {
+    console.log(err.name + ":" + err.message);
+  }
+  return 0;
+}
+`
+	if err := os.WriteFile(mainPath, []byte(mainSource), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "ffi-native-retained-value-box")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"retained-before:2:kept",
+		"retained-after:7:7",
+		"retained-close:true",
+		"TypeError:jayess_retained_box_count expects a RetainedValueBox native handle",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected retained-value native wrapper output to contain %q, got: %s", want, text)
 		}
 	}
 }
@@ -5800,12 +10066,28 @@ function main(args) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 	defer func() { _ = cmd.Process.Kill() }()
-	time.Sleep(300 * time.Millisecond)
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
 
-	resp1, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
-	if err != nil {
-		_ = cmd.Wait()
-		t.Fatalf("Get(/) returned error: %v\noutput: %s", err, stdout.String())
+	var resp1 *http.Response
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case runErr := <-done:
+			t.Fatalf("mongoose embedded app program exited before serving requests: %v\noutput: %s", runErr, stdout.String())
+		default:
+		}
+		resp1, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatalf("Get(/) returned error: %v\noutput: %s", err, stdout.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	body1, err := io.ReadAll(resp1.Body)
 	_ = resp1.Body.Close()
@@ -5818,7 +10100,7 @@ function main(args) {
 
 	resp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/app.js", port))
 	if err != nil {
-		_ = cmd.Wait()
+		_ = cmd.Process.Kill()
 		t.Fatalf("Get(/app.js) returned error: %v\noutput: %s", err, stdout.String())
 	}
 	body2, err := io.ReadAll(resp2.Body)
@@ -5832,7 +10114,7 @@ function main(args) {
 
 	resp3, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/dashboard/settings", port))
 	if err != nil {
-		_ = cmd.Wait()
+		_ = cmd.Process.Kill()
 		t.Fatalf("Get(SPA fallback) returned error: %v\noutput: %s", err, stdout.String())
 	}
 	body3, err := io.ReadAll(resp3.Body)
@@ -5844,7 +10126,7 @@ function main(args) {
 		t.Fatalf("unexpected embedded fallback response: status=%d body=%q headers=%#v output=%s", resp3.StatusCode, string(body3), resp3.Header, stdout.String())
 	}
 
-	if err := cmd.Wait(); err != nil {
+	if err := <-done; err != nil {
 		t.Fatalf("mongoose embedded app program returned error: %v: %s", err, stdout.String())
 	}
 	text := stdout.String()
@@ -6692,6 +10974,7 @@ func TestBuildExecutableSupportsJayessGLFWWindowLifecycleOrHeadless(t *testing.T
 		filepath.Join(repoRoot, "node_modules", "@jayess", "audio"),
 		filepath.Join(workdir, "node_modules", "@jayess", "audio"),
 	)
+	rewriteAudioPackageToUseCubebStub(t, repoRoot, filepath.Join(workdir, "node_modules", "@jayess", "audio"))
 	copyDirRecursive(
 		t,
 		filepath.Join(repoRoot, "refs", "glfw", "include"),
@@ -6705,7 +10988,8 @@ func TestBuildExecutableSupportsJayessGLFWWindowLifecycleOrHeadless(t *testing.T
 
 	mainPath := filepath.Join(workdir, "main.js")
 	mainSource := `
-import { init, terminate, createWindow, destroyWindow, pollEvents, swapBuffers, windowShouldClose, getTime, setTime, getWindowSize, setWindowSize, getFramebufferSize, setKeyCallback, setMouseButtonCallback, setCursorPosCallback, setScrollCallback, simulateKeyEvent, simulateMouseButtonEvent, simulateCursorPosEvent, simulateScrollEvent, setWindowFullscreen, setWindowWindowed, isJoystickPresent, isJoystickGamepad, getJoystickName, getGamepadName, getGamepadButton } from "@jayess/glfw";
+import { init, terminate, createWindow, createOpenGLWindow, destroyWindow, pollEvents, swapBuffers, makeContextCurrent, isContextCurrent, swapInterval, getProcAddress, hasProcAddress, isVulkanSupported, getRequiredVulkanInstanceExtensions, getVulkanInstanceProcAddress, windowShouldClose, getTime, setTime, getWindowSize, setWindowSize, getFramebufferSize, setKeyCallback, setMouseButtonCallback, setCursorPosCallback, setScrollCallback, simulateKeyEvent, simulateMouseButtonEvent, simulateCursorPosEvent, simulateScrollEvent, setWindowFullscreen, setWindowWindowed, isJoystickPresent, isJoystickGamepad, getJoystickName, getGamepadName, getGamepadButton } from "@jayess/glfw";
+import { createContext, destroyContext, preferredSampleRate, minLatency, createPlaybackStream, startPlaybackStream, submitPlaybackSamples, playbackStats, nextStreamEvent, stopPlaybackStream, closePlaybackStream } from "@jayess/audio";
 
 function main(args) {
   if (!init()) {
@@ -6718,13 +11002,28 @@ function main(args) {
       text: message.text.toUpperCase()
     };
   });
-  var window = createWindow(64, 64, "jayess-glfw-test");
-  if (window === undefined) {
+  var glWindow = createOpenGLWindow(32, 24, "jayess-glfw-gl");
+  if (glWindow === undefined) {
     console.log("glfw-worker-terminate:" + workerThread.terminate());
     console.log("glfw-headless");
     terminate();
     return 0;
   }
+  var window = createWindow(64, 64, "jayess-glfw-test");
+  if (window === undefined) {
+    console.log("glfw-destroy-gl:" + destroyWindow(glWindow));
+    console.log("glfw-worker-terminate:" + workerThread.terminate());
+    console.log("glfw-headless");
+    terminate();
+    return 0;
+  }
+  makeContextCurrent(glWindow);
+  swapInterval(1);
+  var glClearPtr = getProcAddress("glClear");
+  var glGetStringPtr = getProcAddress("glGetString");
+  var vulkanSupported = isVulkanSupported();
+  var vulkanExtensions = getRequiredVulkanInstanceExtensions();
+  var vkCreateInstancePtr = getVulkanInstanceProcAddress("vkCreateInstance");
   setTime(3.25);
   var keyCount = 0;
   var mouseCount = 0;
@@ -6746,11 +11045,30 @@ function main(args) {
   simulateMouseButtonEvent(window, 1, 1, 4);
   simulateCursorPosEvent(window, 12.5, 3.5);
   simulateScrollEvent(window, 2.5, -1.5);
+  var audioCtx = createContext("jayess-glfw-audio", null);
+  var audioRate = preferredSampleRate(audioCtx);
+  var audioLatency = minLatency(audioCtx, { sampleRate: audioRate, channels: 2, format: "f32" });
+  var audioStream = createPlaybackStream(audioCtx, { name: "glfw-audio", sampleRate: audioRate, channels: 2, format: "f32", latencyFrames: audioLatency });
+  var audioSamples = new Float32Array(16);
+  audioSamples[0] = 0.2;
+  audioSamples[1] = -0.2;
+  audioSamples[2] = 0.15;
+  audioSamples[3] = -0.15;
+  audioSamples[4] = 0.1;
+  audioSamples[5] = -0.1;
+  audioSamples[6] = 0.05;
+  audioSamples[7] = -0.05;
+  console.log("glfw-audio-open:" + (audioStream != undefined));
+  console.log("glfw-audio-submit:" + (submitPlaybackSamples(audioStream, audioSamples) > 0));
+  console.log("glfw-audio-start:" + startPlaybackStream(audioStream));
+  var audioEvent = nextStreamEvent(audioStream);
   pollEvents();
   swapBuffers(window);
   console.log("glfw-worker-post:" + workerThread.postMessage({ left: 5, right: 7, text: "kimchi" }));
   console.log("glfw-worker-loop:" + await sleepAsync(0, "tick"));
   var workerReply = workerThread.receive(5000);
+  await sleepAsync(20, null);
+  var audioStats = playbackStats(audioStream);
   setWindowSize(window, 96, 72);
   var size = getWindowSize(window);
   var framebuffer = getFramebufferSize(window);
@@ -6761,6 +11079,13 @@ function main(args) {
   var joystickName = getJoystickName(0);
   var gamepadName = getGamepadName(0);
   console.log("glfw-time:" + (getTime() >= 3.25));
+  console.log("glfw-context-current:" + isContextCurrent(glWindow));
+  console.log("glfw-proc-clear:" + (glClearPtr != undefined));
+  console.log("glfw-proc-getstring:" + (glGetStringPtr != undefined));
+  console.log("glfw-has-proc-clear:" + hasProcAddress("glClear"));
+  console.log("glfw-vulkan-supported:" + (vulkanSupported === false || vulkanSupported === true));
+  console.log("glfw-vulkan-exts:" + (vulkanExtensions == undefined || vulkanExtensions.length >= 1));
+  console.log("glfw-vulkan-proc:" + (vkCreateInstancePtr == undefined || typeof vkCreateInstancePtr === "bigint"));
   console.log("glfw-size:" + size.width + "x" + size.height);
   console.log("glfw-framebuffer-size:" + framebuffer.width + "x" + framebuffer.height);
   console.log("glfw-key-callback:" + keyCount);
@@ -6768,6 +11093,10 @@ function main(args) {
   console.log("glfw-cursor-callback:" + cursorCount);
   console.log("glfw-scroll-callback:" + scrollCount);
   console.log("glfw-worker-reply:" + workerReply.value.sum + ":" + workerReply.value.text);
+  console.log("glfw-audio-event-started:" + (audioEvent != undefined && audioEvent.type === "started"));
+  console.log("glfw-audio-callbacks:" + (audioStats.callbacks > 0));
+  console.log("glfw-audio-consumed:" + (audioStats.consumedFrames > 0));
+  console.log("glfw-audio-running:" + audioStats.running);
   console.log("glfw-fullscreen-size:" + fullscreenSize.width + "x" + fullscreenSize.height);
   console.log("glfw-windowed-size:" + windowedSize.width + "x" + windowedSize.height);
   console.log("glfw-joystick-present:" + (isJoystickPresent(0) === false || isJoystickPresent(0) === true));
@@ -6776,7 +11105,11 @@ function main(args) {
   console.log("glfw-gamepad-name:" + (gamepadName == undefined || typeof gamepadName === "string"));
   console.log("glfw-gamepad-button:" + (getGamepadButton(0, 0) == undefined || getGamepadButton(0, 0) === false || getGamepadButton(0, 0) === true));
   console.log("glfw-window:" + windowShouldClose(window));
+  console.log("glfw-audio-stop:" + stopPlaybackStream(audioStream));
+  console.log("glfw-audio-close:" + closePlaybackStream(audioStream));
+  console.log("glfw-audio-destroy:" + destroyContext(audioCtx));
   console.log("glfw-destroy:" + destroyWindow(window));
+  console.log("glfw-destroy-gl:" + destroyWindow(glWindow));
   try {
     windowShouldClose(window);
   } catch (err) {
@@ -6826,6 +11159,16 @@ function main(args) {
 		"glfw-worker-post:true",
 		"glfw-worker-loop:tick",
 		"glfw-worker-reply:12:KIMCHI",
+		"glfw-audio-open:true",
+		"glfw-audio-submit:true",
+		"glfw-audio-start:true",
+		"glfw-audio-event-started:true",
+		"glfw-audio-callbacks:true",
+		"glfw-audio-consumed:true",
+		"glfw-audio-running:true",
+		"glfw-vulkan-supported:true",
+		"glfw-vulkan-exts:true",
+		"glfw-vulkan-proc:true",
 		"glfw-fullscreen-size:1920x1080",
 		"glfw-windowed-size:80x60",
 		"glfw-joystick-present:true",
@@ -6834,6 +11177,9 @@ function main(args) {
 		"glfw-gamepad-name:true",
 		"glfw-gamepad-button:true",
 		"glfw-window:",
+		"glfw-audio-stop:true",
+		"glfw-audio-close:true",
+		"glfw-audio-destroy:true",
 		"glfw-destroy:true",
 		"glfw-worker-terminate:true",
 		"TypeError:jayess_glfw_window_should_close expects a GLFWwindow native handle",
@@ -6864,12 +11210,29 @@ func TestBuildExecutableSupportsJayessRaylibPackage(t *testing.T) {
 	)
 	copyDirRecursive(
 		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "audio"),
+		filepath.Join(workdir, "node_modules", "@jayess", "audio"),
+	)
+	rewriteAudioPackageToUseCubebStub(t, repoRoot, filepath.Join(workdir, "node_modules", "@jayess", "audio"))
+	copyDirRecursive(
+		t,
 		filepath.Join(repoRoot, "refs", "raylib", "src"),
 		filepath.Join(workdir, "refs", "raylib", "src"),
 	)
+	tinyPPM := []byte{
+		'P', '6', '\n', '2', ' ', '2', '\n', '2', '5', '5', '\n',
+		255, 0, 0,
+		0, 255, 0,
+		0, 0, 255,
+		255, 255, 255,
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "tiny.ppm"), tinyPPM, 0o644); err != nil {
+		t.Fatalf("WriteFile tiny.ppm returned error: %v", err)
+	}
 	mainPath := filepath.Join(workdir, "main.js")
 	mainSource := `
-import { setTraceLogLevel, setConfigFlags, initWindow, closeWindow, isWindowReady, windowShouldClose, setWindowTitle, setWindowSize, getScreenWidth, getScreenHeight, beginDrawing, endDrawing, clearBackground, drawCircle, drawText, genImageColor, unloadImage, isImageReady, getImageWidth, getImageHeight, loadTextureFromImage, unloadTexture, isTextureReady, getTextureWidth, getTextureHeight, drawTexture, isKeyPressed, isKeyDown, isMouseButtonDown, getMouseX, getMouseY, getMousePosition, isGamepadAvailable, getGamepadAxisCount, isGamepadButtonDown, getGamepadName, setTargetFPS, getFrameTime, getTime, setRandomSeed, getRandomValue } from "@jayess/raylib";
+import { setTraceLogLevel, setTraceLogCallback, clearTraceLogCallback, emitTraceLog, setConfigFlags, initWindow, closeWindow, isWindowReady, windowShouldClose, setWindowTitle, setWindowSize, setWindowFullscreen, setWindowWindowed, getScreenWidth, getScreenHeight, beginDrawing, endDrawing, clearBackground, drawCircle, drawText, genImageColor, loadImage, loadImageFromBytes, unloadImage, isImageReady, getImageWidth, getImageHeight, loadTextureFromImage, unloadTexture, isTextureReady, getTextureWidth, getTextureHeight, drawTexture, isKeyPressed, isKeyDown, isMouseButtonDown, getMouseX, getMouseY, getMousePosition, isGamepadAvailable, getGamepadAxisCount, isGamepadButtonDown, getGamepadName, setTargetFPS, getFrameTime, getTime, setRandomSeed, getRandomValue } from "@jayess/raylib";
+import { createContext, destroyContext, preferredSampleRate, minLatency, createPlaybackStream, startPlaybackStream, submitPlaybackSamples, playbackStats, nextStreamEvent, stopPlaybackStream, closePlaybackStream } from "@jayess/audio";
 
 function main(args) {
   var black = { r: 0, g: 0, b: 0, a: 255 };
@@ -6880,9 +11243,26 @@ function main(args) {
   var gamepadName = null;
   var image = null;
   var memoryImage = null;
+  var fileImage = null;
+  var bytesImage = null;
   var texture = null;
   var memoryTexture = null;
+  var fileTexture = null;
+  var bytesTexture = null;
+  var traceCount = 0;
   setTraceLogLevel(7);
+  {
+    var prefix = "trace";
+    console.log("raylib-trace-install:" + setTraceLogCallback((level, message) => {
+      traceCount = traceCount + 1;
+      console.log("raylib-trace-callback:" + prefix + ":" + level + ":" + message + ":" + traceCount);
+      return 0;
+    }));
+  }
+  console.log("raylib-trace-emit:" + emitTraceLog(3, "hello"));
+  console.log("raylib-trace-clear:" + clearTraceLogCallback());
+  console.log("raylib-trace-after-clear:" + emitTraceLog(4, "later"));
+  console.log("raylib-trace-count:" + traceCount);
   setConfigFlags(128);
   setRandomSeed(123);
   console.log("raylib-rand:" + getRandomValue(1, 10));
@@ -6891,6 +11271,10 @@ function main(args) {
   setWindowTitle("jayess-raylib-updated");
   setWindowSize(48, 40);
   console.log("raylib-size:" + getScreenWidth() + "x" + getScreenHeight());
+  setWindowFullscreen();
+  console.log("raylib-fullscreen-size:" + getScreenWidth() + "x" + getScreenHeight());
+  setWindowWindowed(80, 60);
+  console.log("raylib-windowed-size:" + getScreenWidth() + "x" + getScreenHeight());
   console.log("raylib-key-pressed:" + (isKeyPressed(65) === false || isKeyPressed(65) === true));
   console.log("raylib-key-down:" + (isKeyDown(65) === false || isKeyDown(65) === true));
   console.log("raylib-mouse-down:" + (isMouseButtonDown(0) === false || isMouseButtonDown(0) === true));
@@ -6903,16 +11287,45 @@ function main(args) {
   console.log("raylib-gamepad-axis-count:" + (getGamepadAxisCount(0) >= 0));
   console.log("raylib-gamepad-button:" + (isGamepadButtonDown(0, 0) === false || isGamepadButtonDown(0, 0) === true));
   console.log("raylib-gamepad-name:" + (gamepadName == undefined || typeof gamepadName === "string"));
+  var audioCtx = createContext("jayess-raylib-audio", null);
+  var audioRate = preferredSampleRate(audioCtx);
+  var audioLatency = minLatency(audioCtx, { sampleRate: audioRate, channels: 2, format: "f32" });
+  var audioStream = createPlaybackStream(audioCtx, { name: "raylib-audio", sampleRate: audioRate, channels: 2, format: "f32", latencyFrames: audioLatency });
+  var audioSamples = new Float32Array(16);
+  audioSamples[0] = 0.2;
+  audioSamples[1] = -0.2;
+  audioSamples[2] = 0.15;
+  audioSamples[3] = -0.15;
+  audioSamples[4] = 0.1;
+  audioSamples[5] = -0.1;
+  audioSamples[6] = 0.05;
+  audioSamples[7] = -0.05;
+  console.log("raylib-audio-open:" + (audioStream != undefined));
+  console.log("raylib-audio-submit:" + (submitPlaybackSamples(audioStream, audioSamples) > 0));
+  console.log("raylib-audio-start:" + startPlaybackStream(audioStream));
+  var audioEvent = nextStreamEvent(audioStream);
+  var assetPath = path.join(".", "tiny.ppm");
+  var assetBytes = fs.createReadStream(assetPath).readBytes(23);
   image = genImageColor(4, 4, green);
   memoryImage = genImageColor(2, 2, white);
+  fileImage = loadImage(assetPath);
+  bytesImage = loadImageFromBytes(".ppm", assetBytes);
   texture = loadTextureFromImage(image);
   memoryTexture = loadTextureFromImage(memoryImage);
+  fileTexture = loadTextureFromImage(fileImage);
+  bytesTexture = loadTextureFromImage(bytesImage);
   console.log("raylib-image-ready:" + isImageReady(image));
   console.log("raylib-image-size:" + getImageWidth(image) + "x" + getImageHeight(image));
   console.log("raylib-second-image-size:" + getImageWidth(memoryImage) + "x" + getImageHeight(memoryImage));
+  console.log("raylib-file-asset-path:" + assetPath);
+  console.log("raylib-file-asset-bytes:" + assetBytes.length);
+  console.log("raylib-file-image-size:" + getImageWidth(fileImage) + "x" + getImageHeight(fileImage));
+  console.log("raylib-bytes-image-size:" + getImageWidth(bytesImage) + "x" + getImageHeight(bytesImage));
   console.log("raylib-texture-ready:" + isTextureReady(texture));
   console.log("raylib-texture-size:" + getTextureWidth(texture) + "x" + getTextureHeight(texture));
   console.log("raylib-second-texture-size:" + getTextureWidth(memoryTexture) + "x" + getTextureHeight(memoryTexture));
+  console.log("raylib-file-texture-size:" + getTextureWidth(fileTexture) + "x" + getTextureHeight(fileTexture));
+  console.log("raylib-bytes-texture-size:" + getTextureWidth(bytesTexture) + "x" + getTextureHeight(bytesTexture));
   setTargetFPS(60);
   beginDrawing();
   clearBackground(black);
@@ -6920,21 +11333,33 @@ function main(args) {
   drawText("jayess", 4, 4, 10, white);
   drawTexture(texture, 12, 12, white);
   drawTexture(memoryTexture, 20, 20, white);
+  drawTexture(fileTexture, 28, 28, white);
+  drawTexture(bytesTexture, 36, 36, white);
   endDrawing();
   setTimeout(() => {
     console.log("raylib-timer");
     return 0;
   }, 0);
   console.log("raylib-async:" + await sleepAsync(0, "ok"));
+  await sleepAsync(20, null);
+  var audioStats = playbackStats(audioStream);
   beginDrawing();
   clearBackground(black);
   endDrawing();
   console.log("raylib-text:true");
   console.log("raylib-texture-draw:true");
+  console.log("raylib-audio-event-started:" + (audioEvent != undefined && audioEvent.type === "started"));
+  console.log("raylib-audio-callbacks:" + (audioStats.callbacks > 0));
+  console.log("raylib-audio-consumed:" + (audioStats.consumedFrames > 0));
+  console.log("raylib-audio-running:" + audioStats.running);
   console.log("raylib-unload-texture:" + unloadTexture(texture));
   console.log("raylib-unload-memory-texture:" + unloadTexture(memoryTexture));
+  console.log("raylib-unload-file-texture:" + unloadTexture(fileTexture));
+  console.log("raylib-unload-bytes-texture:" + unloadTexture(bytesTexture));
   console.log("raylib-unload-image:" + unloadImage(image));
   console.log("raylib-unload-memory-image:" + unloadImage(memoryImage));
+  console.log("raylib-unload-file-image:" + unloadImage(fileImage));
+  console.log("raylib-unload-bytes-image:" + unloadImage(bytesImage));
   try {
     getTextureWidth(texture);
   } catch (err) {
@@ -6947,6 +11372,9 @@ function main(args) {
   }
   console.log("raylib-frame:" + (getFrameTime() >= 0));
   console.log("raylib-time:" + (getTime() >= 0));
+  console.log("raylib-audio-stop:" + stopPlaybackStream(audioStream));
+  console.log("raylib-audio-close:" + closePlaybackStream(audioStream));
+  console.log("raylib-audio-destroy:" + destroyContext(audioCtx));
   console.log("raylib-close:" + windowShouldClose());
   closeWindow();
   console.log("raylib-ready-after-close:" + isWindowReady());
@@ -6956,7 +11384,6 @@ function main(args) {
 	if err := os.WriteFile(mainPath, []byte(mainSource), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
-
 	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
 	if err != nil {
 		t.Fatalf("CompilePath returned error: %v", err)
@@ -6975,10 +11402,18 @@ function main(args) {
 	}
 	text := string(out)
 	for _, want := range []string{
+		"raylib-trace-install:true",
+		"raylib-trace-callback:trace:3:hello:1",
+		"raylib-trace-emit:true",
+		"raylib-trace-clear:true",
+		"raylib-trace-after-clear:false",
+		"raylib-trace-count:1",
 		"raylib-rand:",
 		"raylib-init:true",
 		"raylib-ready:true",
-		"raylib-size:",
+		"raylib-size:48x40",
+		"raylib-fullscreen-size:1920x1080",
+		"raylib-windowed-size:80x60",
 		"raylib-key-pressed:true",
 		"raylib-key-down:true",
 		"raylib-mouse-down:true",
@@ -6992,21 +11427,41 @@ function main(args) {
 		"raylib-image-ready:true",
 		"raylib-image-size:4x4",
 		"raylib-second-image-size:2x2",
+		"raylib-file-asset-path:./tiny.ppm",
+		"raylib-file-asset-bytes:23",
+		"raylib-file-image-size:2x2",
+		"raylib-bytes-image-size:2x2",
 		"raylib-texture-ready:true",
 		"raylib-texture-size:4x4",
 		"raylib-second-texture-size:2x2",
+		"raylib-file-texture-size:2x2",
+		"raylib-bytes-texture-size:2x2",
 		"raylib-timer",
 		"raylib-async:ok",
 		"raylib-text:true",
 		"raylib-texture-draw:true",
+		"raylib-audio-open:true",
+		"raylib-audio-submit:true",
+		"raylib-audio-start:true",
+		"raylib-audio-event-started:true",
+		"raylib-audio-callbacks:true",
+		"raylib-audio-consumed:true",
+		"raylib-audio-running:true",
 		"raylib-unload-texture:true",
 		"raylib-unload-memory-texture:true",
+		"raylib-unload-file-texture:true",
+		"raylib-unload-bytes-texture:true",
 		"raylib-unload-image:true",
 		"raylib-unload-memory-image:true",
+		"raylib-unload-file-image:true",
+		"raylib-unload-bytes-image:true",
 		"TypeError:jayess_raylib_get_texture_width expects a RaylibTexture native handle",
 		"TypeError:jayess_raylib_get_image_width expects a RaylibImage native handle",
 		"raylib-frame:true",
 		"raylib-time:true",
+		"raylib-audio-stop:true",
+		"raylib-audio-close:true",
+		"raylib-audio-destroy:true",
 		"raylib-close:false",
 		"raylib-ready-after-close:false",
 	} {
@@ -7180,6 +11635,11 @@ func TestBuildExecutableSupportsJayessAudioPackageOrReportsMissingDepsClearly(t 
 		filepath.Join(repoRoot, "node_modules", "@jayess", "audio"),
 		filepath.Join(workdir, "node_modules", "@jayess", "audio"),
 	)
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "refs", "miniaudio"),
+		filepath.Join(workdir, "refs", "miniaudio"),
+	)
 	if err := os.MkdirAll(filepath.Join(workdir, "refs", "cubeb", "include", "cubeb"), 0o755); err != nil {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}
@@ -7193,7 +11653,7 @@ func TestBuildExecutableSupportsJayessAudioPackageOrReportsMissingDepsClearly(t 
 
 	mainPath := filepath.Join(workdir, "main.js")
 	mainSource := `
-import { createContext, backendId, maxChannelCount, destroyContext } from "@jayess/audio";
+import { createContext, backendId, maxChannelCount, listOutputDevices, listInputDevices, destroyContext } from "@jayess/audio";
 
 function main(args) {
   var ctx = createContext("jayess-audio-test", null);
@@ -7203,6 +11663,16 @@ function main(args) {
   }
   console.log("audio-backend:" + backendId(ctx));
   console.log("audio-max-channels:" + maxChannelCount(ctx));
+  var outputs = listOutputDevices(ctx);
+  var inputs = listInputDevices(ctx);
+  console.log("audio-output-devices:" + outputs.length);
+  console.log("audio-input-devices:" + inputs.length);
+  if (outputs.length > 0) {
+    console.log("audio-first-output-type:" + outputs[0].type);
+  }
+  if (inputs.length > 0) {
+    console.log("audio-first-input-type:" + inputs[0].type);
+  }
   console.log("audio-destroy:" + destroyContext(ctx));
   return 0;
 }
@@ -7225,13 +11695,349 @@ function main(args) {
 		if runErr != nil {
 			t.Fatalf("compiled audio program returned error: %v: %s", runErr, string(out))
 		}
-		if !strings.Contains(string(out), "audio-") {
-			t.Fatalf("expected audio package smoke output, got: %s", string(out))
+		text := string(out)
+		for _, want := range []string{
+			"audio-backend:",
+			"audio-max-channels:",
+			"audio-output-devices:",
+			"audio-input-devices:",
+			"audio-destroy:true",
+		} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("expected audio package smoke output to contain %q, got: %s", want, text)
+			}
 		}
 		return
 	}
 	if !strings.Contains(err.Error(), "cubeb") || (!strings.Contains(err.Error(), "native library link failed") && !strings.Contains(err.Error(), "clang native build failed")) {
 		t.Fatalf("expected clear Cubeb build diagnostic, got: %v", err)
+	}
+}
+
+func TestBuildExecutableSupportsJayessAudioPlaybackSurface(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native audio playback test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	pkgDir := filepath.Join(workdir, "node_modules", "@jayess", "audio")
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "audio"),
+		pkgDir,
+	)
+	rewriteAudioPackageToUseCubebStub(t, repoRoot, pkgDir)
+
+	mainPath := filepath.Join(workdir, "main.js")
+	mainSource := `
+import { createContext, destroyContext, preferredSampleRate, minLatency, createPlaybackStream, startPlaybackStream, pausePlaybackStream, stopPlaybackStream, submitPlaybackSamples, playbackStats, closePlaybackStream, nextStreamEvent, createCaptureStream, startCaptureStream, stopCaptureStream, readCapturedSamples, captureStats, closeCaptureStream, loadWav, loadOgg, loadMp3, loadFlac } from "@jayess/audio";
+
+function main(args) {
+  var ctx = createContext("jayess-audio-playback-test", null);
+  var decoded = loadWav("sample.wav");
+  var decodedOgg = loadOgg("sample.ogg");
+  var decodedMp3 = loadMp3("sample.mp3");
+  var decodedFlac = loadFlac("sample.flac");
+  var rate = preferredSampleRate(ctx);
+  var latency = minLatency(ctx, { sampleRate: rate, channels: 2, format: "f32" });
+  var workerThread = worker.create(function(message) {
+    return { count: message.count + 1, label: message.label.toUpperCase() };
+  });
+  var stream = createPlaybackStream(ctx, { name: "stub-playback", sampleRate: rate, channels: 2, format: "f32", latencyFrames: latency });
+  var first = [];
+  var second = [];
+  var i = 0;
+  for (i = 0; i < 256; i = i + 1) {
+    first.push(0.15);
+    first.push(-0.15);
+  }
+  for (i = 0; i < 128; i = i + 1) {
+    second.push(0.05);
+    second.push(-0.05);
+  }
+  console.log("audio-stream-open:" + (stream != undefined));
+  console.log("audio-wav-rate:" + decoded.sampleRate);
+  console.log("audio-wav-channels:" + decoded.channels);
+  console.log("audio-wav-frames:" + decoded.frames);
+  console.log("audio-wav-format:" + decoded.format);
+  console.log("audio-wav-source-format:" + decoded.sourceFormat);
+  console.log("audio-wav-samples-length:" + decoded.samples.length);
+  console.log("audio-wav-first-sample:" + (decoded.samples[0] > 0.49));
+  console.log("audio-wav-second-sample:" + (decoded.samples[1] < -0.49));
+  console.log("audio-ogg-rate:" + decodedOgg.sampleRate);
+  console.log("audio-ogg-channels:" + decodedOgg.channels);
+  console.log("audio-ogg-format:" + decodedOgg.format);
+  console.log("audio-ogg-source-format:" + decodedOgg.sourceFormat);
+  console.log("audio-ogg-samples-length:" + (decodedOgg.samples.length > 0));
+  console.log("audio-mp3-rate:" + (decodedMp3.sampleRate > 0));
+  console.log("audio-mp3-channels:" + (decodedMp3.channels > 0));
+  console.log("audio-mp3-format:" + decodedMp3.format);
+  console.log("audio-mp3-source-format:" + decodedMp3.sourceFormat);
+  console.log("audio-mp3-samples-length:" + (decodedMp3.samples.length > 0));
+  console.log("audio-flac-rate:" + decodedFlac.sampleRate);
+  console.log("audio-flac-channels:" + decodedFlac.channels);
+  console.log("audio-flac-format:" + decodedFlac.format);
+  console.log("audio-flac-source-format:" + decodedFlac.sourceFormat);
+  console.log("audio-flac-samples-length:" + (decodedFlac.samples.length > 0));
+  console.log("audio-stream-rate:" + rate);
+  console.log("audio-stream-latency:" + latency);
+  console.log("audio-stream-submit-a:" + submitPlaybackSamples(stream, first));
+  console.log("audio-stream-start:" + startPlaybackStream(stream));
+  var startedEvent = nextStreamEvent(stream);
+  await sleepAsync(20, null);
+  var statsA = playbackStats(stream);
+  var typed = new Float32Array(8);
+  typed[0] = 0.2;
+  typed[1] = -0.2;
+  typed[2] = 0.1;
+  typed[3] = -0.1;
+  typed[4] = 0.05;
+  typed[5] = -0.05;
+  typed[6] = 0.025;
+  typed[7] = -0.025;
+  console.log("audio-stream-format:" + statsA.format);
+  console.log("audio-stream-channels:" + statsA.channels);
+  console.log("audio-stream-callbacks:" + (statsA.callbacks > 0));
+  console.log("audio-stream-consumed:" + (statsA.consumedFrames > 0));
+  console.log("audio-stream-running:" + statsA.running);
+  console.log("audio-stream-event-started:" + (startedEvent != undefined && startedEvent.type === "started"));
+  console.log("audio-stream-submit-f32-buffer:" + submitPlaybackSamples(stream, typed));
+  console.log("audio-stream-submit-b:" + submitPlaybackSamples(stream, second));
+  console.log("audio-worker-post:" + workerThread.postMessage({ count: 4, label: "mix" }));
+  await sleepAsync(20, null);
+  var workerReply = workerThread.receive(5000);
+  var statsB = playbackStats(stream);
+  console.log("audio-stream-streaming:" + (statsB.submittedFrames > statsA.submittedFrames && statsB.consumedFrames > statsA.consumedFrames));
+  console.log("audio-stream-pause:" + pausePlaybackStream(stream));
+  var paused = playbackStats(stream);
+  console.log("audio-stream-paused:" + (!paused.running));
+  console.log("audio-stream-resume:" + startPlaybackStream(stream));
+  await sleepAsync(20, null);
+  var resumed = playbackStats(stream);
+  console.log("audio-stream-resumed:" + (resumed.running && resumed.callbacks > paused.callbacks));
+  console.log("audio-stream-stop:" + stopPlaybackStream(stream));
+  var stopped = playbackStats(stream);
+  console.log("audio-stream-stopped:" + (!stopped.running));
+  var empty = createPlaybackStream(ctx, { name: "stub-empty", sampleRate: rate, channels: 2, format: "f32", latencyFrames: latency });
+  console.log("audio-empty-open:" + (empty != undefined));
+  console.log("audio-empty-start:" + startPlaybackStream(empty));
+  var emptyStarted = nextStreamEvent(empty);
+  await sleepAsync(20, null);
+  var emptyStats = playbackStats(empty);
+  var emptyEvent = nextStreamEvent(empty);
+  console.log("audio-empty-underruns:" + (emptyStats.underruns > 0));
+  console.log("audio-empty-event-started:" + (emptyStarted != undefined && emptyStarted.type === "started"));
+  console.log("audio-empty-event-underrun:" + (emptyEvent != undefined && emptyEvent.type === "underrun"));
+  console.log("audio-empty-stop:" + stopPlaybackStream(empty));
+  console.log("audio-empty-close:" + closePlaybackStream(empty));
+  var errorStream = createPlaybackStream(ctx, { name: "stub-error", sampleRate: rate, channels: 2, format: "f32", latencyFrames: latency });
+  console.log("audio-error-open:" + (errorStream != undefined));
+  console.log("audio-error-submit:" + submitPlaybackSamples(errorStream, [0.25, -0.25, 0.125, -0.125]));
+  console.log("audio-error-start:" + startPlaybackStream(errorStream));
+  var errorStarted = nextStreamEvent(errorStream);
+  var errorEvent = undefined;
+  var errorSeen = false;
+  var errorPoll = 0;
+  for (errorPoll = 0; errorPoll < 8; errorPoll = errorPoll + 1) {
+    await sleepAsync(5, null);
+    errorEvent = nextStreamEvent(errorStream);
+    if (errorEvent != undefined && errorEvent.type === "error") {
+      errorSeen = true;
+      break;
+    }
+  }
+  var errorStats = playbackStats(errorStream);
+  console.log("audio-error-event-started:" + (errorStarted != undefined && errorStarted.type === "started"));
+  console.log("audio-error-event-error:" + errorSeen);
+  console.log("audio-error-last-state:" + errorStats.lastState);
+  console.log("audio-error-running:" + errorStats.running);
+  console.log("audio-error-close:" + closePlaybackStream(errorStream));
+  var capture = createCaptureStream(ctx, { name: "stub-capture", sampleRate: rate, channels: 1, format: "f32", latencyFrames: latency });
+  console.log("audio-capture-open:" + (capture != undefined));
+  console.log("audio-capture-start:" + startCaptureStream(capture));
+  var captureStarted = nextStreamEvent(capture);
+  await sleepAsync(20, null);
+  var captureA = captureStats(capture);
+  var captured = readCapturedSamples(capture, 4);
+  console.log("audio-capture-running:" + captureA.running);
+  console.log("audio-capture-event-started:" + (captureStarted != undefined && captureStarted.type === "started"));
+  console.log("audio-capture-callbacks:" + (captureA.callbacks > 0));
+  console.log("audio-capture-frames:" + (captureA.capturedFrames > 0));
+  console.log("audio-capture-buffer-length:" + captured.length);
+  console.log("audio-capture-first-sample:" + (captured[0] > 0.24));
+  console.log("audio-capture-second-sample:" + (captured[1] < -0.24));
+  console.log("audio-capture-stop:" + stopCaptureStream(capture));
+  var captureStopped = nextStreamEvent(capture);
+  console.log("audio-capture-event-stopped:" + (captureStopped != undefined && captureStopped.type === "stopped"));
+  console.log("audio-capture-close:" + closeCaptureStream(capture));
+  var bytes = Uint8Array.fromString("ff7f0080004000c0", "hex");
+  var s16stream = createPlaybackStream(ctx, { name: "stub-s16", sampleRate: rate, channels: 2, format: "s16", latencyFrames: latency });
+  console.log("audio-s16-open:" + (s16stream != undefined));
+  console.log("audio-s16-submit:" + submitPlaybackSamples(s16stream, bytes));
+  console.log("audio-s16-start:" + startPlaybackStream(s16stream));
+  await sleepAsync(20, null);
+  var s16stats = playbackStats(s16stream);
+  console.log("audio-s16-format:" + s16stats.format);
+  console.log("audio-s16-consumed:" + (s16stats.consumedFrames > 0));
+  console.log("audio-s16-stop:" + stopPlaybackStream(s16stream));
+  console.log("audio-s16-close:" + closePlaybackStream(s16stream));
+  console.log("audio-worker-reply:" + (workerReply != undefined));
+  console.log("audio-worker-terminate:" + workerThread.terminate());
+  console.log("audio-stream-close:" + closePlaybackStream(stream));
+  console.log("audio-context-destroy:" + destroyContext(ctx));
+  return 0;
+}
+`
+	if err := os.WriteFile(mainPath, []byte(mainSource), 0o644); err != nil {
+		t.Fatalf("WriteFile(main.js) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "sample.wav"), []byte{
+		'R', 'I', 'F', 'F',
+		44, 0, 0, 0,
+		'W', 'A', 'V', 'E',
+		'f', 'm', 't', ' ',
+		16, 0, 0, 0,
+		1, 0,
+		2, 0,
+		0x80, 0xbb, 0, 0,
+		0x00, 0xee, 0x02, 0x00,
+		4, 0,
+		16, 0,
+		'd', 'a', 't', 'a',
+		8, 0, 0, 0,
+		0xff, 0x3f,
+		0x01, 0xc0,
+		0x00, 0x20,
+		0x00, 0xe0,
+	}, 0o644); err != nil {
+		t.Fatalf("WriteFile(sample.wav) returned error: %v", err)
+	}
+	copyFileForTest(
+		t,
+		filepath.Join(repoRoot, "refs", "miniaudio", "data", "48000-stereo.ogg"),
+		filepath.Join(workdir, "sample.ogg"),
+	)
+	copyFileForTest(
+		t,
+		filepath.Join(repoRoot, "refs", "SDL_mixer", "examples", "music.mp3"),
+		filepath.Join(workdir, "sample.mp3"),
+	)
+	copyFileForTest(
+		t,
+		filepath.Join(repoRoot, "refs", "miniaudio", "data", "16-44100-stereo.flac"),
+		filepath.Join(workdir, "sample.flac"),
+	)
+
+	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "jayess-audio-playback")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled audio playback program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"audio-stream-open:true",
+		"audio-wav-rate:48000",
+		"audio-wav-channels:2",
+		"audio-wav-frames:2",
+		"audio-wav-format:f32",
+		"audio-wav-source-format:wav-s16",
+		"audio-wav-samples-length:4",
+		"audio-wav-first-sample:true",
+		"audio-wav-second-sample:true",
+		"audio-ogg-rate:48000",
+		"audio-ogg-channels:2",
+		"audio-ogg-format:f32",
+		"audio-ogg-source-format:ogg-vorbis",
+		"audio-ogg-samples-length:true",
+		"audio-mp3-rate:true",
+		"audio-mp3-channels:true",
+		"audio-mp3-format:f32",
+		"audio-mp3-source-format:mp3",
+		"audio-mp3-samples-length:true",
+		"audio-flac-rate:44100",
+		"audio-flac-channels:2",
+		"audio-flac-format:f32",
+		"audio-flac-source-format:flac",
+		"audio-flac-samples-length:true",
+		"audio-stream-rate:48000",
+		"audio-stream-latency:64",
+		"audio-stream-submit-a:256",
+		"audio-stream-start:true",
+		"audio-stream-format:f32",
+		"audio-stream-channels:2",
+		"audio-stream-callbacks:true",
+		"audio-stream-consumed:true",
+		"audio-stream-running:true",
+		"audio-stream-event-started:true",
+		"audio-stream-submit-f32-buffer:4",
+		"audio-stream-submit-b:128",
+		"audio-worker-post:true",
+		"audio-stream-streaming:true",
+		"audio-stream-pause:true",
+		"audio-stream-paused:true",
+		"audio-stream-resume:true",
+		"audio-stream-resumed:true",
+		"audio-stream-stop:true",
+		"audio-stream-stopped:true",
+		"audio-empty-open:true",
+		"audio-empty-start:true",
+		"audio-empty-underruns:true",
+		"audio-empty-event-started:true",
+		"audio-empty-event-underrun:true",
+		"audio-empty-stop:true",
+		"audio-empty-close:true",
+		"audio-error-open:true",
+		"audio-error-submit:2",
+		"audio-error-start:true",
+		"audio-error-event-started:true",
+		"audio-error-event-error:true",
+		"audio-error-last-state:error",
+		"audio-error-running:false",
+		"audio-error-close:true",
+		"audio-capture-open:true",
+		"audio-capture-start:true",
+		"audio-capture-running:true",
+		"audio-capture-event-started:true",
+		"audio-capture-callbacks:true",
+		"audio-capture-frames:true",
+		"audio-capture-buffer-length:4",
+		"audio-capture-first-sample:true",
+		"audio-capture-second-sample:true",
+		"audio-capture-stop:true",
+		"audio-capture-event-stopped:true",
+		"audio-capture-close:true",
+		"audio-s16-open:true",
+		"audio-s16-submit:2",
+		"audio-s16-start:true",
+		"audio-s16-format:s16",
+		"audio-s16-consumed:true",
+		"audio-s16-stop:true",
+		"audio-s16-close:true",
+		"audio-worker-reply:true",
+		"audio-worker-terminate:true",
+		"audio-stream-close:true",
+		"audio-context-destroy:true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected audio playback output to contain %q, got: %s", want, text)
+		}
 	}
 }
 
@@ -7310,33 +12116,13 @@ function main(args) {
 	}
 }
 
-func TestBuildExecutableSupportsJayessWebviewBindingWithExplicitIncludePaths(t *testing.T) {
-	tc, err := DetectToolchain()
-	if err != nil {
-		t.Skipf("skipping webview explicit-include test: %v", err)
-	}
+func prepareStubWebviewPackage(t *testing.T, repoRoot string, workdir string) {
+	t.Helper()
 
-	triple, err := target.DefaultTriple()
-	if err != nil {
-		t.Fatalf("DefaultTriple returned error: %v", err)
-	}
-
-	repoRoot := repoRootFromBackendTest(t)
-	workdir := t.TempDir()
 	copyDirRecursive(
 		t,
 		filepath.Join(repoRoot, "node_modules", "@jayess", "webview"),
 		filepath.Join(workdir, "node_modules", "@jayess", "webview"),
-	)
-	copyDirRecursive(
-		t,
-		filepath.Join(repoRoot, "node_modules", "@jayess", "glfw"),
-		filepath.Join(workdir, "node_modules", "@jayess", "glfw"),
-	)
-	copyDirRecursive(
-		t,
-		filepath.Join(repoRoot, "refs", "glfw"),
-		filepath.Join(workdir, "refs", "glfw"),
 	)
 
 	nativeDir := filepath.Join(workdir, "node_modules", "@jayess", "webview", "native")
@@ -7661,6 +12447,32 @@ extern "C" webview_error_t webview_terminate(webview_t view) {
 	if err := os.WriteFile(bindPath, []byte(bindText), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
+}
+
+func TestBuildExecutableSupportsJayessWebviewBindingWithExplicitIncludePaths(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping webview explicit-include test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "glfw"),
+		filepath.Join(workdir, "node_modules", "@jayess", "glfw"),
+	)
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "refs", "glfw"),
+		filepath.Join(workdir, "refs", "glfw"),
+	)
+	prepareStubWebviewPackage(t, repoRoot, workdir)
 
 	entry := filepath.Join(workdir, "main.js")
 	if err := os.WriteFile(entry, []byte(`
@@ -8507,6 +13319,1750 @@ function main(args) {
 	}
 }
 
+func TestBuildExecutableSupportsJayessWebviewHTTPServerCoexistence(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping webview HTTP coexistence test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	port := reserved.Addr().(*net.TCPAddr).Port
+	reserved.Close()
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	prepareStubWebviewPackage(t, repoRoot, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(fmt.Sprintf(`
+import { createWindow, destroyWindow } from "@jayess/webview";
+
+var serverRef = undefined;
+
+function handleRequest(req, res) {
+  console.log("webview-http-req:" + req.method + ":" + req.url);
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end("<!doctype html><h1>webview-http</h1>");
+  serverRef.close();
+  return 0;
+}
+
+function main() {
+  var view = undefined;
+  console.log("webview-http-imported:true");
+  serverRef = http.createServer(handleRequest);
+  console.log("webview-http-server:" + (serverRef != undefined));
+  serverRef.listen(%d, "127.0.0.1");
+  console.log("webview-http-view:" + (view == undefined));
+  return 0;
+}
+`, port)), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "webview-http-coexistence-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	type runResult struct {
+		out []byte
+		err error
+	}
+	done := make(chan runResult, 1)
+	go func() {
+		cmd := exec.Command(outputPath)
+		cmd.Dir = workdir
+		out, err := cmd.CombinedOutput()
+		done <- runResult{out: out, err: err}
+	}()
+
+	var resp *http.Response
+	for i := 0; i < 40; i++ {
+		resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+		if err == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err != nil {
+		select {
+		case resultRun := <-done:
+			t.Fatalf("HTTP request returned error: %v\nchild error: %v\nchild output:\n%s", err, resultRun.err, string(resultRun.out))
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("HTTP request returned error: %v\nchild process did not exit within diagnostic timeout", err)
+		}
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll returned error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if got := string(bodyBytes); got != "<!doctype html><h1>webview-http</h1>" {
+		t.Fatalf("expected embedded HTML body, got %q", got)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("expected text/html content type, got %q", got)
+	}
+
+	resultRun := <-done
+	if resultRun.err != nil {
+		t.Fatalf("compiled webview HTTP coexistence program returned error: %v: %s", resultRun.err, string(resultRun.out))
+	}
+	text := string(resultRun.out)
+	for _, want := range []string{
+		"webview-http-imported:true",
+		"webview-http-server:true",
+		"webview-http-req:GET:/",
+		"webview-http-view:true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected webview HTTP coexistence output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsJayessHTMLPackage(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping HTML package test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "html"),
+		filepath.Join(workdir, "node_modules", "@jayess", "html"),
+	)
+
+	sampleHTML := `<div id="a" disabled><span>hi</span><!--note--><br/></div>`
+	if err := os.WriteFile(filepath.Join(workdir, "sample.html"), []byte(sampleHTML), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { tokenizeHtml, parseHtml, parseHtmlFragment, serializeHtml, serializeHtmlWithOptions, createElement, createText, createComment, setAttribute, removeAttribute, appendChild, removeChild, replaceChild, cloneNode, walkDepthFirst, findByTag, matchesSelector, querySelectorAll } from "@jayess/html";
+
+function main(args) {
+  var tokens = tokenizeHtml("<!DOCTYPE html><div id=a disabled><span>hi</span><!--note--><br/></div>");
+  console.log("html-tokens:" + tokens.length);
+  console.log("html-token-doctype:" + tokens[0].type + ":" + tokens[0].value + ":" + tokens[0].span.end.offset);
+  console.log("html-token-start:" + tokens[1].type + ":" + tokens[1].tagName + ":" + tokens[1].attributes.id + ":" + tokens[1].attributes.disabled + ":" + tokens[1].selfClosing);
+  console.log("html-token-text:" + tokens[3].type + ":" + tokens[3].value + ":" + tokens[3].span.start.offset + ":" + tokens[3].span.end.offset);
+  console.log("html-token-comment:" + tokens[5].type + ":" + tokens[5].value);
+  console.log("html-token-self-close:" + tokens[6].type + ":" + tokens[6].tagName + ":" + tokens[6].selfClosing);
+  console.log("html-token-end:" + tokens[7].type + ":" + tokens[7].tagName);
+  try {
+    tokenizeHtml("<!--broken");
+    console.log("html-token-error:false");
+  } catch (err) {
+    console.log("html-token-error:" + err.name);
+  }
+
+  var doc = parseHtml(fs.readFile("./sample.html", "utf8"));
+  var root = doc.children[0];
+  var span = root.children[0];
+  var comment = root.children[1];
+  var br = root.children[2];
+  console.log("html-doc:" + doc.type + ":" + doc.children.length);
+  console.log("html-doc-span:" + doc.span.start.line + ":" + doc.span.start.column + ":" + doc.span.end.offset);
+  console.log("html-tag:" + root.tagName);
+  console.log("html-root-span:" + root.span.start.offset + ":" + root.span.end.offset);
+  console.log("html-attr:" + root.attributes.id + ":" + root.attributes.disabled);
+  console.log("html-span:" + span.tagName + ":" + span.children[0].value);
+  console.log("html-span-text-span:" + span.children[0].span.start.offset + ":" + span.children[0].span.end.offset);
+  console.log("html-comment:" + comment.value);
+  console.log("html-comment-span:" + comment.span.start.offset + ":" + comment.span.end.offset);
+  console.log("html-br:" + br.tagName + ":" + br.selfClosing);
+
+  var frag = parseHtmlFragment("<p class=x>ok</p>tail");
+  console.log("html-frag:" + frag.type + ":" + frag.children.length + ":" + frag.children[1].value);
+
+  var malformed = parseHtmlFragment("<div><span>x</div>");
+  var malformedDiv = malformed.children[0];
+  var malformedSpan = malformedDiv.children[0];
+  console.log("html-malformed:" + malformedDiv.children.length + ":" + malformedSpan.tagName + ":" + malformedSpan.children[0].value);
+
+  var truncated = parseHtmlFragment("<div><span>x");
+  var truncatedDiv = truncated.children[0];
+  var truncatedSpan = truncatedDiv.children[0];
+  console.log("html-truncated:" + truncatedDiv.children.length + ":" + truncatedSpan.tagName + ":" + truncatedSpan.children[0].value);
+
+  try {
+    parseHtml("<!--broken");
+    console.log("html-error:false");
+  } catch (err) {
+  console.log("html-error:" + err.name);
+  }
+
+  console.log("html-serialize:" + serializeHtml(doc));
+  console.log("html-serialize-no-comments:" + serializeHtmlWithOptions(doc, { comments: false }));
+  console.log("html-serialize-pretty:" + serializeHtmlWithOptions(doc, { pretty: true }));
+  console.log("html-serialize-minify:" + serializeHtmlWithOptions(doc, { minify: true }));
+
+  var built = createElement("section", undefined, undefined);
+  appendChild(built, createText("lead"));
+  appendChild(built, createComment("keep"));
+  setAttribute(built, "id", "root");
+  setAttribute(built, "class", "hero");
+  var inner = createElement("span", undefined, undefined);
+  setAttribute(inner, "id", "child");
+  appendChild(inner, createText("x"));
+  appendChild(built, inner);
+  replaceChild(built, 0, createText("intro"));
+  removeChild(built, 1);
+  removeAttribute(built, "id");
+  var clone = cloneNode(built);
+  console.log("html-built:" + serializeHtml(built));
+  console.log("html-clone:" + serializeHtml(clone));
+  console.log("html-walk:" + walkDepthFirst(clone).length);
+  console.log("html-find-span:" + findByTag(doc, "span").length);
+  console.log("html-match-tag:" + matchesSelector(root, "div"));
+  console.log("html-match-id:" + matchesSelector(root, "#a"));
+  console.log("html-match-class:" + matchesSelector(frag.children[0], ".x"));
+  console.log("html-match-attr:" + matchesSelector(root, "[disabled]"));
+  console.log("html-select-desc:" + querySelectorAll(doc, "div span").length);
+  console.log("html-select-child:" + querySelectorAll(doc, "div > span").length);
+  console.log("html-select-attr-value:" + querySelectorAll(doc, "div[id=a]").length);
+  console.log("html-select-first-child:" + querySelectorAll(doc, "div > span:first-child").length);
+  console.log("html-select-last-child:" + querySelectorAll(doc, "div > br:last-child").length);
+  console.log("html-select-empty:" + querySelectorAll(doc, "div > br:empty").length);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "html-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled HTML program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"html-tokens:8",
+		"html-token-doctype:doctype:html:15",
+		"html-token-start:startTag:div:a:true:false",
+		"html-token-text:text:hi:40:42",
+		"html-token-comment:comment:note",
+		"html-token-self-close:startTag:br:true",
+		"html-token-end:endTag:div",
+		"html-token-error:HTMLParseError",
+		"html-doc:document:1",
+		"html-doc-span:1:1:58",
+		"html-tag:div",
+		"html-root-span:0:58",
+		"html-attr:a:true",
+		"html-span:span:hi",
+		"html-span-text-span:27:29",
+		"html-comment:note",
+		"html-comment-span:36:47",
+		"html-br:br:true",
+		"html-frag:fragment:2:tail",
+		"html-malformed:1:span:x",
+		"html-truncated:1:span:x",
+		"html-error:HTMLParseError",
+		`html-serialize:<div id="a" disabled><span>hi</span><!--note--><br/></div>`,
+		`html-serialize-no-comments:<div id="a" disabled><span>hi</span><br/></div>`,
+		"html-serialize-pretty:<div id=\"a\" disabled>\n  <span>hi</span>\n  <!--note-->\n  <br/>\n</div>",
+		`html-serialize-minify:<div id="a" disabled><span>hi</span><!--note--><br/></div>`,
+		`html-built:<section class="hero">intro<span id="child">x</span></section>`,
+		`html-clone:<section class="hero">intro<span id="child">x</span></section>`,
+		"html-walk:4",
+		"html-find-span:1",
+		"html-match-tag:true",
+		"html-match-id:true",
+		"html-match-class:true",
+		"html-match-attr:true",
+		"html-select-desc:1",
+		"html-select-child:1",
+		"html-select-attr-value:1",
+		"html-select-first-child:1",
+		"html-select-last-child:1",
+		"html-select-empty:1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected HTML output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsJayessXMLPackage(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping XML package test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "xml"),
+		filepath.Join(workdir, "node_modules", "@jayess", "xml"),
+	)
+
+	sampleXML := `<?xml version="1.0"?><!--lead--><root id="a"><child>hi</child><![CDATA[<raw>]]><empty flag="x"/></root>`
+	if err := os.WriteFile(filepath.Join(workdir, "sample.xml"), []byte(sampleXML), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "ns.xml"), []byte(`<ns:root xmlns:ns="urn:test" xmlns="urn:default"><ns:item ns:id="7"/><child plain="x"/></ns:root>`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { tokenizeXml, parseXml, serializeXml, serializeXmlWithOptions } from "@jayess/xml";
+
+function main(args) {
+  var tokens = tokenizeXml(fs.readFile("./sample.xml", "utf8"));
+  console.log("xml-tokens:" + tokens.length);
+  console.log("xml-token-pi:" + tokens[0].type + ":" + tokens[0].target + ":" + tokens[0].data);
+  console.log("xml-token-comment:" + tokens[1].type + ":" + tokens[1].value);
+  console.log("xml-token-start:" + tokens[2].type + ":" + tokens[2].tagName + ":" + tokens[2].attributes.id);
+  console.log("xml-token-cdata:" + tokens[6].type + ":" + tokens[6].value);
+  console.log("xml-token-empty:" + tokens[7].type + ":" + tokens[7].tagName + ":" + tokens[7].selfClosing);
+  console.log("xml-token-end:" + tokens[8].type + ":" + tokens[8].tagName);
+  console.log("xml-token-span:" + tokens[2].span.start.offset + ":" + tokens[2].span.end.offset);
+
+  var doc = parseXml(fs.readFile("./sample.xml", "utf8"));
+  console.log("xml-doc:" + doc.type + ":" + doc.children.length);
+  console.log("xml-doc-span:" + doc.span.start.line + ":" + doc.span.end.offset);
+  console.log("xml-pi:" + doc.children[0].target + ":" + doc.children[0].data);
+  console.log("xml-comment:" + doc.children[1].value);
+  var root = doc.children[2];
+  console.log("xml-root:" + root.tagName + ":" + root.attributes.id + ":" + root.children.length);
+  console.log("xml-child:" + root.children[0].tagName + ":" + root.children[0].children[0].value);
+  console.log("xml-cdata:" + root.children[1].type + ":" + root.children[1].value);
+  console.log("xml-empty:" + root.children[2].tagName + ":" + root.children[2].attributes.flag + ":" + root.children[2].selfClosing);
+  console.log("xml-root-span:" + root.span.start.offset + ":" + root.span.end.offset);
+  console.log("xml-serialize:" + serializeXml(doc));
+  console.log("xml-serialize-no-comments:" + serializeXmlWithOptions(doc, { comments: false }));
+  console.log("xml-serialize-pretty:" + serializeXmlWithOptions(doc, { pretty: true }));
+  console.log("xml-serialize-minify:" + serializeXmlWithOptions(doc, { minify: true }));
+
+  var nsDoc = parseXml(fs.readFile("./ns.xml", "utf8"));
+  var nsRoot = nsDoc.children[0];
+  var nsItem = nsRoot.children[0];
+  var defaultChild = nsRoot.children[1];
+  console.log("xml-ns-root:" + nsRoot.tagName + ":" + nsRoot.prefix + ":" + nsRoot.localName + ":" + nsRoot.namespaceURI);
+  console.log("xml-ns-item:" + nsItem.tagName + ":" + nsItem.prefix + ":" + nsItem.localName + ":" + nsItem.namespaceURI);
+  console.log("xml-ns-default:" + defaultChild.tagName + ":" + defaultChild.localName + ":" + defaultChild.namespaceURI);
+  console.log("xml-ns-attr:" + nsItem.attributeDetails["ns:id"].prefix + ":" + nsItem.attributeDetails["ns:id"].localName + ":" + nsItem.attributeDetails["ns:id"].namespaceURI);
+  console.log("xml-ns-xmlns:" + nsRoot.attributeDetails["xmlns:ns"].namespaceURI);
+  console.log("xml-ns-plain-attr:" + defaultChild.attributeDetails["plain"].localName + ":" + defaultChild.attributeDetails["plain"].namespaceURI);
+
+  try {
+    parseXml("<root><a></root>");
+    console.log("xml-error-mismatch:false");
+  } catch (err) {
+    console.log("xml-error-mismatch:" + err.name);
+  }
+
+  try {
+    parseXml("<root a=1/>");
+    console.log("xml-error-attr:false");
+  } catch (err) {
+    console.log("xml-error-attr:" + err.name);
+  }
+
+  try {
+    tokenizeXml("<!--broken");
+    console.log("xml-token-error:false");
+  } catch (err) {
+    console.log("xml-token-error:" + err.name);
+  }
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "xml-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled XML program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"xml-tokens:9",
+		"xml-token-pi:processingInstruction:xml:version=\"1.0\"",
+		"xml-token-comment:comment:lead",
+		"xml-token-start:startTag:root:a",
+		"xml-token-cdata:cdata:<raw>",
+		"xml-token-empty:startTag:empty:true",
+		"xml-token-end:endTag:root",
+		"xml-token-span:32:45",
+		"xml-doc:document:3",
+		"xml-doc-span:1:103",
+		"xml-pi:xml:version=\"1.0\"",
+		"xml-comment:lead",
+		"xml-root:root:a:3",
+		"xml-child:child:hi",
+		"xml-cdata:cdata:<raw>",
+		"xml-empty:empty:x:true",
+		"xml-root-span:32:103",
+		"xml-serialize:<?xml version=\"1.0\"?><!--lead--><root id=\"a\"><child>hi</child><![CDATA[<raw>]]><empty flag=\"x\"/></root>",
+		"xml-serialize-no-comments:<?xml version=\"1.0\"?><root id=\"a\"><child>hi</child><![CDATA[<raw>]]><empty flag=\"x\"/></root>",
+		"xml-serialize-pretty:<?xml version=\"1.0\"?><!--lead--><root id=\"a\">\n  <child>hi</child>\n  <![CDATA[<raw>]]>\n  <empty flag=\"x\"/>\n</root>",
+		"xml-serialize-minify:<?xml version=\"1.0\"?><!--lead--><root id=\"a\"><child>hi</child><![CDATA[<raw>]]><empty flag=\"x\"/></root>",
+		"xml-ns-root:ns:root:ns:root:urn:test",
+		"xml-ns-item:ns:item:ns:item:urn:test",
+		"xml-ns-default:child:child:urn:default",
+		"xml-ns-attr:ns:id:urn:test",
+		"xml-ns-xmlns:http://www.w3.org/2000/xmlns/",
+		"xml-ns-plain-attr:plain:undefined",
+		"xml-error-mismatch:XMLParseError",
+		"xml-error-attr:XMLParseError",
+		"xml-token-error:XMLParseError",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected XML output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsJayessCSSPackage(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping CSS package test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "css"),
+		filepath.Join(workdir, "node_modules", "@jayess", "css"),
+	)
+
+	sampleCSS := `@import "theme.css";
+/*lead*/
+@media screen and (min-width: 600px) { .card { padding: 8px; } }
+.btn.primary, #app > .item { color: red; margin: 1.5rem; content: "hi"; }
+#footer { padding: 8px; }`
+	if err := os.WriteFile(filepath.Join(workdir, "sample.css"), []byte(sampleCSS), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { tokenizeCss, parseCss, serializeCss, serializeCssWithOptions } from "@jayess/css";
+
+function main(args) {
+  var source = fs.readFile("./sample.css", "utf8");
+  var tokens = tokenizeCss(source);
+  console.log("css-tokens:" + tokens.length);
+  console.log("css-token-at:" + tokens[0].type + ":" + tokens[0].value);
+  console.log("css-token-import-string:" + tokens[1].type + ":" + tokens[1].value);
+  console.log("css-token-comment:" + tokens[3].type + ":" + tokens[3].value);
+  console.log("css-token-dimension:" + tokens[24].type + ":" + tokens[24].value);
+  console.log("css-token-string:" + tokens[29].type + ":" + tokens[29].value);
+
+  var sheet = parseCss(source);
+  console.log("css-sheet:" + sheet.type + ":" + sheet.rules.length);
+  console.log("css-sheet-span:" + sheet.span.start.line + ":" + sheet.span.end.offset);
+  console.log("css-import:" + sheet.rules[0].type + ":" + sheet.rules[0].name + ":" + sheet.rules[0].prelude);
+  console.log("css-comment:" + sheet.rules[1].type + ":" + sheet.rules[1].value);
+  console.log("css-media:" + sheet.rules[2].type + ":" + sheet.rules[2].name + ":" + sheet.rules[2].prelude + ":" + sheet.rules[2].rules.length);
+  var mediaRule = sheet.rules[2].rules[0];
+  console.log("css-media-rule:" + mediaRule.selector + ":" + mediaRule.declarations[0].property + ":" + mediaRule.declarations[0].value);
+  var rule = sheet.rules[3];
+  console.log("css-rule:" + rule.type + ":" + rule.selector + ":" + rule.declarations.length);
+  console.log("css-selector-tokens:" + rule.selectorTokens.length);
+  console.log("css-decl-color:" + rule.declarations[0].property + ":" + rule.declarations[0].value + ":" + rule.declarations[0].valueParts[0].type);
+  console.log("css-decl-margin:" + rule.declarations[1].property + ":" + rule.declarations[1].value + ":" + rule.declarations[1].valueParts[0].type);
+  console.log("css-decl-content:" + rule.declarations[2].property + ":" + rule.declarations[2].value + ":" + rule.declarations[2].valueParts[0].type);
+  console.log("css-rule-order:" + sheet.rules[4].selector);
+  console.log("css-serialize:" + serializeCss(sheet));
+  console.log("css-serialize-no-comments:" + serializeCssWithOptions(sheet, { comments: false }));
+  console.log("css-serialize-pretty:" + serializeCssWithOptions(sheet, { pretty: true }));
+  console.log("css-serialize-minify:" + serializeCssWithOptions(sheet, { minify: true }));
+
+  try {
+    parseCss("@supports (display: grid) {}");
+    console.log("css-error-unsupported-at-rule:false");
+  } catch (err) {
+    console.log("css-error-unsupported-at-rule:" + err.name);
+  }
+
+  try {
+    parseCss(".x { color red; }");
+    console.log("css-error-decl:false");
+  } catch (err) {
+    console.log("css-error-decl:" + err.name);
+  }
+
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "css-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled CSS program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"css-token-at:atKeyword:import",
+		"css-token-import-string:string:theme.css",
+		"css-token-comment:comment:lead",
+		"css-sheet:stylesheet:5",
+		"css-import:atRule:import:\"theme.css\"",
+		"css-comment:comment:lead",
+		"css-media:atRule:media:screen and (min-width: 600px):1",
+		"css-media-rule:.card:padding:8px",
+		"css-rule:rule:.btn.primary, #app > .item:3",
+		"css-decl-color:color:red:ident",
+		"css-decl-margin:margin:1.5rem:dimension",
+		"css-decl-content:content:\"hi\":string",
+		"css-rule-order:#footer",
+		`css-serialize:@import "theme.css";/*lead*/@media screen and (min-width: 600px){.card{padding:8px;}}.btn.primary, #app > .item{color:red;margin:1.5rem;content:"hi";}#footer{padding:8px;}`,
+		`css-serialize-no-comments:@import "theme.css";@media screen and (min-width: 600px){.card{padding:8px;}}.btn.primary, #app > .item{color:red;margin:1.5rem;content:"hi";}#footer{padding:8px;}`,
+		"css-serialize-pretty:@import \"theme.css\";/*lead*/@media screen and (min-width: 600px){\n  .card{\n    padding: 8px;\n  }\n}.btn.primary, #app > .item{\n  color: red;\n  margin: 1.5rem;\n  content: \"hi\";\n}#footer{\n  padding: 8px;\n}",
+		`css-serialize-minify:@import "theme.css";/*lead*/@media screen and (min-width: 600px){.card{padding:8px;}}.btn.primary, #app > .item{color:red;margin:1.5rem;content:"hi";}#footer{padding:8px;}`,
+		"css-error-unsupported-at-rule:CSSParseError",
+		"css-error-decl:CSSParseError",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected CSS output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func buildExecutableWithAddressSanitizer(t *testing.T, tc *Toolchain, result *compiler.Result, opts compiler.Options, outputPath string) error {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	irPath := filepath.Join(tempDir, "module.ll")
+	if err := os.WriteFile(irPath, result.LLVMIR, 0o644); err != nil {
+		return fmt.Errorf("write temporary LLVM IR: %w", err)
+	}
+
+	runtimePaths, err := runtimeSourcePaths()
+	if err != nil {
+		return fmt.Errorf("resolve runtime sources: %w", err)
+	}
+	runtimeIncludeDir, err := runtimeIncludePath()
+	if err != nil {
+		return fmt.Errorf("resolve runtime include directory: %w", err)
+	}
+	brotliIncludeDir, brotliSources, brotliAvailable := brotliBuildInputs()
+
+	sanitizeFlags := []string{"-O0", "-fsanitize=address", "-fno-omit-frame-pointer"}
+	var objectPaths []string
+
+	moduleObjectPath := filepath.Join(tempDir, "module.o")
+	args := []string{"-target", opts.TargetTriple}
+	args = append(args, sanitizeFlags...)
+	args = append(args, "-c", irPath, "-o", moduleObjectPath)
+	cmd := exec.Command(tc.ClangPath, args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("asan clang object build failed: %w: %s", err, string(output))
+	}
+	objectPaths = append(objectPaths, moduleObjectPath)
+
+	compileSource := func(sourcePath string, includeDirs, compileFlags []string, objectPath string) error {
+		sourceArgs := []string{"-target", opts.TargetTriple}
+		sourceArgs = append(sourceArgs, sanitizeFlags...)
+		for _, includeDir := range includeDirs {
+			sourceArgs = append(sourceArgs, "-I", includeDir)
+		}
+		sourceArgs = append(sourceArgs, compileFlags...)
+		sourceArgs = append(sourceArgs, "-c", sourcePath, "-o", objectPath)
+		sourceCmd := exec.Command(tc.ClangPath, sourceArgs...)
+		if output, err := sourceCmd.CombinedOutput(); err != nil {
+			return formatNativeBuildError(err, string(output))
+		}
+		return nil
+	}
+
+	runtimeIncludeDirs := []string{runtimeIncludeDir}
+	if brotliAvailable {
+		runtimeIncludeDirs = append(runtimeIncludeDirs, brotliIncludeDir)
+	}
+	for i, runtimePath := range runtimePaths {
+		runtimeObjectPath := filepath.Join(tempDir, fmt.Sprintf("runtime-%d.o", i))
+		if err := compileSource(runtimePath, runtimeIncludeDirs, nil, runtimeObjectPath); err != nil {
+			return err
+		}
+		objectPaths = append(objectPaths, runtimeObjectPath)
+	}
+
+	if brotliAvailable {
+		for i, source := range brotliSources {
+			objectPath := filepath.Join(tempDir, fmt.Sprintf("brotli-%d.o", i))
+			if err := compileSource(source, []string{brotliIncludeDir}, nil, objectPath); err != nil {
+				return err
+			}
+			objectPaths = append(objectPaths, objectPath)
+		}
+	}
+
+	nativeIncludeDirs := append([]string{runtimeIncludeDir}, result.NativeIncludeDirs...)
+	for i, source := range result.NativeImports {
+		objectPath := filepath.Join(tempDir, fmt.Sprintf("native-%d.o", i))
+		if err := compileSource(source, nativeIncludeDirs, result.NativeCompileFlags, objectPath); err != nil {
+			return err
+		}
+		objectPaths = append(objectPaths, objectPath)
+	}
+
+	linkArgs := []string{"-target", opts.TargetTriple}
+	linkArgs = append(linkArgs, sanitizeFlags...)
+	linkArgs = append(linkArgs, objectPaths...)
+	linkArgs = append(linkArgs, nativeSystemLinkFlags(opts.TargetTriple)...)
+	linkArgs = append(linkArgs, result.NativeLinkFlags...)
+	linkArgs = append(linkArgs, "-o", outputPath)
+	linkCmd := exec.Command(tc.ClangPath, linkArgs...)
+	if output, err := linkCmd.CombinedOutput(); err != nil {
+		return formatNativeBuildError(err, string(output))
+	}
+
+	return nil
+}
+
+func TestBuildExecutableParserPackagesAreLeakFreeUnderASAN(t *testing.T) {
+	if os.Getenv("JAYESS_RUN_PARSER_ASAN_PROBE") != "1" {
+		t.Skip("skipping parser ASAN leak probe; set JAYESS_RUN_PARSER_ASAN_PROBE=1 to run")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("ASAN/LSAN parser leak probe is only exercised on Linux")
+	}
+
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping parser ASAN test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+	if !strings.Contains(triple, "linux") {
+		t.Skipf("skipping parser ASAN test for non-Linux triple %q", triple)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	cases := []struct {
+		name      string
+		pkg       string
+		sampleRel string
+		sample    string
+		source    string
+		want      string
+	}{
+		{
+			name:      "html",
+			pkg:       "html",
+			sampleRel: "sample.html",
+			sample:    `<!doctype html><div id="a"><span>hi</span><!--note--><br/></div>`,
+			source: `
+import { parseHtml, serializeHtml } from "@jayess/html";
+
+function main(args) {
+  var doc = parseHtml(fs.readFile("./sample.html", "utf8"));
+  console.log("asan-html:" + serializeHtml(doc));
+  return 0;
+}
+`,
+			want: `asan-html:<!doctype html><div id="a"><span>hi</span><!--note--><br/></div>`,
+		},
+		{
+			name:      "xml",
+			pkg:       "xml",
+			sampleRel: "sample.xml",
+			sample:    `<?xml version="1.0"?><root><child>hi</child><![CDATA[<raw>]]></root>`,
+			source: `
+import { parseXml, serializeXml } from "@jayess/xml";
+
+function main(args) {
+  var doc = parseXml(fs.readFile("./sample.xml", "utf8"));
+  console.log("asan-xml:" + serializeXml(doc));
+  return 0;
+}
+`,
+			want: `asan-xml:<?xml version="1.0"?><root><child>hi</child><![CDATA[<raw>]]></root>`,
+		},
+		{
+			name:      "css",
+			pkg:       "css",
+			sampleRel: "sample.css",
+			sample:    `@import "theme.css"; .btn { color: red; margin: 1.5rem; }`,
+			source: `
+import { parseCss, serializeCss } from "@jayess/css";
+
+function main(args) {
+  var sheet = parseCss(fs.readFile("./sample.css", "utf8"));
+  console.log("asan-css:" + serializeCss(sheet));
+  return 0;
+}
+`,
+			want: `asan-css:@import "theme.css";.btn{color:red;margin:1.5rem;}`,
+		},
+	}
+
+	for _, tcCase := range cases {
+		t.Run(tcCase.name, func(t *testing.T) {
+			workdir := t.TempDir()
+			copyDirRecursive(
+				t,
+				filepath.Join(repoRoot, "node_modules", "@jayess", tcCase.pkg),
+				filepath.Join(workdir, "node_modules", "@jayess", tcCase.pkg),
+			)
+			if err := os.WriteFile(filepath.Join(workdir, tcCase.sampleRel), []byte(tcCase.sample), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+			entry := filepath.Join(workdir, "main.js")
+			if err := os.WriteFile(entry, []byte(tcCase.source), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+			if err != nil {
+				t.Fatalf("CompilePath returned error: %v", err)
+			}
+
+			outputPath := nativeOutputPath(workdir, "parser-asan-native")
+			if err := buildExecutableWithAddressSanitizer(t, tc, result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+				t.Fatalf("buildExecutableWithAddressSanitizer returned error: %v", err)
+			}
+
+			cmd := exec.Command(outputPath)
+			cmd.Dir = workdir
+			cmd.Env = append(os.Environ(),
+				"ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:exitcode=66",
+				"LSAN_OPTIONS=exitcode=66",
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("compiled ASAN parser program returned error: %v: %s", err, string(out))
+			}
+			text := string(out)
+			if !strings.Contains(text, tcCase.want) {
+				t.Fatalf("expected ASAN parser output to contain %q, got: %s", tcCase.want, text)
+			}
+		})
+	}
+}
+
+func TestBuildExecutableScopeCleanupStaysSafeUnderASAN(t *testing.T) {
+	if os.Getenv("JAYESS_RUN_LIFETIME_ASAN_PROBE") != "1" {
+		t.Skip("skipping lifetime ASAN probe; set JAYESS_RUN_LIFETIME_ASAN_PROBE=1 to run")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("ASAN/LSAN lifetime probe is only exercised on Linux")
+	}
+
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping lifetime ASAN test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+	if !strings.Contains(triple, "linux") {
+		t.Skipf("skipping lifetime ASAN test for non-Linux triple %q", triple)
+	}
+
+	workdir := t.TempDir()
+	prepareCleanupProbePackage(t, workdir)
+
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { makeProbe, closeProbe, cleanupLog, resetCleanupLog } from "@jayess/cleanupprobe";
+
+class FreshBox {}
+class PlainCtorBox {
+  constructor() {
+    this.kind = "plain";
+  }
+}
+
+class FreshReturnCtorBox {
+  constructor() {
+    return { kind: "alt-fresh" };
+  }
+}
+
+function functionScopedCleanup() {
+  var scoped = makeProbe("function-var");
+  return 11;
+}
+
+function innerReturn() {
+  const value = makeProbe("return");
+  return 7;
+}
+
+function freshObjectTemp() {
+  return { kind: "fresh-call" };
+}
+
+function freshInvokeObject() {
+  return { kind: "invoke-fresh" };
+}
+
+function freshBox() {
+  return new FreshBox();
+}
+
+function freshSwitchCase() {
+  switch ("case-" + "a") {
+    case "case-a":
+      break;
+    case "case-b":
+      break;
+  }
+}
+
+function boundOffset(offset, x) {
+  return x + offset;
+}
+
+function largeOffset(x) {
+  return x + 20;
+}
+
+function boundGreaterThan(min, x) {
+  return x > min;
+}
+
+function boundEquals(expected, x) {
+  return x == expected;
+}
+
+function boundPairSum(a, b, x) {
+  return x + a + b;
+}
+
+function boundBetween(min, max, x) {
+  return x > min && x < max;
+}
+
+function boundTripleEquals(a, b, x) {
+  return x == a + b;
+}
+
+function boundTripleSum(a, b, c, x) {
+  return x + a + b + c;
+}
+
+function boundWindow(min, mid, max, x) {
+  return x > min && x < max && x != mid;
+}
+
+function boundQuadEquals(a, b, c, x) {
+  return x == a + b + c;
+}
+
+function boundQuadSum(a, b, c, d, x) {
+  return x + a + b + c + d;
+}
+
+function boundOuterWindow(min, low, high, max, x) {
+  return x > min && x >= low && x < max && x != high;
+}
+
+function boundQuintEquals(a, b, c, d, x) {
+  return x == a + b + c + d;
+}
+
+function boundQuintSum(a, b, c, d, e, x) {
+  return x + a + b + c + d + e;
+}
+
+function boundSextEquals(a, b, c, d, e, x) {
+  return x == a + b + c + d + e;
+}
+
+function boundSextSum(a, b, c, d, e, f, x) {
+  return x + a + b + c + d + e + f;
+}
+
+function boundSeptEquals(a, b, c, d, e, f, x) {
+  return x == a + b + c + d + e + f;
+}
+
+function boundSeptSum(a, b, c, d, e, f, g, x) {
+  return x + a + b + c + d + e + f + g;
+}
+
+function boundOctEquals(a, b, c, d, e, f, g, x) {
+  return x == a + b + c + d + e + f + g;
+}
+
+function boundOctSum(a, b, c, d, e, f, g, h, x) {
+  return x + a + b + c + d + e + f + g + h;
+}
+
+function boundNonetEquals(a, b, c, d, e, f, g, h, x) {
+  return x == a + b + c + d + e + f + g + h;
+}
+
+function boundNonetSum(a, b, c, d, e, f, g, h, i, x) {
+  return x + a + b + c + d + e + f + g + h + i;
+}
+
+function boundDecetEquals(a, b, c, d, e, f, g, h, i, x) {
+  return x == a + b + c + d + e + f + g + h + i;
+}
+
+function boundDecetSum(a, b, c, d, e, f, g, h, i, j, x) {
+  return x + a + b + c + d + e + f + g + h + i + j;
+}
+
+function boundUndecEquals(a, b, c, d, e, f, g, h, i, j, x) {
+  return x == a + b + c + d + e + f + g + h + i + j;
+}
+
+function boundUndecSum(a, b, c, d, e, f, g, h, i, j, k, x) {
+  return x + a + b + c + d + e + f + g + h + i + j + k;
+}
+
+function boundDuodecEquals(a, b, c, d, e, f, g, h, i, j, k, l, x) {
+  return x == a + b + c + d + e + f + g + h + i + j + k + l;
+}
+
+function boundDuodecSum(a, b, c, d, e, f, g, h, i, j, k, l, x) {
+  return x + a + b + c + d + e + f + g + h + i + j + k + l;
+}
+
+
+function discardedFreshTemporaries() {
+  freshObjectTemp();
+  freshSwitchCase();
+  (() => "fresh-fn");
+  new PlainCtorBox();
+  new FreshReturnCtorBox();
+  ({ name: "kimchi" });
+  ({ answer: 41 }).answer;
+  ({ label: "index" })["label"];
+  ({ maybe: "opt-member" })?.maybe;
+  ({ maybe: "opt-index" })?.["maybe"];
+  "soup".length;
+  [1, 2, 3];
+  `+"`soup${1}`"+`;
+  "left" + "right";
+  ~1;
+  1n & 3n;
+  1n === 1n;
+  ("cmp-left" + "x") === ("cmp-right" + "y");
+  !("not-left" + "right");
+  ("and-left" + "x") && ("and-right" + "y");
+  ("or-left" + "x") || ("or-right" + "y");
+  typeof ("type" + "of");
+  freshBox() instanceof FreshBox;
+  ("ok" is "ok" | "error");
+  ([1, "ok"] is [number, string]);
+  ({ kind: "ok", value: 3 } is { kind: "ok", value: number } | { kind: "error", message: string });
+  true ? ({ kind: "conditional" }) : ({ kind: "fallback" });
+  null ?? ({ kind: "nullish" });
+  (({ kind: "comma-left" }), ({ kind: "comma-right" }));
+  freshInvokeObject.bind(null);
+  freshInvokeObject.call(null);
+  freshInvokeObject.apply(null, []);
+  [1, 2].forEach((x) => 0);
+  [1, 2].map((x) => x + 1);
+  [1, 2].filter((x) => x > 0);
+  [1, 2].find((x) => false);
+  [1, 2].forEach(boundOffset.bind(null, 1));
+  [1, 2].forEach(boundOffset.bind(null, 20));
+  [1, 2].forEach(largeOffset);
+  [1, 2].map(boundOffset.bind(null, 1));
+  [1, 2].map(boundOffset.bind(null, 20));
+  [1, 2].filter(largeOffset);
+  [1, 2].filter(boundGreaterThan.bind(null, 0));
+  [1, 2].filter(boundOffset.bind(null, 20));
+  [1, 2].find(largeOffset);
+  [1, 2].find(boundEquals.bind(null, 9));
+  [1, 2].find(boundOffset.bind(null, 20));
+  [1, 2].forEach(boundPairSum.bind(null, 1, 2));
+  [1, 2].map(boundPairSum.bind(null, 1, 2));
+  [1, 2].map(boundPairSum.bind(null, 10, 10));
+  [1, 2].filter(boundBetween.bind(null, 0, 3));
+  [1, 2].find(boundPairSum.bind(null, 10, 10));
+  [1, 2].find(boundTripleEquals.bind(null, 4, 5));
+  [1, 2].forEach(boundTripleSum.bind(null, 1, 2, 3));
+  [1, 2].forEach(boundPairSum.bind(null, 10, 10));
+  [1, 2].map(boundTripleSum.bind(null, 1, 2, 3));
+  [1, 2].map(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].filter(boundWindow.bind(null, 0, 1, 3));
+  [1, 2].filter(boundPairSum.bind(null, 10, 10));
+  [1, 2].find(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].find(boundQuadEquals.bind(null, 3, 4, 5));
+  [1, 2].forEach(boundQuadSum.bind(null, 1, 2, 3, 4));
+  [1, 2].forEach(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].forEach(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].map(boundQuadSum.bind(null, 1, 2, 3, 4));
+  [1, 2].filter(boundOuterWindow.bind(null, 0, 1, 4, 3));
+  [1, 2].filter(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].filter(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].find(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].forEach(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].map(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].find(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].find(boundQuintEquals.bind(null, 30, 30, 30, 30, 30));
+  [1, 2].find(boundQuintEquals.bind(null, 3, 4, 5, 6));
+  [1, 2].forEach(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSextEquals.bind(null, 40, 40, 40, 40, 40, 40));
+  [1, 2].forEach(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSeptEquals.bind(null, 50, 50, 50, 50, 50, 50, 50));
+  [1, 2].forEach(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundOctEquals.bind(null, 60, 60, 60, 60, 60, 60, 60, 60));
+  [1, 2].forEach(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundNonetEquals.bind(null, 70, 70, 70, 70, 70, 70, 70, 70, 70));
+  [1, 2].forEach(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDecetEquals.bind(null, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80));
+  [1, 2].forEach(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundUndecEquals.bind(null, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90));
+  [1, 2].forEach(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDuodecEquals.bind(null, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100));
+}
+
+function main(args) {
+  resetCleanupLog();
+  {
+    const scoped = makeProbe("block");
+  }
+  {
+    const closed = makeProbe("manual-close");
+    closeProbe(closed);
+  }
+  discardedFreshTemporaries();
+  functionScopedCleanup();
+  innerReturn();
+  try {
+    const thrown = makeProbe("throw");
+    throw "boom";
+  } catch (err) {
+    console.log("asan-catch:" + err);
+  }
+  for (var i = 0; i < 4; i = i + 1) {
+    const loopScoped = makeProbe("continue" + i);
+    if (i == 1) {
+      continue;
+    }
+    if (i == 2) {
+      break;
+    }
+  }
+  for (var j = 0; j < 1; j = j + 1) {
+    const outerBreak = makeProbe("outer-break");
+    {
+      const innerBreak = makeProbe("inner-break");
+      break;
+    }
+  }
+  for (var k = 0; k < 1; k = k + 1) {
+    const outerContinue = makeProbe("outer-continue");
+    {
+      const innerContinue = makeProbe("inner-continue");
+      continue;
+    }
+  }
+  for (var m = 0; m < 1; m = m + 1) {
+    const outerThrow = makeProbe("outer-throw");
+    try {
+      const innerThrow = makeProbe("inner-throw");
+      throw "nested";
+    } catch (err) {
+      console.log("asan-nested-catch:" + err);
+    }
+  }
+  console.log("asan-cleanup:" + cleanupLog());
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "scope-cleanup-asan-native")
+	if err := buildExecutableWithAddressSanitizer(t, tc, result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("buildExecutableWithAddressSanitizer returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	cmd.Env = append(os.Environ(),
+		"ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:exitcode=66",
+		"LSAN_OPTIONS=exitcode=66",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled ASAN cleanup program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"block;",
+		"manual-close;",
+		"function-var;",
+		"return;",
+		"throw;",
+		"continue0;",
+		"continue1;",
+		"continue2;",
+		"inner-break;",
+		"outer-break;",
+		"inner-continue;",
+		"outer-continue;",
+		"inner-throw;",
+		"outer-throw;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected ASAN cleanup output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableEscapingLocalsStaySafeUnderASAN(t *testing.T) {
+	if os.Getenv("JAYESS_RUN_LIFETIME_ASAN_PROBE") != "1" {
+		t.Skip("skipping lifetime ASAN probe; set JAYESS_RUN_LIFETIME_ASAN_PROBE=1 to run")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("ASAN/LSAN lifetime probe is only exercised on Linux")
+	}
+
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping lifetime ASAN test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+	if !strings.Contains(triple, "linux") {
+		t.Skipf("skipping lifetime ASAN test for non-Linux triple %q", triple)
+	}
+
+	result, err := compiler.Compile(`
+var globalBox = undefined;
+
+function makeReturnedObject() {
+  var local = { label: "object-ok", nested: { value: 41 } };
+  return local;
+}
+
+function makeReturnedArray() {
+  var local = [3, 4, 5];
+  return local;
+}
+
+function makeStoredObject() {
+  var local = { value: "stored-object" };
+  var holder = {};
+  holder.item = local;
+  return holder;
+}
+
+function makeStoredArray() {
+  var local = { value: "stored-array" };
+  var holder = [];
+  holder[0] = local;
+  return holder;
+}
+
+function makeClosure() {
+  var local = { value: 9 };
+  return () => local.value + 1;
+}
+
+function seedGlobal() {
+  var local = { value: "global-object" };
+  globalBox = local;
+}
+
+function main(args) {
+  var returnedObject = makeReturnedObject();
+  var returnedArray = makeReturnedArray();
+  var storedObject = makeStoredObject();
+  var storedArray = makeStoredArray();
+  var closure = makeClosure();
+  seedGlobal();
+
+  console.log("asan-escape-object:" + returnedObject.label + ":" + returnedObject.nested.value);
+  console.log("asan-escape-array:" + returnedArray.length + ":" + returnedArray[0] + ":" + returnedArray[2]);
+  console.log("asan-escape-stored-object:" + storedObject.item.value);
+  console.log("asan-escape-stored-array:" + storedArray[0].value);
+  console.log("asan-escape-closure:" + closure());
+  console.log("asan-escape-global:" + globalBox.value);
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(t.TempDir(), "escaping-locals-asan-native")
+	if err := buildExecutableWithAddressSanitizer(t, tc, result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("buildExecutableWithAddressSanitizer returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Env = append(os.Environ(),
+		"ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:exitcode=66",
+		"LSAN_OPTIONS=exitcode=66",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled ASAN escaping-locals program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"asan-escape-object:object-ok:41",
+		"asan-escape-array:3:3:5",
+		"asan-escape-stored-object:stored-object",
+		"asan-escape-stored-array:stored-array",
+		"asan-escape-closure:10",
+		"asan-escape-global:global-object",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected ASAN escaping-locals output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsJayessParserPackagesThroughLocalModules(t *testing.T) {
+	toolchain, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping parser module integration test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	cases := []struct {
+		name         string
+		pkg          string
+		moduleSource string
+		entrySource  string
+		wants        []string
+	}{
+		{
+			name: "html",
+			pkg:  "html",
+			moduleSource: `
+import { parseHtmlFragment, querySelectorAll } from "@jayess/html";
+
+export function htmlSpanCount(source) {
+  var frag = parseHtmlFragment(source);
+  return querySelectorAll(frag, "section > span").length + ":" + frag.children.length;
+}
+`,
+			entrySource: `
+import { htmlSpanCount } from "./lib/parsers.js";
+
+function main(args) {
+  console.log("parser-module-html:" + htmlSpanCount("<section><span>a</span><span>b</span></section>"));
+  return 0;
+}
+`,
+			wants: []string{"parser-module-html:2:1"},
+		},
+		{
+			name: "xml",
+			pkg:  "xml",
+			moduleSource: `
+import { parseXml, serializeXmlWithOptions } from "@jayess/xml";
+
+export function xmlSummary(source) {
+  var doc = parseXml(source);
+  return doc.children[0].tagName + ":" + serializeXmlWithOptions(doc, { comments: false });
+}
+`,
+			entrySource: `
+import { xmlSummary } from "./lib/parsers.js";
+
+function main(args) {
+  console.log("parser-module-xml:" + xmlSummary("<root><!--note--><child/></root>"));
+  return 0;
+}
+`,
+			wants: []string{`parser-module-xml:root:<root><child/></root>`},
+		},
+		{
+			name: "css",
+			pkg:  "css",
+			moduleSource: `
+import { parseCss, serializeCssWithOptions } from "@jayess/css";
+
+export function cssSummary(source) {
+  var sheet = parseCss(source);
+  return sheet.rules.length + ":" + serializeCssWithOptions(sheet, { minify: true });
+}
+`,
+			entrySource: `
+import { cssSummary } from "./lib/parsers.js";
+
+function main(args) {
+  console.log("parser-module-css:" + cssSummary("/*lead*/ .a { color: red; } .b { margin: 2px; }"));
+  return 0;
+}
+`,
+			wants: []string{"parser-module-css:3:/*lead*/.a{color:red;}.b{margin:2px;}"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			workdir := t.TempDir()
+			copyDirRecursive(
+				t,
+				filepath.Join(repoRoot, "node_modules", "@jayess", tc.pkg),
+				filepath.Join(workdir, "node_modules", "@jayess", tc.pkg),
+			)
+
+			libDir := filepath.Join(workdir, "lib")
+			if err := os.MkdirAll(libDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll returned error: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(libDir, "parsers.js"), []byte(tc.moduleSource), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			entry := filepath.Join(workdir, "main.js")
+			if err := os.WriteFile(entry, []byte(tc.entrySource), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+			if err != nil {
+				t.Fatalf("CompilePath returned error: %v", err)
+			}
+
+			outputPath := nativeOutputPath(workdir, "parser-modules-native")
+			if err := toolchain.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+				t.Fatalf("BuildExecutable returned error: %v", err)
+			}
+
+			cmd := exec.Command(outputPath)
+			cmd.Dir = workdir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("compiled parser module program returned error: %v: %s", err, string(out))
+			}
+			text := string(out)
+			for _, want := range tc.wants {
+				if !strings.Contains(text, want) {
+					t.Fatalf("expected parser module output to contain %q, got: %s", want, text)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildExecutableSupportsJayessLargeParserInputs(t *testing.T) {
+	toolchain, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping parser large-input test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	type parserCase struct {
+		name        string
+		pkg         string
+		sampleName  string
+		sample      string
+		entrySource string
+		want        string
+	}
+
+	var htmlBuilder strings.Builder
+	htmlBuilder.WriteString("<div>")
+	for i := 0; i < 3000; i++ {
+		htmlBuilder.WriteString("<span class=\"x\">")
+		htmlBuilder.WriteString(strconv.Itoa(i))
+		htmlBuilder.WriteString("</span>")
+	}
+	htmlBuilder.WriteString("</div>")
+
+	var xmlBuilder strings.Builder
+	xmlBuilder.WriteString("<root>")
+	for i := 0; i < 3000; i++ {
+		xmlBuilder.WriteString("<item id=\"")
+		xmlBuilder.WriteString(strconv.Itoa(i))
+		xmlBuilder.WriteString("\">")
+		xmlBuilder.WriteString(strconv.Itoa(i))
+		xmlBuilder.WriteString("</item>")
+	}
+	xmlBuilder.WriteString("</root>")
+
+	var cssBuilder strings.Builder
+	for i := 0; i < 3000; i++ {
+		cssBuilder.WriteString(".c")
+		cssBuilder.WriteString(strconv.Itoa(i))
+		cssBuilder.WriteString(" { width: ")
+		cssBuilder.WriteString(strconv.Itoa(i))
+		cssBuilder.WriteString("px; height: 1px; }\n")
+	}
+
+	cases := []parserCase{
+		{
+			name:       "html",
+			pkg:        "html",
+			sampleName: "large.html",
+			sample:     htmlBuilder.String(),
+			entrySource: `
+import { parseHtml, querySelectorAll } from "@jayess/html";
+
+function main(args) {
+  var doc = parseHtml(fs.readFile("./large.html", "utf8"));
+  var root = doc.children[0];
+  console.log("html-large:" + root.children.length + ":" + querySelectorAll(doc, "div > span").length);
+  return 0;
+}
+`,
+			want: "html-large:3000:3000",
+		},
+		{
+			name:       "xml",
+			pkg:        "xml",
+			sampleName: "large.xml",
+			sample:     xmlBuilder.String(),
+			entrySource: `
+import { parseXml } from "@jayess/xml";
+
+function main(args) {
+  var doc = parseXml(fs.readFile("./large.xml", "utf8"));
+  var root = doc.children[0];
+  console.log("xml-large:" + root.children.length + ":" + root.children[2999].attributes.id);
+  return 0;
+}
+`,
+			want: "xml-large:3000:2999",
+		},
+		{
+			name:       "css",
+			pkg:        "css",
+			sampleName: "large.css",
+			sample:     cssBuilder.String(),
+			entrySource: `
+import { parseCss } from "@jayess/css";
+
+function main(args) {
+  var sheet = parseCss(fs.readFile("./large.css", "utf8"));
+  console.log("css-large:" + sheet.rules.length + ":" + sheet.rules[2999].selector);
+  return 0;
+}
+`,
+			want: "css-large:3000:.c2999",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			workdir := t.TempDir()
+			copyDirRecursive(
+				t,
+				filepath.Join(repoRoot, "node_modules", "@jayess", tc.pkg),
+				filepath.Join(workdir, "node_modules", "@jayess", tc.pkg),
+			)
+			if err := os.WriteFile(filepath.Join(workdir, tc.sampleName), []byte(tc.sample), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			entry := filepath.Join(workdir, "main.js")
+			if err := os.WriteFile(entry, []byte(tc.entrySource), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+			if err != nil {
+				t.Fatalf("CompilePath returned error: %v", err)
+			}
+
+			outputPath := nativeOutputPath(workdir, "parser-large-native")
+			if err := toolchain.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+				t.Fatalf("BuildExecutable returned error: %v", err)
+			}
+
+			cmd := exec.Command(outputPath)
+			cmd.Dir = workdir
+			start := time.Now()
+			out, err := cmd.CombinedOutput()
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("compiled large-parser program returned error: %v: %s", err, string(out))
+			}
+			if elapsed > 10*time.Second {
+				t.Fatalf("expected large parser runtime to stay within 10s, got %v", elapsed)
+			}
+			text := string(out)
+			if !strings.Contains(text, tc.want) {
+				t.Fatalf("expected large parser output to contain %q, got: %s", tc.want, text)
+			}
+		})
+	}
+}
+
+func TestBuildExecutableParserSpansAlignWithCompilerDiagnostics(t *testing.T) {
+	toolchain, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping parser/compiler span alignment test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	type parserCase struct {
+		name           string
+		pkg            string
+		sampleName     string
+		sample         string
+		entrySource    string
+		want           string
+		diagSource     string
+		wantDiagLine   int
+		wantDiagColumn int
+	}
+
+	cases := []parserCase{
+		{
+			name:       "html",
+			pkg:        "html",
+			sampleName: "sample.html",
+			sample: `<div>
+  <span>ok</span>
+</div>`,
+			entrySource: `
+import { parseHtml } from "@jayess/html";
+
+function main(args) {
+  var doc = parseHtml(fs.readFile("./sample.html", "utf8"));
+  var span = doc.children[0].children[1];
+  console.log("parser-span:" + span.span.start.line + ":" + span.span.start.column);
+  return 0;
+}
+`,
+			want: "parser-span:2:3",
+			diagSource: `
+function main(args) {
+  @;
+}
+`,
+			wantDiagLine:   3,
+			wantDiagColumn: 3,
+		},
+		{
+			name:       "xml",
+			pkg:        "xml",
+			sampleName: "sample.xml",
+			sample: `<root>
+  <child>ok</child>
+</root>`,
+			entrySource: `
+import { parseXml } from "@jayess/xml";
+
+function main(args) {
+  var doc = parseXml(fs.readFile("./sample.xml", "utf8"));
+  var child = doc.children[0].children[1];
+  console.log("parser-span:" + child.span.start.line + ":" + child.span.start.column);
+  return 0;
+}
+`,
+			want: "parser-span:2:3",
+			diagSource: `
+function main(args) {
+  @;
+}
+`,
+			wantDiagLine:   3,
+			wantDiagColumn: 3,
+		},
+		{
+			name:       "css",
+			pkg:        "css",
+			sampleName: "sample.css",
+			sample: `
+
+.rule { color: red; }
+`,
+			entrySource: `
+import { parseCss } from "@jayess/css";
+
+function main(args) {
+  var sheet = parseCss(fs.readFile("./sample.css", "utf8"));
+  var rule = sheet.rules[0];
+  console.log("parser-span:" + rule.span.start.line + ":" + rule.span.start.column);
+  return 0;
+}
+`,
+			want: "parser-span:3:1",
+			diagSource: `
+
+@
+function main(args) {
+  return 0;
+}
+`,
+			wantDiagLine:   3,
+			wantDiagColumn: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			workdir := t.TempDir()
+			copyDirRecursive(
+				t,
+				filepath.Join(repoRoot, "node_modules", "@jayess", tc.pkg),
+				filepath.Join(workdir, "node_modules", "@jayess", tc.pkg),
+			)
+			if err := os.WriteFile(filepath.Join(workdir, tc.sampleName), []byte(tc.sample), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			entry := filepath.Join(workdir, "main.js")
+			if err := os.WriteFile(entry, []byte(tc.entrySource), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			result, err := compiler.CompilePath(entry, compiler.Options{TargetTriple: triple})
+			if err != nil {
+				t.Fatalf("CompilePath returned error: %v", err)
+			}
+
+			outputPath := nativeOutputPath(workdir, "parser-span-native")
+			if err := toolchain.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+				t.Fatalf("BuildExecutable returned error: %v", err)
+			}
+
+			cmd := exec.Command(outputPath)
+			cmd.Dir = workdir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("compiled parser span program returned error: %v: %s", err, string(out))
+			}
+			text := string(out)
+			if !strings.Contains(text, tc.want) {
+				t.Fatalf("expected parser span output to contain %q, got: %s", tc.want, text)
+			}
+
+			_, err = compiler.Compile(tc.diagSource, compiler.Options{TargetTriple: triple})
+			if err == nil {
+				t.Fatalf("expected compiler diagnostic")
+			}
+			var compileErr *compiler.CompileError
+			if !errors.As(err, &compileErr) {
+				t.Fatalf("expected CompileError, got %T: %v", err, err)
+			}
+			if compileErr.Diagnostic.Line != tc.wantDiagLine || compileErr.Diagnostic.Column != tc.wantDiagColumn {
+				t.Fatalf("expected compiler diagnostic at %d:%d, got %d:%d", tc.wantDiagLine, tc.wantDiagColumn, compileErr.Diagnostic.Line, compileErr.Diagnostic.Column)
+			}
+		})
+	}
+}
+
 func TestBuildExecutableSupportsJayessGTKPackageOrReportsMissingDepsClearly(t *testing.T) {
 	tc, err := DetectToolchain()
 	if err != nil {
@@ -8637,6 +15193,302 @@ function main(args) {
 	}
 }
 
+func TestBuildExecutableSupportsJayessGLFWImageLoadingIntegration(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping GLFW image integration test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+
+	workdir := t.TempDir()
+	copyDirRecursive(t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "glfw"),
+		filepath.Join(workdir, "node_modules", "@jayess", "glfw"),
+	)
+	copyDirRecursive(t,
+		filepath.Join(repoRoot, "refs", "glfw", "include"),
+		filepath.Join(workdir, "refs", "glfw", "include"),
+	)
+	copyDirRecursive(t,
+		filepath.Join(repoRoot, "refs", "glfw", "src"),
+		filepath.Join(workdir, "refs", "glfw", "src"),
+	)
+	if err := os.MkdirAll(filepath.Join(workdir, "refs", "raylib", "src", "external"), 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	copyFileForTest(t,
+		filepath.Join(repoRoot, "refs", "raylib", "src", "external", "stb_image.h"),
+		filepath.Join(workdir, "refs", "raylib", "src", "external", "stb_image.h"),
+	)
+	if err := os.MkdirAll(filepath.Join(workdir, "bindings"), 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "bindings", "image.bind.js"), []byte(`const f = () => {};
+export const loadImageInfoNative = f;
+
+export default {
+  sources: ["./image.c"],
+  includeDirs: ["../refs/raylib/src/external"],
+  exports: {
+    loadImageInfoNative: { symbol: "jayess_image_load_info", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile image.bind.js returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "bindings", "image.c"), []byte(`#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#include "jayess_runtime.h"
+
+jayess_value *jayess_image_load_info(jayess_value *path_value) {
+    const char *path = jayess_expect_string(path_value, "jayess_image_load_info");
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    jayess_object *result;
+    if (jayess_has_exception()) return jayess_value_undefined();
+    if (!stbi_info(path, &width, &height, &channels)) {
+        const char *reason = stbi_failure_reason();
+        jayess_throw_named_error("ImageError", reason != NULL ? reason : "failed to load image info");
+        return jayess_value_undefined();
+    }
+    result = jayess_object_new();
+    jayess_object_set_value(result, "width", jayess_value_from_number((double) width));
+    jayess_object_set_value(result, "height", jayess_value_from_number((double) height));
+    jayess_object_set_value(result, "channels", jayess_value_from_number((double) channels));
+    return jayess_value_from_object(result);
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile image.c returned error: %v", err)
+	}
+
+	tinyBMP := []byte{
+		0x42, 0x4d, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x00, 0x00, 0x00,
+		0x28, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00,
+		0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0x00, 0x00,
+		0xff, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00, 0x00,
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "tiny.bmp"), tinyBMP, 0o644); err != nil {
+		t.Fatalf("WriteFile tiny.bmp returned error: %v", err)
+	}
+
+	mainSource := `
+import { init, terminate, createOpenGLWindow, makeContextCurrent, swapBuffers, pollEvents, destroyWindow } from "@jayess/glfw";
+import { loadImageInfoNative } from "./bindings/image.bind.js";
+
+function main(args) {
+  init();
+  var window = createOpenGLWindow(64, 64, "glfw-image");
+  makeContextCurrent(window);
+  pollEvents();
+  swapBuffers(window);
+  var info = loadImageInfoNative("tiny.bmp");
+  console.log("glfw-image-open:" + (window != undefined));
+  console.log("glfw-image-size:" + info.width + "x" + info.height);
+  console.log("glfw-image-channels:" + info.channels);
+  destroyWindow(window);
+  terminate();
+  return 0;
+}
+`
+	mainPath := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(mainPath, []byte(mainSource), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "jayess-glfw-image")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled GLFW image program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"glfw-image-open:true",
+		"glfw-image-size:2x2",
+		"glfw-image-channels:3",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected GLFW image integration output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsJayessGLFWVulkanSurfaceIntegration(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping GLFW Vulkan surface integration test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	workdir := t.TempDir()
+	copyDirRecursive(t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "glfw"),
+		filepath.Join(workdir, "node_modules", "@jayess", "glfw"),
+	)
+	copyDirRecursive(t,
+		filepath.Join(repoRoot, "refs", "glfw", "include"),
+		filepath.Join(workdir, "refs", "glfw", "include"),
+	)
+	copyDirRecursive(t,
+		filepath.Join(repoRoot, "refs", "glfw", "src"),
+		filepath.Join(workdir, "refs", "glfw", "src"),
+	)
+
+	vulkanStubPath := filepath.Join(workdir, "libvulkan.so.1")
+	vulkanStubSourcePath := filepath.Join(workdir, "vulkan_stub.c")
+	vulkanStubSource := `#include <stdint.h>
+#include <string.h>
+
+typedef uint32_t VkFlags;
+typedef uint32_t VkBool32;
+typedef uint64_t VkInstance;
+typedef uint64_t VkSurfaceKHR;
+typedef int32_t VkResult;
+typedef void (*PFN_vkVoidFunction)(void);
+
+#define VK_SUCCESS 0
+
+typedef struct VkExtensionProperties {
+    char extensionName[256];
+    uint32_t specVersion;
+} VkExtensionProperties;
+
+static PFN_vkVoidFunction stub_vkGetInstanceProcAddr(VkInstance instance, const char* name);
+static VkResult stub_vkEnumerateInstanceExtensionProperties(const char* layerName, uint32_t* propertyCount, VkExtensionProperties* properties);
+static VkResult stub_vkCreateHeadlessSurfaceEXT(VkInstance instance, const void* createInfo, const void* allocator, VkSurfaceKHR* surface);
+
+__attribute__((visibility("default")))
+PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* name) {
+    return stub_vkGetInstanceProcAddr(instance, name);
+}
+
+static PFN_vkVoidFunction stub_vkGetInstanceProcAddr(VkInstance instance, const char* name) {
+    (void) instance;
+    if (name == NULL) return (PFN_vkVoidFunction) 0;
+    if (strcmp(name, "vkGetInstanceProcAddr") == 0) return (PFN_vkVoidFunction) vkGetInstanceProcAddr;
+    if (strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0) return (PFN_vkVoidFunction) stub_vkEnumerateInstanceExtensionProperties;
+    if (strcmp(name, "vkCreateHeadlessSurfaceEXT") == 0) return (PFN_vkVoidFunction) stub_vkCreateHeadlessSurfaceEXT;
+    return (PFN_vkVoidFunction) 0;
+}
+
+static VkResult stub_vkEnumerateInstanceExtensionProperties(const char* layerName, uint32_t* propertyCount, VkExtensionProperties* properties) {
+    (void) layerName;
+    if (propertyCount == NULL) return VK_SUCCESS;
+    if (properties == NULL) {
+        *propertyCount = 2;
+        return VK_SUCCESS;
+    }
+    *propertyCount = 2;
+    memset(properties, 0, sizeof(VkExtensionProperties) * 2);
+    strncpy(properties[0].extensionName, "VK_KHR_surface", sizeof(properties[0].extensionName) - 1);
+    strncpy(properties[1].extensionName, "VK_EXT_headless_surface", sizeof(properties[1].extensionName) - 1);
+    properties[0].specVersion = 1;
+    properties[1].specVersion = 1;
+    return VK_SUCCESS;
+}
+
+static VkResult stub_vkCreateHeadlessSurfaceEXT(VkInstance instance, const void* createInfo, const void* allocator, VkSurfaceKHR* surface) {
+    (void) instance;
+    (void) createInfo;
+    (void) allocator;
+    if (surface != NULL) *surface = 0xFEEDBEEFull;
+    return VK_SUCCESS;
+}
+`
+	if err := os.WriteFile(vulkanStubSourcePath, []byte(vulkanStubSource), 0o644); err != nil {
+		t.Fatalf("WriteFile vulkan_stub.c returned error: %v", err)
+	}
+	buildVulkanStubCmd := exec.Command(tc.ClangPath, "-shared", "-fPIC", vulkanStubSourcePath, "-o", vulkanStubPath)
+	buildVulkanStubCmd.Dir = workdir
+	if output, err := buildVulkanStubCmd.CombinedOutput(); err != nil {
+		t.Fatalf("building fake Vulkan loader returned error: %v: %s", err, string(output))
+	}
+
+	mainSource := `
+import { init, terminate, createWindow, destroyWindow, pollEvents, isVulkanSupported, getRequiredVulkanInstanceExtensions, createVulkanSurface } from "@jayess/glfw";
+
+function main(args) {
+  if (!init()) {
+    console.log("glfw-vulkan-init:false");
+    return 0;
+  }
+  var window = createWindow(64, 64, "glfw-vulkan");
+  var supported = isVulkanSupported();
+  var extensions = getRequiredVulkanInstanceExtensions();
+  var surface = createVulkanSurface(window, 1n);
+  pollEvents();
+  console.log("glfw-vulkan-init:true");
+  console.log("glfw-vulkan-supported:" + supported);
+  console.log("glfw-vulkan-ext0:" + extensions[0]);
+  console.log("glfw-vulkan-ext1:" + extensions[1]);
+  console.log("glfw-vulkan-surface:" + (surface != undefined));
+  console.log("glfw-vulkan-surface-type:" + typeof surface);
+  destroyWindow(window);
+  terminate();
+  return 0;
+}
+`
+	mainPath := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(mainPath, []byte(mainSource), 0o644); err != nil {
+		t.Fatalf("WriteFile main.js returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "jayess-glfw-vulkan")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+workdir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled GLFW Vulkan surface program returned error: %v: %s", err, string(out))
+	}
+	text := string(out)
+	for _, want := range []string{
+		"glfw-vulkan-init:true",
+		"glfw-vulkan-supported:true",
+		"glfw-vulkan-ext0:VK_KHR_surface",
+		"glfw-vulkan-ext1:VK_EXT_headless_surface",
+		"glfw-vulkan-surface:true",
+		"glfw-vulkan-surface-type:bigint",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected GLFW Vulkan surface integration output to contain %q, got: %s", want, text)
+		}
+	}
+}
+
 func TestBuildExecutableSupportsPathHelperEdgeCases(t *testing.T) {
 	tc, err := DetectToolchain()
 	if err != nil {
@@ -8693,6 +15545,77 @@ function main(args) {
 	}
 }
 
+func TestBuildExecutableSupportsCrossOSPathSyntax(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping native e2e test: %v", err)
+	}
+
+	triple, err := target.DefaultTriple()
+	if err != nil {
+		t.Fatalf("DefaultTriple returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	result, err := compiler.Compile(`
+function main(args) {
+  var file = "C:/tmp/nested/file.txt";
+  var normalized = path.normalize("C:/tmp/nested/../file.txt");
+  var parts = path.parse(file);
+  console.log("abs:" + path.isAbsolute(file));
+  console.log("base:" + path.basename(file));
+  console.log("dir:" + path.dirname(file));
+  console.log("ext:" + path.extname(file));
+  console.log("norm:" + normalized);
+  console.log("fmt:" + path.format(parts));
+  console.log("root:" + parts.root);
+  console.log("pdir:" + parts.dir);
+  console.log("pbase:" + parts.base);
+  console.log("pname:" + parts.name);
+  console.log("pext:" + parts.ext);
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	outputPath := nativeOutputPath(workdir, "cross-os-path-native")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled program returned error: %v: %s", err, string(out))
+	}
+
+	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(string(out), "\r\n", "\n")), "\n")
+	expected := []string{
+		"abs:true",
+		"base:file.txt",
+		"dir:C:/tmp/nested",
+		"ext:.txt",
+		"norm:C:/tmp/file.txt",
+		"fmt:C:/tmp/nested/file.txt",
+		"root:C:/",
+		"pdir:C:/tmp/nested",
+		"pbase:file.txt",
+		"pname:file",
+		"pext:.txt",
+	}
+	if len(lines) != len(expected) {
+		t.Fatalf("expected %d output lines, got %d: %q", len(expected), len(lines), string(out))
+	}
+	for i, want := range expected {
+		if lines[i] != want {
+			t.Fatalf("expected line %d to be %q, got %q", i, want, lines[i])
+		}
+	}
+}
+
 func TestBuildObjectSupportsConfiguredCrossTargets(t *testing.T) {
 	tc, err := DetectToolchain()
 	if err != nil {
@@ -8705,7 +15628,7 @@ function main(args) {
   return 0;
 }
 `
-	for _, targetName := range []string{"windows-x64", "linux-x64", "darwin-arm64"} {
+	for _, targetName := range []string{"windows-x64", "linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"} {
 		t.Run(targetName, func(t *testing.T) {
 			triple, err := target.FromName(targetName)
 			if err != nil {
@@ -8723,6 +15646,104 @@ function main(args) {
 				t.Fatalf("expected built object file for %s, got err=%v", targetName, err)
 			}
 		})
+	}
+}
+
+func TestBuildObjectEmitsDWARFDebugInfo(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping debug object test: %v", err)
+	}
+	dwarfdumpPath, err := exec.LookPath("llvm-dwarfdump")
+	if err != nil {
+		t.Skip("skipping debug object test: llvm-dwarfdump not found in PATH")
+	}
+
+	triple, err := target.FromName("linux-x64")
+	if err != nil {
+		t.Fatalf("FromName returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	sourcePath := filepath.Join(workdir, "debug-info.jy")
+	source := `
+function helper() {
+  return 41;
+}
+
+function main(args) {
+  return helper() + 1;
+}
+`
+	if err := os.WriteFile(sourcePath, []byte(strings.TrimSpace(source)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := compiler.CompilePath(sourcePath, compiler.Options{TargetTriple: triple, OptimizationLevel: "O0"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	outputPath := filepath.Join(workdir, "debug-info.o")
+	if err := tc.BuildObject(result, compiler.Options{TargetTriple: triple, OptimizationLevel: "O0"}, outputPath); err != nil {
+		t.Fatalf("BuildObject returned error: %v", err)
+	}
+
+	cmd := exec.Command(dwarfdumpPath, "--debug-info", outputPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llvm-dwarfdump returned error: %v: %s", err, string(out))
+	}
+
+	text := string(out)
+	for _, fragment := range []string{
+		"DW_TAG_compile_unit",
+		`"debug-info.jy"`,
+		"DW_TAG_subprogram",
+		`"helper"`,
+		`"main"`,
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("expected DWARF output to contain %q, got:\n%s", fragment, text)
+		}
+	}
+}
+
+func TestBuildExecutableSupportsLinuxX64Target(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping linux-x64 executable test: %v", err)
+	}
+
+	triple, err := target.FromName("linux-x64")
+	if err != nil {
+		t.Fatalf("FromName returned error: %v", err)
+	}
+
+	result, err := compiler.Compile(`
+function main(args) {
+  console.log("linux-x64-target");
+  return 0;
+}
+`, compiler.Options{TargetTriple: triple})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	workdir := t.TempDir()
+	outputPath := nativeOutputPath(workdir, "linux-x64-target")
+	if err := tc.BuildExecutable(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+		t.Fatalf("BuildExecutable returned error: %v", err)
+	}
+
+	cmd := exec.Command(outputPath)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compiled linux-x64 target program returned error: %v: %s", err, string(out))
+	}
+	if !strings.Contains(string(out), "linux-x64-target") {
+		t.Fatalf("expected linux-x64 target output, got: %s", string(out))
 	}
 }
 
@@ -8778,6 +15799,73 @@ function main(args) {
 			}
 			if info, err := os.Stat(outputPath); err != nil || info.IsDir() {
 				t.Fatalf("expected built raylib object file for %s, got err=%v", targetName, err)
+			}
+		})
+	}
+}
+
+func TestBuildObjectSupportsJayessAudioAcrossConfiguredTargets(t *testing.T) {
+	tc, err := DetectToolchain()
+	if err != nil {
+		t.Skipf("skipping cross-target audio build test: %v", err)
+	}
+
+	repoRoot := repoRootFromBackendTest(t)
+	for _, targetName := range []string{"windows-x64", "linux-x64", "darwin-arm64"} {
+		t.Run(targetName, func(t *testing.T) {
+			triple, err := target.FromName(targetName)
+			if err != nil {
+				t.Fatalf("FromName returned error: %v", err)
+			}
+
+			workdir := t.TempDir()
+			copyDirRecursive(
+				t,
+				filepath.Join(repoRoot, "node_modules", "@jayess", "audio"),
+				filepath.Join(workdir, "node_modules", "@jayess", "audio"),
+			)
+			copyDirRecursive(
+				t,
+				filepath.Join(repoRoot, "refs", "miniaudio"),
+				filepath.Join(workdir, "refs", "miniaudio"),
+			)
+			copyDirRecursive(
+				t,
+				filepath.Join(repoRoot, "refs", "cubeb", "include"),
+				filepath.Join(workdir, "refs", "cubeb", "include"),
+			)
+
+			mainPath := filepath.Join(workdir, "main.js")
+			mainSource := `
+import { createContext, backendId, maxChannelCount, listOutputDevices, listInputDevices, destroyContext } from "@jayess/audio";
+
+function main(args) {
+  var ctx = createContext("jayess-audio-cross-target", null);
+  if (ctx !== undefined) {
+    backendId(ctx);
+    maxChannelCount(ctx);
+    listOutputDevices(ctx);
+    listInputDevices(ctx);
+    destroyContext(ctx);
+  }
+  return 0;
+}
+`
+			if err := os.WriteFile(mainPath, []byte(mainSource), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			result, err := compiler.CompilePath(mainPath, compiler.Options{TargetTriple: triple})
+			if err != nil {
+				t.Fatalf("CompilePath returned error: %v", err)
+			}
+
+			outputPath := filepath.Join(workdir, targetName+".o")
+			if err := tc.BuildObject(result, compiler.Options{TargetTriple: triple}, outputPath); err != nil {
+				t.Skipf("cross-target audio object build unavailable for %s: %v", targetName, err)
+			}
+			if info, err := os.Stat(outputPath); err != nil || info.IsDir() {
+				t.Fatalf("expected built audio object file for %s, got err=%v", targetName, err)
 			}
 		})
 	}
@@ -9695,7 +16783,7 @@ function main(args) {
   return 0;
 }
 `
-	for _, level := range []string{"O0", "O2", "Oz"} {
+	for _, level := range []string{"O0", "O2"} {
 		t.Run(level, func(t *testing.T) {
 			result, err := compiler.Compile(source, compiler.Options{TargetTriple: triple, OptimizationLevel: level})
 			if err != nil {
@@ -9718,9 +16806,18 @@ function main(args) {
 }
 
 func TestBuildExecutableArgsApplyOptimizationLevel(t *testing.T) {
-	args := buildExecutableArgs(&compiler.Result{}, compiler.Options{TargetTriple: "x86_64-unknown-linux-gnu", OptimizationLevel: "O2"}, "module.ll", "runtime.c", "runtime", "", nil, false, "out")
-	if !containsString(args, "-O2") {
-		t.Fatalf("expected -O2 in executable args, got %#v", args)
+	for _, tc := range []struct {
+		level string
+		flag  string
+	}{
+		{level: "O0", flag: "-O0"},
+		{level: "O2", flag: "-O2"},
+		{level: "Oz", flag: "-Oz"},
+	} {
+		args := buildExecutableArgs(&compiler.Result{}, compiler.Options{TargetTriple: "x86_64-unknown-linux-gnu", OptimizationLevel: tc.level}, "module.ll", "runtime.c", "runtime", "", nil, false, "out")
+		if !containsString(args, tc.flag) {
+			t.Fatalf("expected %s in executable args for %s, got %#v", tc.flag, tc.level, args)
+		}
 	}
 }
 
@@ -9972,9 +17069,9 @@ function main(args) {
 	if output, err := llcCmd.CombinedOutput(); err != nil {
 		t.Fatalf("llc returned error: %v: %s", err, string(output))
 	}
-	runtimePath, err := runtimeSourcePath("jayess_runtime.c")
+	runtimePaths, err := runtimeSourcePaths()
 	if err != nil {
-		t.Fatalf("runtimeSourcePath returned error: %v", err)
+		t.Fatalf("runtimeSourcePaths returned error: %v", err)
 	}
 	runtimeIncludeDir, err := runtimeIncludePath()
 	if err != nil {
@@ -9982,7 +17079,8 @@ function main(args) {
 	}
 	brotliIncludeDir, brotliSources, brotliAvailable := brotliBuildInputs()
 	outputPath := nativeOutputPath(workdir, "llc-link")
-	args := []string{"-target", triple, "-I", runtimeIncludeDir, objectPath, runtimePath}
+	args := []string{"-target", triple, "-I", runtimeIncludeDir, objectPath}
+	args = append(args, runtimePaths...)
 	if brotliAvailable {
 		args = append(args, "-I", brotliIncludeDir)
 		args = append(args, brotliSources...)
@@ -10094,9 +17192,9 @@ function main(args) {
 	if output, err := llcCmd.CombinedOutput(); err != nil {
 		t.Fatalf("llc returned error: %v: %s", err, string(output))
 	}
-	runtimePath, err := runtimeSourcePath("jayess_runtime.c")
+	runtimePaths, err := runtimeSourcePaths()
 	if err != nil {
-		t.Fatalf("runtimeSourcePath returned error: %v", err)
+		t.Fatalf("runtimeSourcePaths returned error: %v", err)
 	}
 	runtimeIncludeDir, err := runtimeIncludePath()
 	if err != nil {
@@ -10104,7 +17202,8 @@ function main(args) {
 	}
 	brotliIncludeDir, brotliSources, brotliAvailable := brotliBuildInputs()
 	llcOutputPath := nativeOutputPath(workdir, "flow-llc")
-	args := []string{"-target", triple, "-I", runtimeIncludeDir, objectPath, runtimePath}
+	args := []string{"-target", triple, "-I", runtimeIncludeDir, objectPath}
+	args = append(args, runtimePaths...)
 	if brotliAvailable {
 		args = append(args, "-I", brotliIncludeDir)
 		args = append(args, brotliSources...)
@@ -12062,6 +19161,22 @@ function main() {
   console.log("dns-all-empty:" + dns.lookupAll(""));
   console.log("dns-reverse:" + typeof dns.reverse("127.0.0.1"));
   console.log("dns-reverse-invalid:" + dns.reverse("not an ip"));
+  console.log("dns-set-resolver:" + dns.setResolver({
+    hosts: {
+      "kimchi.local": "127.0.0.9",
+      "jjigae.local": ["127.0.0.10", "::1"]
+    },
+    reverse: {
+      "127.0.0.9": "kimchi.local"
+    }
+  }));
+  var custom = dns.lookup("kimchi.local");
+  var customAll = dns.lookupAll("jjigae.local");
+  console.log("dns-custom:" + custom.host + ":" + custom.address + ":" + custom.family);
+  console.log("dns-custom-all:" + customAll.length + ":" + customAll[0].address + ":" + customAll[1].family);
+  console.log("dns-custom-reverse:" + dns.reverse("127.0.0.9"));
+  console.log("dns-clear-resolver:" + dns.clearResolver());
+  console.log("dns-custom-cleared:" + dns.lookup("kimchi.local"));
   console.log("net-is-ip:" + net.isIP("127.0.0.1") + ":" + net.isIP("::1") + ":" + net.isIP("kimchi"));
   return 0;
 }
@@ -12092,6 +19207,12 @@ function main() {
 		"dns-all-empty:undefined",
 		"dns-reverse:string",
 		"dns-reverse-invalid:undefined",
+		"dns-set-resolver:true",
+		"dns-custom:kimchi.local:127.0.0.9:4",
+		"dns-custom-all:2:127.0.0.10:6",
+		"dns-custom-reverse:kimchi.local",
+		"dns-clear-resolver:true",
+		"dns-custom-cleared:undefined",
 		"net-is-ip:4:6:0",
 	} {
 		if !strings.Contains(text, want) {
@@ -12138,6 +19259,16 @@ func TestBuildExecutableSupportsNetConnect(t *testing.T) {
 			serverErr <- err
 			return
 		}
+		remaining := 9000
+		buffer = make([]byte, 1024)
+		for remaining > 0 {
+			readCount, err := conn.Read(buffer)
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			remaining -= readCount
+		}
 		serverErr <- nil
 	}()
 
@@ -12169,11 +19300,23 @@ function main() {
   console.log("socket-address:" + typeof socket.address().address + ":" + (socket.address().port > 0) + ":" + socket.address().family);
   console.log("socket-remote:" + socket.remote().address + ":" + socket.remote().port + ":" + socket.remote().family);
   console.log("socket-options:" + (socket.setNoDelay(true) === socket) + ":" + (socket.setKeepAlive(true) === socket));
-  console.log("socket-timeout:" + (socket.setTimeout(250) === socket) + ":" + socket.timeout);
-  console.log("socket-bytes-before:" + socket.bytesRead + ":" + socket.bytesWritten);
-  console.log("socket-write:" + socket.write("ping"));
-  console.log("socket-read:" + socket.read(4));
-  console.log("socket-bytes-after:" + socket.bytesRead + ":" + socket.bytesWritten);
+	console.log("socket-timeout:" + (socket.setTimeout(250) === socket) + ":" + socket.timeout);
+	console.log("socket-bytes-before:" + socket.bytesRead + ":" + socket.bytesWritten);
+	console.log("socket-write:" + socket.write("ping"));
+	console.log("socket-read:" + socket.read(4));
+	console.log("socket-bytes-after:" + socket.bytesRead + ":" + socket.bytesWritten);
+  var socketDrainCount = 0;
+  socket.on("drain", () => {
+    socketDrainCount = socketDrainCount + 1;
+    return 0;
+  });
+  var large = "";
+  var i = 0;
+  while (i < 9000) {
+    large = large + "x";
+    i = i + 1;
+  }
+  console.log("socket-backpressure:" + socket.write(large) + ":" + socketDrainCount + ":" + socket.writableNeedDrain + ":" + (socket.writableLength == 0));
   socket.end();
   console.log("socket-closed:" + socket.closed);
   console.log("socket-state-after:" + socket.readable + ":" + socket.writable);
@@ -12222,6 +19365,7 @@ function main() {
 		"socket-write:true",
 		"socket-read:pong",
 		"socket-bytes-after:4:4",
+		"socket-backpressure:false:1:false:true",
 		"socket-close",
 		"socket-close-once",
 		"socket-closed:true",
@@ -12287,6 +19431,18 @@ function main() {
   console.log("server-read:" + socket.read(4));
   console.log("server-write:" + socket.write("pong"));
   console.log("server-socket-bytes-after:" + socket.bytesRead + ":" + socket.bytesWritten);
+  var serverDrainCount = 0;
+  socket.on("drain", () => {
+    serverDrainCount = serverDrainCount + 1;
+    return 0;
+  });
+  var large = "";
+  var i = 0;
+  while (i < 9000) {
+    large = large + "y";
+    i = i + 1;
+  }
+  console.log("server-backpressure:" + socket.write(large) + ":" + serverDrainCount + ":" + socket.writableNeedDrain + ":" + (socket.writableLength == 0));
   socket.end();
   server.close();
   console.log("server-closed:" + server.closed);
@@ -12344,6 +19500,13 @@ function main() {
 	if string(buffer) != "pong" {
 		t.Fatalf("expected pong from server, got %q", string(buffer))
 	}
+	largeBuffer := make([]byte, 9000)
+	if _, err := io.ReadFull(client, largeBuffer); err != nil {
+		t.Fatalf("client ReadFull(large) returned error: %v", err)
+	}
+	if string(largeBuffer) != strings.Repeat("y", 9000) {
+		t.Fatalf("expected 9000-byte server payload, got prefix %q", string(largeBuffer[:16]))
+	}
 
 	resultRun := <-done
 	if resultRun.err != nil {
@@ -12365,6 +19528,7 @@ function main() {
 		"server-read:ping",
 		"server-write:true",
 		"server-socket-bytes-after:4:4",
+		"server-backpressure:false:1:false:true",
 		"server-close",
 		"server-close-once",
 		"server-closed:true",
@@ -13616,6 +20780,7 @@ function main() {
   console.log("atomics-xor:" + Atomics.xor(ints, 0, 3));
   console.log("atomics-exchange:" + Atomics.exchange(ints, 1, 20));
   console.log("atomics-compareExchange:" + Atomics.compareExchange(ints, 1, 20, 30));
+  console.log("shared-buffer-bytes:" + ints.buffer.byteLength);
   var workerThread = worker.create(function(message) {
     var shared = new Int32Array(message.buffer);
     var before = Atomics.add(shared, 0, 4);
@@ -13658,6 +20823,7 @@ function main() {
 		"atomics-xor:13",
 		"atomics-exchange:0",
 		"atomics-compareExchange:20",
+		"shared-buffer-bytes:8",
 		"shared-post:true",
 		"shared-reply:true:14:18:30",
 		"shared-main:18:30",
@@ -13943,6 +21109,38 @@ function main() {
   unbrotliStream.write(compressed);
   unbrotliStream.end();
   console.log("compression-stream-brotli:" + unbrotliStream.read());
+
+  var large = "";
+  var i = 0;
+  while (i < 9000) {
+    large = large + "x";
+    i = i + 1;
+  }
+
+  var fileDrainCount = 0;
+  var fileWriter = fs.createWriteStream("tmp/backpressure.txt");
+  fileWriter.on("drain", function () {
+    fileDrainCount = fileDrainCount + 1;
+    return 0;
+  });
+  var fileWriteOk = fileWriter.write(large);
+  console.log("compression-stream-file-backpressure:" + fileWriteOk + ":" + fileDrainCount + ":" + fileWriter.writableNeedDrain + ":" + (fileWriter.writableLength == 0));
+  fileWriter.end();
+  console.log("compression-stream-file-finish:" + fileWriter.writableEnded + ":" + fs.readFile("tmp/backpressure.txt", "utf8").length);
+
+  var packed = compression.gzip(large);
+  var inflateDrainCount = 0;
+  var inflateStream = compression.createGunzipStream();
+  inflateStream.on("drain", function () {
+    inflateDrainCount = inflateDrainCount + 1;
+    return 0;
+  });
+  var inflateWriteOk = inflateStream.write(packed);
+  var inflateNeedDrain = inflateStream.writableNeedDrain;
+  var inflateOverHighWater = inflateStream.writableLength > inflateStream.writableHighWaterMark;
+  var inflated = inflateStream.read(large.length);
+  inflateStream.end();
+  console.log("compression-stream-transform-backpressure:" + inflateWriteOk + ":" + inflateNeedDrain + ":" + inflateOverHighWater + ":" + inflateDrainCount + ":" + inflated.length);
   return 0;
 }
 `, compiler.Options{TargetTriple: triple})
@@ -13967,6 +21165,9 @@ function main() {
 		"compression-stream-gunzip-finish:true",
 		"compression-stream-roundtrip:kimchi-jjigae-mandu",
 		"compression-stream-brotli:mandu",
+		"compression-stream-file-backpressure:false:1:false:true",
+		"compression-stream-file-finish:true:9000",
+		"compression-stream-transform-backpressure:false:true:true:1:9000",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected compression stream output to contain %q, got: %s", want, text)
@@ -15213,6 +22414,7 @@ function main(args) {
   }
   return 0;
 }
+
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
@@ -15714,6 +22916,11 @@ func TestBuildExecutableSupportsJayessOpenSSLTLSConnect(t *testing.T) {
 		filepath.Join(repoRoot, "node_modules", "@jayess", "openssl"),
 		filepath.Join(workdir, "node_modules", "@jayess", "openssl"),
 	)
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "refs", "openssl", "include"),
+		filepath.Join(workdir, "refs", "openssl", "include"),
+	)
 	caPath := filepath.Join(workdir, "openssl-package-server-cert.pem")
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 	if pemBytes == nil {
@@ -15823,6 +23030,11 @@ func TestBuildExecutableEnforcesJayessOpenSSLTLSHostnameVerification(t *testing.
 		filepath.Join(repoRoot, "node_modules", "@jayess", "openssl"),
 		filepath.Join(workdir, "node_modules", "@jayess", "openssl"),
 	)
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "refs", "openssl", "include"),
+		filepath.Join(workdir, "refs", "openssl", "include"),
+	)
 	caPath := filepath.Join(workdir, "openssl-package-hostname-cert.pem")
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 	if pemBytes == nil {
@@ -15907,6 +23119,11 @@ func TestBuildExecutableSupportsJayessOpenSSLTLSServer(t *testing.T) {
 		t,
 		filepath.Join(repoRoot, "node_modules", "@jayess", "openssl"),
 		filepath.Join(workdir, "node_modules", "@jayess", "openssl"),
+	)
+	copyDirRecursive(
+		t,
+		filepath.Join(repoRoot, "refs", "openssl", "include"),
+		filepath.Join(workdir, "refs", "openssl", "include"),
 	)
 	certPath, keyPath := writeTestTLSCertificatePair(t, workdir, "jayess-openssl-package-server")
 

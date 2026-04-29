@@ -26,10 +26,11 @@ type loweredClassInfo struct {
 }
 
 type classRewriteContext struct {
-	info       *loweredClassInfo
-	classes    map[string]*loweredClassInfo
-	isStatic   bool
-	dispatches map[dispatchSignature]bool
+	info          *loweredClassInfo
+	classes       map[string]*loweredClassInfo
+	isStatic      bool
+	isConstructor bool
+	dispatches    map[dispatchSignature]bool
 }
 
 type dispatchSignature struct {
@@ -242,14 +243,15 @@ func emitClassConstructor(info *loweredClassInfo, classes map[string]*loweredCla
 		body = append(body, instanceFieldInitializers(info)...)
 		body = append(body, &ast.ReturnStatement{Value: &ast.Identifier{Name: "__self"}})
 		return &ast.FunctionDecl{
-			BaseNode:   ast.BaseNode{},
-			Visibility: ast.VisibilityPublic,
-			Name:       info.name,
-			Body:       body,
+			BaseNode:      ast.BaseNode{},
+			Visibility:    ast.VisibilityPublic,
+			Name:          info.name,
+			IsConstructor: true,
+			Body:          body,
 		}, nil
 	}
 
-	ctx := &classRewriteContext{info: info, classes: classes, dispatches: dispatches}
+	ctx := &classRewriteContext{info: info, classes: classes, isConstructor: true, dispatches: dispatches}
 	body := []ast.Statement{
 		&ast.VariableDecl{
 			Visibility: ast.VisibilityPublic,
@@ -300,11 +302,12 @@ func emitClassConstructor(info *loweredClassInfo, classes map[string]*loweredCla
 		return nil, err
 	}
 	return &ast.FunctionDecl{
-		BaseNode:   info.constructor.BaseNode,
-		Visibility: ast.VisibilityPublic,
-		Name:       info.name,
-		Params:     params,
-		Body:       body,
+		BaseNode:      info.constructor.BaseNode,
+		Visibility:    ast.VisibilityPublic,
+		Name:          info.name,
+		Params:        params,
+		IsConstructor: true,
+		Body:          body,
 	}, nil
 }
 
@@ -350,13 +353,14 @@ func rewriteFunction(fn *ast.FunctionDecl, globalBindings map[string]string, glo
 		return nil, err
 	}
 	return &ast.FunctionDecl{
-		BaseNode:   fn.BaseNode,
-		Visibility: fn.Visibility,
-		Name:       fn.Name,
-		Params:     params,
-		ReturnType: fn.ReturnType,
-		IsAsync:    fn.IsAsync,
-		Body:       body,
+		BaseNode:      fn.BaseNode,
+		Visibility:    fn.Visibility,
+		Name:          fn.Name,
+		Params:        params,
+		ReturnType:    fn.ReturnType,
+		IsAsync:       fn.IsAsync,
+		IsConstructor: fn.IsConstructor,
+		Body:          body,
 	}, nil
 }
 
@@ -464,6 +468,14 @@ func rewriteStatement(stmt ast.Statement, bindings map[string]string, callBindin
 		value, err := rewriteExpression(stmt.Value, bindings, callBindings, ctx, classes)
 		if err != nil {
 			return nil, err
+		}
+		if ctx != nil && ctx.isConstructor && !ctx.isStatic {
+			return &ast.ReturnStatement{
+				Value: &ast.CallExpression{
+					Callee:    "__jayess_constructor_return",
+					Arguments: []ast.Expression{&ast.Identifier{Name: "__self"}, value},
+				},
+			}, nil
 		}
 		return &ast.ReturnStatement{Value: value}, nil
 	case *ast.ExpressionStatement:
@@ -1707,6 +1719,16 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 						return nil, fmt.Errorf("dns.reverse expects exactly 1 argument")
 					}
 					return &ast.CallExpression{Callee: "__jayess_dns_reverse", Arguments: []ast.Expression{args[0]}}, nil
+				case "setResolver":
+					if len(args) != 1 {
+						return nil, fmt.Errorf("dns.setResolver expects exactly 1 argument")
+					}
+					return &ast.CallExpression{Callee: "__jayess_dns_set_resolver", Arguments: []ast.Expression{args[0]}}, nil
+				case "clearResolver":
+					if len(args) != 0 {
+						return nil, fmt.Errorf("dns.clearResolver expects no arguments")
+					}
+					return &ast.CallExpression{Callee: "__jayess_dns_clear_resolver"}, nil
 				}
 			case "childProcess":
 				switch member.Property {
@@ -2039,6 +2061,10 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 		}
 		switch member.Property {
 		case "call":
+			target, err := rewriteExpression(member.Target, bindings, callBindings, ctx, classes)
+			if err != nil {
+				return nil, err
+			}
 			thisArg := ast.Expression(&ast.UndefinedLiteral{})
 			callArgs := args
 			if len(args) > 0 {
@@ -2046,13 +2072,21 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 				callArgs = args[1:]
 			}
 			callArray := &ast.ArrayLiteral{Elements: append([]ast.Expression{}, callArgs...)}
-			return &ast.CallExpression{Callee: "__jayess_apply", Arguments: []ast.Expression{callee, thisArg, callArray}}, nil
+			return &ast.CallExpression{Callee: "__jayess_apply", Arguments: []ast.Expression{target, thisArg, callArray}}, nil
 		case "apply":
+			target, err := rewriteExpression(member.Target, bindings, callBindings, ctx, classes)
+			if err != nil {
+				return nil, err
+			}
 			if len(args) != 2 {
 				return nil, fmt.Errorf("apply expects exactly 2 arguments")
 			}
-			return &ast.CallExpression{Callee: "__jayess_apply", Arguments: []ast.Expression{callee, args[0], args[1]}}, nil
+			return &ast.CallExpression{Callee: "__jayess_apply", Arguments: []ast.Expression{target, args[0], args[1]}}, nil
 		case "bind":
+			target, err := rewriteExpression(member.Target, bindings, callBindings, ctx, classes)
+			if err != nil {
+				return nil, err
+			}
 			thisArg := ast.Expression(&ast.UndefinedLiteral{})
 			if len(args) > 0 {
 				thisArg = args[0]
@@ -2061,7 +2095,7 @@ func rewriteMemberInvoke(member *ast.MemberExpression, arguments []ast.Expressio
 			if len(args) > 1 {
 				boundArgs.Elements = append(boundArgs.Elements, args[1:]...)
 			}
-			return &ast.CallExpression{Callee: "__jayess_bind", Arguments: []ast.Expression{callee, thisArg, boundArgs}}, nil
+			return &ast.CallExpression{Callee: "__jayess_bind", Arguments: []ast.Expression{target, thisArg, boundArgs}}, nil
 		case "push":
 			if len(args) != 1 {
 				return nil, fmt.Errorf("push expects exactly 1 argument")

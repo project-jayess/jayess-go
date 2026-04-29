@@ -329,10 +329,14 @@ Supported helpers:
 - `dns.lookup(host)`
 - `dns.lookupAll(host)`
 - `dns.reverse(address)`
+- `dns.setResolver(options)`
+- `dns.clearResolver()`
 
 `dns.lookup(host)` resolves a hostname using the platform resolver. It returns an object with `host`, `address`, and `family`, or `undefined` when the hostname cannot be resolved.
 `dns.lookupAll(host)` resolves all available IPv4/IPv6 records and returns an array of `{ host, address, family }` objects, or `undefined` when resolution fails.
 `dns.reverse(address)` resolves an IPv4 or IPv6 address back to a hostname, or returns `undefined` when the input is not an IP address or no reverse name is available.
+`dns.setResolver({ hosts, reverse })` installs a synchronous override table ahead of the platform resolver. `hosts` maps hostnames to one address string or an array of address strings, and `reverse` maps address strings back to hostnames. `dns.clearResolver()` removes that override table.
+Because that override layer sits ahead of the host resolver, Jayess can force deterministic hostname/IP behavior across operating systems for DNS helper code and tests, instead of relying on whatever `/etc/hosts`, local DNS, or OS-specific resolver rules happen to exist on the machine.
 
 ## UDP
 
@@ -393,7 +397,8 @@ Current boundary:
 - `dns.lookup(...)` is synchronous.
 - `dns.lookupAll(...)` is synchronous.
 - `dns.reverse(...)` is synchronous.
-- Resolver options and async DNS APIs are not implemented yet.
+- `dns.setResolver(...)` / `dns.clearResolver()` currently provide only a synchronous override table, not a full pluggable async resolver API.
+- The deterministic cross-OS guarantee currently applies to the DNS/IP helper surface when the override table is used; low-level sockets and higher-level HTTP/TLS runtime execution are still only exercised natively on Linux in this repo.
 
 ## Net
 
@@ -460,6 +465,9 @@ Current boundary:
 - `socket.setKeepAlive(enabled)` configures `SO_KEEPALIVE` and returns the socket.
 - `socket.setTimeout(ms)` configures blocking socket receive/send deadlines and returns the socket.
 - `socket.readable` and `socket.writable` track whether the socket is still open for blocking reads and writes.
+- `socket.writableLength` reports the current logical buffered byte count for the current synchronous write call.
+- `socket.writableHighWaterMark` reports the current high-water-mark threshold.
+- `socket.writableNeedDrain` is `true` after `write(...)` crosses the high-water mark and before the synchronous drain path clears it.
 - `socket.timeout` reflects the configured timeout in milliseconds.
 - `socket.localAddress` and `socket.localPort` expose the bound local endpoint.
 - `socket.remoteFamily` and `socket.localFamily` expose the address family as `4` or `6`.
@@ -467,6 +475,7 @@ Current boundary:
 - `socket.address()` returns `{ address, port, family }` for the local endpoint.
 - `socket.remote()` returns `{ address, port, family }` for the peer endpoint.
 - `socket.on("close", callback)` and `socket.once("close", callback)` are supported.
+- `socket.on("drain", callback)` and `socket.once("drain", callback)` are supported.
 - `socket.on("error", callback)` and `socket.once("error", callback)` are supported.
 - `socket.off(...)`, `socket.listenerCount(event)`, and `socket.eventNames()` are supported.
 - `server.accept()` blocks until one client connects and returns a `Socket`.
@@ -478,6 +487,7 @@ Current boundary:
 - `server.address()` returns `{ address, port, family }`.
 - `server.on("close", callback)` and `server.on("error", callback)` are supported.
 - Socket I/O is blocking in this first pass.
+- The current backpressure model is also synchronous: large `write(...)` calls can return `false`, set `writableNeedDrain`, and then immediately emit `drain` once the blocking write fully flushes.
 - Nonblocking accept loops, connection events, TLS, UDP, and HTTP layering are not implemented yet.
 
 ## Planned Networking APIs

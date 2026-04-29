@@ -142,6 +142,11 @@ func (l *destructureLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement
 		if err != nil {
 			return nil, err
 		}
+		if direct, ok, err := l.bindPatternFromLiteral(stmt.Pattern, value, stmt.Kind); err != nil {
+			return nil, err
+		} else if ok {
+			return direct, nil
+		}
 		temp := l.nextTemp()
 		out := []ast.Statement{
 			&ast.VariableDecl{
@@ -170,6 +175,11 @@ func (l *destructureLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement
 		value, err := l.lowerExpression(stmt.Value)
 		if err != nil {
 			return nil, err
+		}
+		if direct, ok, err := l.assignPatternFromLiteral(stmt.Pattern, value); err != nil {
+			return nil, err
+		} else if ok {
+			return direct, nil
 		}
 		temp := l.nextTemp()
 		out := []ast.Statement{
@@ -254,15 +264,15 @@ func (l *destructureLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement
 		return []ast.Statement{&ast.BlockStatement{Body: body}}, nil
 	case *ast.ForStatement:
 		var init ast.Statement
+		var initPrefix []ast.Statement
 		if stmt.Init != nil {
 			lowered, err := l.lowerStatement(stmt.Init)
 			if err != nil {
 				return nil, err
 			}
 			if len(lowered) > 1 {
-				return nil, fmt.Errorf("destructuring is not supported in for-loop init yet")
-			}
-			if len(lowered) == 1 {
+				initPrefix = append(initPrefix, lowered...)
+			} else if len(lowered) == 1 {
 				init = lowered[0]
 			}
 		}
@@ -291,7 +301,12 @@ func (l *destructureLowerer) lowerStatement(stmt ast.Statement) ([]ast.Statement
 		if err != nil {
 			return nil, err
 		}
-		return []ast.Statement{&ast.ForStatement{Init: init, Condition: condition, Update: update, Body: body}}, nil
+		forStmt := &ast.ForStatement{Init: init, Condition: condition, Update: update, Body: body}
+		if len(initPrefix) == 0 {
+			return []ast.Statement{forStmt}, nil
+		}
+		blockBody := append(initPrefix, forStmt)
+		return []ast.Statement{&ast.BlockStatement{Body: blockBody}}, nil
 	case *ast.ForOfStatement:
 		iterable, err := l.lowerExpression(stmt.Iterable)
 		if err != nil {
@@ -675,6 +690,24 @@ func (l *destructureLowerer) bindPattern(pattern ast.Pattern, source ast.Express
 	}
 }
 
+func (l *destructureLowerer) bindPatternFromLiteral(pattern ast.Pattern, source ast.Expression, kind ast.DeclarationKind) ([]ast.Statement, bool, error) {
+	return l.literalPatternStatements(
+		pattern,
+		source,
+		func(name string, value ast.Expression) ast.Statement {
+			return &ast.VariableDecl{
+				Visibility: ast.VisibilityPublic,
+				Kind:       kind,
+				Name:       name,
+				Value:      value,
+			}
+		},
+		func(pattern ast.Pattern, value ast.Expression) ([]ast.Statement, error) {
+			return l.bindPattern(pattern, value, kind)
+		},
+	)
+}
+
 func (l *destructureLowerer) assignPattern(pattern ast.Pattern, source ast.Expression) ([]ast.Statement, error) {
 	switch pattern := pattern.(type) {
 	case *ast.IdentifierPattern:
@@ -743,6 +776,189 @@ func (l *destructureLowerer) assignPattern(pattern ast.Pattern, source ast.Expre
 	default:
 		return nil, fmt.Errorf("unsupported assignment pattern")
 	}
+}
+
+func (l *destructureLowerer) literalPatternStatements(
+	pattern ast.Pattern,
+	source ast.Expression,
+	emitIdentifier func(name string, value ast.Expression) ast.Statement,
+	fallback func(pattern ast.Pattern, value ast.Expression) ([]ast.Statement, error),
+) ([]ast.Statement, bool, error) {
+	switch pattern := pattern.(type) {
+	case *ast.IdentifierPattern:
+		return []ast.Statement{
+			emitIdentifier(pattern.Name, source),
+		}, true, nil
+	case *ast.ArrayPattern:
+		literal, ok := l.directArrayPatternSource(source)
+		if !ok {
+			return nil, false, nil
+		}
+		var out []ast.Statement
+		for index, element := range pattern.Elements {
+			if element.Pattern == nil {
+				continue
+			}
+			if element.Rest {
+				identifier, ok := element.Pattern.(*ast.IdentifierPattern)
+				if !ok {
+					return nil, false, nil
+				}
+				rest := &ast.ArrayLiteral{}
+				for _, trailing := range literal.Elements[index:] {
+					if trailing == nil {
+						rest.Elements = append(rest.Elements, &ast.UndefinedLiteral{})
+						continue
+					}
+					rest.Elements = append(rest.Elements, trailing)
+				}
+				out = append(out, emitIdentifier(
+					identifier.Name,
+					rest,
+				))
+				continue
+			}
+			value := ast.Expression(&ast.UndefinedLiteral{})
+			if index < len(literal.Elements) && literal.Elements[index] != nil {
+				value = literal.Elements[index]
+			}
+			resolved, prefix, err := l.patternValueWithDefault(value, element.Default)
+			if err != nil {
+				return nil, false, err
+			}
+			out = append(out, prefix...)
+			nested, ok, err := l.literalPatternStatements(element.Pattern, resolved, emitIdentifier, fallback)
+			if err != nil {
+				return nil, false, err
+			}
+			if !ok {
+				nested, err = l.materializeLiteralFallback(element.Pattern, resolved, fallback)
+				if err != nil {
+					return nil, false, err
+				}
+			}
+			out = append(out, nested...)
+		}
+		return out, true, nil
+	case *ast.ObjectPattern:
+		literal, values, ok := l.directObjectPatternSource(source)
+		if !ok {
+			return nil, false, nil
+		}
+		var out []ast.Statement
+		for _, property := range pattern.Properties {
+			value := ast.Expression(&ast.UndefinedLiteral{})
+			if resolvedValue, ok := values[property.Key]; ok && resolvedValue != nil {
+				value = resolvedValue
+			}
+			resolved, prefix, err := l.patternValueWithDefault(value, property.Default)
+			if err != nil {
+				return nil, false, err
+			}
+			out = append(out, prefix...)
+			nested, ok, err := l.literalPatternStatements(property.Pattern, resolved, emitIdentifier, fallback)
+			if err != nil {
+				return nil, false, err
+			}
+			if !ok {
+				nested, err = l.materializeLiteralFallback(property.Pattern, resolved, fallback)
+				if err != nil {
+					return nil, false, err
+				}
+			}
+			out = append(out, nested...)
+		}
+		if pattern.Rest != "" {
+			excluded := map[string]struct{}{}
+			for _, property := range pattern.Properties {
+				excluded[property.Key] = struct{}{}
+			}
+			rest := &ast.ObjectLiteral{}
+			for _, property := range literal.Properties {
+				if _, blocked := excluded[property.Key]; blocked {
+					continue
+				}
+				rest.Properties = append(rest.Properties, property)
+			}
+			out = append(out, emitIdentifier(
+				pattern.Rest,
+				rest,
+			))
+		}
+		return out, true, nil
+	default:
+		return nil, false, nil
+	}
+}
+
+func (l *destructureLowerer) directArrayPatternSource(source ast.Expression) (*ast.ArrayLiteral, bool) {
+	literal, ok := source.(*ast.ArrayLiteral)
+	if !ok {
+		return nil, false
+	}
+	for _, value := range literal.Elements {
+		if _, spread := value.(*ast.SpreadExpression); spread {
+			return nil, false
+		}
+	}
+	return literal, true
+}
+
+func (l *destructureLowerer) directObjectPatternSource(source ast.Expression) (*ast.ObjectLiteral, map[string]ast.Expression, bool) {
+	literal, ok := source.(*ast.ObjectLiteral)
+	if !ok {
+		return nil, nil, false
+	}
+	seenKeys := map[string]struct{}{}
+	values := map[string]ast.Expression{}
+	for _, property := range literal.Properties {
+		if property.Computed || property.Spread || property.Getter || property.Setter {
+			return nil, nil, false
+		}
+		if _, exists := seenKeys[property.Key]; exists {
+			return nil, nil, false
+		}
+		seenKeys[property.Key] = struct{}{}
+		values[property.Key] = property.Value
+	}
+	return literal, values, true
+}
+
+func (l *destructureLowerer) materializeLiteralFallback(
+	pattern ast.Pattern,
+	source ast.Expression,
+	fallback func(pattern ast.Pattern, value ast.Expression) ([]ast.Statement, error),
+) ([]ast.Statement, error) {
+	temp := l.nextTemp()
+	out := []ast.Statement{
+		&ast.VariableDecl{
+			Visibility: ast.VisibilityPublic,
+			Kind:       ast.DeclarationVar,
+			Name:       temp,
+			Value:      source,
+		},
+	}
+	nested, err := fallback(pattern, &ast.Identifier{Name: temp})
+	if err != nil {
+		return nil, err
+	}
+	return append(out, nested...), nil
+}
+
+func (l *destructureLowerer) assignPatternFromLiteral(pattern ast.Pattern, source ast.Expression) ([]ast.Statement, bool, error) {
+	return l.literalPatternStatements(
+		pattern,
+		source,
+		func(name string, value ast.Expression) ast.Statement {
+			return &ast.AssignmentStatement{
+				Target: &ast.Identifier{Name: name},
+				Value:  value,
+			}
+		},
+		func(pattern ast.Pattern, value ast.Expression) ([]ast.Statement, error) {
+			return l.assignPattern(pattern, value)
+		},
+	)
 }
 
 func (l *destructureLowerer) patternValueWithDefault(source ast.Expression, defaultValue ast.Expression) (ast.Expression, []ast.Statement, error) {

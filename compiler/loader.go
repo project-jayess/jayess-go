@@ -68,8 +68,9 @@ type packageJSON struct {
 }
 
 type bindExportSpec struct {
-	Symbol string
-	Type   string
+	Symbol      string
+	Type        string
+	BorrowsArgs bool
 }
 
 type resolvedNativeImport struct {
@@ -330,6 +331,7 @@ func loadSourceFile(path string, targetTriple string, modules map[string]*loaded
 						*nativeSymbols = append(*nativeSymbols, &ast.ExternFunctionDecl{
 							Name:         spec.local,
 							NativeSymbol: nativeSpec.Symbol,
+							BorrowsArgs:  nativeSpec.BorrowsArgs,
 							Variadic:     true,
 						})
 					case "value":
@@ -1194,36 +1196,46 @@ func bindPlatformKey(targetTriple string) string {
 
 func parseBindExportSpec(text string) (bindExportSpec, error) {
 	spec := bindExportSpec{}
+	fields, err := parseTopLevelObjectFields(text)
+	if err != nil {
+		return bindExportSpec{}, err
+	}
 	for _, field := range []string{"symbol", "type"} {
-		offset := strings.Index(text, field)
-		if offset < 0 {
+		raw, ok := fields[field]
+		if !ok {
 			continue
 		}
-		colonOffset := strings.Index(text[offset:], ":")
-		if colonOffset < 0 {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
 			return bindExportSpec{}, fmt.Errorf("field %q is missing a value", field)
 		}
-		valueStart := offset + colonOffset + 1
-		for valueStart < len(text) && (text[valueStart] == ' ' || text[valueStart] == '\t' || text[valueStart] == '\r' || text[valueStart] == '\n') {
-			valueStart++
-		}
-		if valueStart >= len(text) || (text[valueStart] != '"' && text[valueStart] != '\'') {
+		if raw[0] != '"' && raw[0] != '\'' {
 			return bindExportSpec{}, fmt.Errorf("field %q must be a string literal", field)
 		}
-		quote := text[valueStart]
-		valueEnd := valueStart + 1
-		for valueEnd < len(text) && text[valueEnd] != quote {
+		quote := raw[0]
+		valueEnd := 1
+		for valueEnd < len(raw) && raw[valueEnd] != quote {
 			valueEnd++
 		}
-		if valueEnd >= len(text) {
+		if valueEnd >= len(raw) {
 			return bindExportSpec{}, fmt.Errorf("field %q has an unterminated string literal", field)
 		}
-		value := text[valueStart+1 : valueEnd]
+		value := raw[1:valueEnd]
 		switch field {
 		case "symbol":
 			spec.Symbol = strings.TrimSpace(value)
 		case "type":
 			spec.Type = strings.TrimSpace(value)
+		}
+	}
+	if raw, ok := fields["borrowsArgs"]; ok {
+		switch strings.TrimSpace(raw) {
+		case "true":
+			spec.BorrowsArgs = true
+		case "false", "":
+			spec.BorrowsArgs = false
+		default:
+			return bindExportSpec{}, fmt.Errorf(`field "borrowsArgs" must be true or false`)
 		}
 	}
 	return spec, nil

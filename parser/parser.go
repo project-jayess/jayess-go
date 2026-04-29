@@ -31,24 +31,6 @@ func (e *DiagnosticError) Error() string {
 	return e.Message
 }
 
-type state struct {
-	lexer   lexer.State
-	current lexer.Token
-	peek    lexer.Token
-}
-
-func sourcePos(token lexer.Token) ast.SourcePos {
-	return ast.SourcePos{Line: token.Line, Column: token.Column}
-}
-
-func (p *Parser) currentBase() ast.BaseNode {
-	return ast.BaseNode{Pos: sourcePos(p.current)}
-}
-
-func (p *Parser) peekBase() ast.BaseNode {
-	return ast.BaseNode{Pos: sourcePos(p.peek)}
-}
-
 func New(l *lexer.Lexer) *Parser {
 	p := &Parser{lexer: l}
 	p.nextToken()
@@ -715,6 +697,10 @@ func statementConsumesFollowingToken(stmt ast.Statement) bool {
 }
 
 func (p *Parser) parseVariableDeclaration() (ast.Statement, error) {
+	return p.parseVariableDeclarationWithTerminator(true)
+}
+
+func (p *Parser) parseVariableDeclarationWithTerminator(consumeTerminator bool) (ast.Statement, error) {
 	start := p.currentBase()
 	if p.current.Type == lexer.TokenPrivate || p.current.Type == lexer.TokenPublic {
 		return nil, p.errorAtCurrent("private/public variable declarations are not supported; module visibility is controlled by export")
@@ -744,8 +730,10 @@ func (p *Parser) parseVariableDeclaration() (ast.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := p.consumeStatementTerminator(); err != nil {
-			return nil, err
+		if consumeTerminator {
+			if err := p.consumeStatementTerminator(); err != nil {
+				return nil, err
+			}
 		}
 		return &ast.VariableDecl{BaseNode: start, Visibility: ast.VisibilityPublic, Kind: kind, Name: name, TypeAnnotation: annotation, Value: value}, nil
 	case lexer.TokenLBrace, lexer.TokenLBracket:
@@ -762,8 +750,10 @@ func (p *Parser) parseVariableDeclaration() (ast.Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := p.consumeStatementTerminator(); err != nil {
-			return nil, err
+		if consumeTerminator {
+			if err := p.consumeStatementTerminator(); err != nil {
+				return nil, err
+			}
 		}
 		return &ast.DestructuringDecl{BaseNode: start, Visibility: ast.VisibilityPublic, Kind: kind, Pattern: pattern, Value: value}, nil
 	default:
@@ -777,14 +767,20 @@ func (p *Parser) parseAssignment(target ast.Expression) (ast.Statement, error) {
 	if err != nil {
 		return nil, err
 	}
+	return p.parseAssignmentStatement(start, target, operator, true)
+}
+
+func (p *Parser) parseAssignmentStatement(start ast.BaseNode, target ast.Expression, operator ast.AssignmentOperator, consumeTerminator bool) (ast.Statement, error) {
 	p.nextToken()
 	p.nextToken()
 	value, err := p.parseExpression()
 	if err != nil {
 		return nil, err
 	}
-	if err := p.consumeStatementTerminator(); err != nil {
-		return nil, err
+	if consumeTerminator {
+		if err := p.consumeStatementTerminator(); err != nil {
+			return nil, err
+		}
 	}
 	return &ast.AssignmentStatement{BaseNode: start, Target: target, Operator: operator, Value: value}, nil
 }
@@ -1094,21 +1090,21 @@ func (p *Parser) parseForEach() (ast.Statement, error) {
 	if p.current.Type == lexer.TokenLet {
 		return nil, p.errorAtCurrent("let is not supported; use var or const")
 	}
-	if p.current.Type != lexer.TokenVar && p.current.Type != lexer.TokenConst {
-		return nil, p.errorAtCurrent("for...of and for...in require var or const")
-	}
-	kind := ast.DeclarationVar
-	if p.current.Type == lexer.TokenConst {
-		kind = ast.DeclarationConst
-	}
-	if err := p.expectPeek(lexer.TokenIdent); err != nil {
+	kind, err := p.parseDeclarationKindAtCurrent("for...of and for...in require var or const")
+	if err != nil {
 		return nil, err
 	}
-	name := p.current.Literal
+	name, pattern, err := p.parseForEachBinding()
+	if err != nil {
+		return nil, err
+	}
 	p.nextToken()
 	mode := p.current.Type
 	if mode != lexer.TokenOf && mode != lexer.TokenIn {
 		return nil, p.errorAtCurrent("expected of or in in for-each loop")
+	}
+	if pattern != nil && mode == lexer.TokenIn {
+		return nil, p.errorAtCurrent("destructuring is not supported in for...in bindings")
 	}
 	p.nextToken()
 	iterable, err := p.parseExpression()
@@ -1127,10 +1123,52 @@ func (p *Parser) parseForEach() (ast.Statement, error) {
 	if err != nil {
 		return nil, err
 	}
+	if pattern != nil {
+		name, body = p.rewriteForEachDestructuringBinding(kind, pattern, iterable, body)
+	}
 	if mode == lexer.TokenOf {
 		return &ast.ForOfStatement{BaseNode: start, Kind: kind, Name: name, Iterable: iterable, Body: body}, nil
 	}
 	return &ast.ForInStatement{BaseNode: start, Kind: kind, Name: name, Iterable: iterable, Body: body}, nil
+}
+
+func (p *Parser) parseDeclarationKindAtCurrent(message string) (ast.DeclarationKind, error) {
+	switch p.current.Type {
+	case lexer.TokenVar:
+		return ast.DeclarationVar, nil
+	case lexer.TokenConst:
+		return ast.DeclarationConst, nil
+	default:
+		return "", p.errorAtCurrent(message)
+	}
+}
+
+func (p *Parser) parseForEachBinding() (string, ast.Pattern, error) {
+	if p.peek.Type == lexer.TokenLBrace || p.peek.Type == lexer.TokenLBracket {
+		p.nextToken()
+		pattern, err := p.parsePattern()
+		if err != nil {
+			return "", nil, err
+		}
+		return "", pattern, nil
+	}
+	if err := p.expectPeek(lexer.TokenIdent); err != nil {
+		return "", nil, err
+	}
+	return p.current.Literal, nil, nil
+}
+
+func (p *Parser) rewriteForEachDestructuringBinding(kind ast.DeclarationKind, pattern ast.Pattern, iterable ast.Expression, body []ast.Statement) (string, []ast.Statement) {
+	name := p.chooseForEachTempName(pattern, iterable, body)
+	patternBase := ast.BaseNode{Pos: ast.PositionOf(pattern)}
+	binding := &ast.DestructuringDecl{
+		BaseNode:   patternBase,
+		Visibility: ast.VisibilityPublic,
+		Kind:       kind,
+		Pattern:    pattern,
+		Value:      &ast.Identifier{BaseNode: patternBase, Name: name},
+	}
+	return name, append([]ast.Statement{binding}, body...)
 }
 
 func (p *Parser) parseSwitch() (ast.Statement, error) {
@@ -1210,38 +1248,7 @@ func (p *Parser) parseSwitchConsequent() ([]ast.Statement, error) {
 }
 
 func (p *Parser) parseExpressionOrAssignmentStatement() (ast.Statement, error) {
-	if p.current.Type == lexer.TokenLBrace || p.current.Type == lexer.TokenLBracket {
-		if p.isDestructuringAssignmentStart() {
-			pattern, err := p.parsePattern()
-			if err != nil {
-				return nil, err
-			}
-			if p.peek.Type != lexer.TokenAssign {
-				return nil, p.errorAtPeek("expected '=' after destructuring pattern")
-			}
-			p.nextToken()
-			p.nextToken()
-			value, err := p.parseExpression()
-			if err != nil {
-				return nil, err
-			}
-			if err := p.consumeStatementTerminator(); err != nil {
-				return nil, err
-			}
-			return &ast.DestructuringAssignment{BaseNode: p.currentBase(), Pattern: pattern, Value: value}, nil
-		}
-	}
-	expr, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	if isAssignmentToken(p.peek.Type) {
-		return p.parseAssignment(expr)
-	}
-	if err := p.consumeStatementTerminator(); err != nil {
-		return nil, err
-	}
-	return &ast.ExpressionStatement{BaseNode: p.currentBase(), Expression: expr}, nil
+	return p.parseExpressionOrAssignmentStatementWithTerminator(true)
 }
 
 func (p *Parser) parsePattern() (ast.Pattern, error) {
@@ -2334,25 +2341,32 @@ func (p *Parser) parseForInit() (ast.Statement, error) {
 	if p.current.Type == lexer.TokenLet {
 		return nil, p.errorAtCurrent("let is not supported; use var or const")
 	}
+	stmt, err := p.parseForClauseStatement(lexer.TokenSemicolon, "for initializer")
+	if err != nil {
+		return nil, err
+	}
+	p.nextToken()
+	return stmt, nil
+}
+
+func (p *Parser) parseForClauseStatement(terminator lexer.TokenType, context string) (ast.Statement, error) {
 	if p.current.Type == lexer.TokenVar || p.current.Type == lexer.TokenConst {
 		stmt, err := p.parseInlineVariableDeclaration()
 		if err != nil {
 			return nil, err
 		}
-		if p.peek.Type != lexer.TokenSemicolon {
-			return nil, p.errorAtPeek("expected ';' after for initializer")
+		if p.peek.Type != terminator {
+			return nil, p.errorAtPeek("expected %q after %s", terminator, context)
 		}
-		p.nextToken()
 		return stmt, nil
 	}
 	stmt, err := p.parseInlineStatement()
 	if err != nil {
 		return nil, err
 	}
-	if p.peek.Type != lexer.TokenSemicolon {
-		return nil, p.errorAtPeek("expected ';' after for initializer")
+	if p.peek.Type != terminator {
+		return nil, p.errorAtPeek("expected %q after %s", terminator, context)
 	}
-	p.nextToken()
 	return stmt, nil
 }
 
@@ -2377,60 +2391,63 @@ func (p *Parser) parseForUpdate() (ast.Statement, error) {
 	if p.current.Type == lexer.TokenRParen {
 		return nil, nil
 	}
-	stmt, err := p.parseInlineStatement()
+	stmt, err := p.parseForClauseStatement(lexer.TokenRParen, "for update")
 	if err != nil {
 		return nil, err
-	}
-	if p.peek.Type != lexer.TokenRParen {
-		return nil, p.errorAtPeek("expected ')' after for update")
 	}
 	p.nextToken()
 	return stmt, nil
 }
 
 func (p *Parser) parseInlineVariableDeclaration() (ast.Statement, error) {
-	var kind ast.DeclarationKind
-	switch p.current.Type {
-	case lexer.TokenVar:
-		kind = ast.DeclarationVar
-	case lexer.TokenConst:
-		kind = ast.DeclarationConst
-	default:
-		return nil, p.errorAtCurrent("expected var or const")
-	}
-	if err := p.expectPeek(lexer.TokenIdent); err != nil {
-		return nil, err
-	}
-	name := p.current.Literal
-	annotation, err := p.parseTypeAnnotation()
-	if err != nil {
-		return nil, err
-	}
-	if err := p.expectPeek(lexer.TokenAssign); err != nil {
-		return nil, err
-	}
-	p.nextToken()
-	value, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	return &ast.VariableDecl{BaseNode: p.currentBase(), Visibility: ast.VisibilityPublic, Kind: kind, Name: name, TypeAnnotation: annotation, Value: value}, nil
+	return p.parseVariableDeclarationWithTerminator(false)
 }
 
 func (p *Parser) parseInlineStatement() (ast.Statement, error) {
+	return p.parseExpressionOrAssignmentStatementWithTerminator(false)
+}
+
+func (p *Parser) parseExpressionOrAssignmentStatementWithTerminator(consumeTerminator bool) (ast.Statement, error) {
+	if p.current.Type == lexer.TokenLBrace || p.current.Type == lexer.TokenLBracket {
+		if p.isDestructuringAssignmentStart() {
+			stmt, err := p.parseDestructuringAssignment()
+			if err != nil {
+				return nil, err
+			}
+			if consumeTerminator {
+				if err := p.consumeStatementTerminator(); err != nil {
+					return nil, err
+				}
+			}
+			return stmt, nil
+		}
+	}
 	expr, err := p.parseExpression()
 	if err != nil {
 		return nil, err
 	}
-	if p.peek.Type == lexer.TokenAssign {
+	if isAssignmentToken(p.peek.Type) {
+		if consumeTerminator {
+			return p.parseAssignment(expr)
+		}
 		return p.parseInlineAssignment(expr)
+	}
+	if consumeTerminator {
+		if err := p.consumeStatementTerminator(); err != nil {
+			return nil, err
+		}
 	}
 	return &ast.ExpressionStatement{BaseNode: p.currentBase(), Expression: expr}, nil
 }
 
-func (p *Parser) parseInlineAssignment(target ast.Expression) (ast.Statement, error) {
+func (p *Parser) parseDestructuringAssignment() (*ast.DestructuringAssignment, error) {
+	pattern, err := p.parsePattern()
+	if err != nil {
+		return nil, err
+	}
+	start := ast.BaseNode{Pos: ast.PositionOf(pattern)}
 	if p.peek.Type != lexer.TokenAssign {
-		return nil, p.errorAtPeek("expected '=' after assignment target")
+		return nil, p.errorAtPeek("expected '=' after destructuring pattern")
 	}
 	p.nextToken()
 	p.nextToken()
@@ -2438,306 +2455,14 @@ func (p *Parser) parseInlineAssignment(target ast.Expression) (ast.Statement, er
 	if err != nil {
 		return nil, err
 	}
-	return &ast.AssignmentStatement{BaseNode: p.currentBase(), Target: target, Value: value}, nil
+	return &ast.DestructuringAssignment{BaseNode: start, Pattern: pattern, Value: value}, nil
 }
 
-func (p *Parser) expectCurrent(expected lexer.TokenType) error {
-	if p.current.Type != expected {
-		return p.errorAtCurrent("expected %s, got %s", expected, p.current.Type)
+func (p *Parser) parseInlineAssignment(target ast.Expression) (ast.Statement, error) {
+	start := ast.BaseNode{Pos: ast.PositionOf(target)}
+	operator, err := parseAssignmentOperatorToken(p.peek.Type)
+	if err != nil {
+		return nil, p.errorAtPeek("expected assignment operator after assignment target")
 	}
-	return nil
-}
-
-func (p *Parser) expectPeek(expected lexer.TokenType) error {
-	if p.peek.Type != expected {
-		return p.errorAtPeek("expected next token %s, got %s", expected, p.peek.Type)
-	}
-	p.nextToken()
-	return nil
-}
-
-func (p *Parser) consumeStatementTerminator() error {
-	if p.peek.Type == lexer.TokenSemicolon {
-		p.nextToken()
-		return nil
-	}
-	if p.peek.Type == lexer.TokenRBrace || p.peek.Type == lexer.TokenEOF || p.lineBreakBeforePeek() {
-		return nil
-	}
-	return p.errorAtPeek("expected statement terminator, got %s", p.peek.Type)
-}
-
-func (p *Parser) consumeKeywordTerminator() error {
-	if p.peek.Type == lexer.TokenSemicolon {
-		p.nextToken()
-		return nil
-	}
-	if p.peek.Type == lexer.TokenRBrace || p.peek.Type == lexer.TokenEOF || p.lineBreakBeforePeek() {
-		return nil
-	}
-	return p.errorAtPeek("expected statement terminator after %s, got %s", p.current.Type, p.peek.Type)
-}
-
-func (p *Parser) lineBreakBeforePeek() bool {
-	return p.peek.Line > p.current.Line
-}
-
-func (p *Parser) errorAtCurrent(format string, args ...any) error {
-	if p.current.Type == lexer.TokenIllegal {
-		return illegalTokenError(p.current)
-	}
-	return &DiagnosticError{
-		Line:    p.current.Line,
-		Column:  p.current.Column,
-		Message: fmt.Sprintf(format, args...),
-	}
-}
-
-func (p *Parser) errorAtPeek(format string, args ...any) error {
-	if p.peek.Type == lexer.TokenIllegal {
-		return illegalTokenError(p.peek)
-	}
-	return &DiagnosticError{
-		Line:    p.peek.Line,
-		Column:  p.peek.Column,
-		Message: fmt.Sprintf(format, args...),
-	}
-}
-
-func illegalTokenError(token lexer.Token) error {
-	message := token.Literal
-	switch token.Literal {
-	case "unterminated string", "unterminated template":
-	default:
-		message = fmt.Sprintf("unexpected character %q", token.Literal)
-	}
-	return &lexer.DiagnosticError{
-		Line:    token.Line,
-		Column:  token.Column,
-		Message: message,
-	}
-}
-
-func (p *Parser) nextToken() {
-	p.current = p.peek
-	p.peek = p.lexer.NextToken()
-}
-
-func (p *Parser) snapshot() state {
-	return state{
-		lexer:   p.lexer.Snapshot(),
-		current: p.current,
-		peek:    p.peek,
-	}
-}
-
-func (p *Parser) restore(s state) {
-	p.lexer.Restore(s.lexer)
-	p.current = s.current
-	p.peek = s.peek
-}
-
-func (p *Parser) isArrowFunctionStart() bool {
-	saved := p.snapshot()
-	defer p.restore(saved)
-
-	if p.current.Type != lexer.TokenLParen {
-		return false
-	}
-	if _, err := p.parseParameters(); err != nil {
-		return false
-	}
-	if _, err := p.parseOptionalReturnType(); err != nil {
-		return false
-	}
-	return p.peek.Type == lexer.TokenArrow
-}
-
-func (p *Parser) isAsyncArrowFunctionStart() bool {
-	saved := p.snapshot()
-	defer p.restore(saved)
-
-	if p.current.Type != lexer.TokenAsync {
-		return false
-	}
-	p.nextToken()
-	if p.current.Type == lexer.TokenIdent {
-		if p.peek.Type == lexer.TokenColon {
-			if _, err := p.parseTypeAnnotation(); err != nil {
-				return false
-			}
-		}
-		return p.peek.Type == lexer.TokenArrow
-	}
-	if p.current.Type != lexer.TokenLParen {
-		return false
-	}
-	if _, err := p.parseParameters(); err != nil {
-		return false
-	}
-	if _, err := p.parseOptionalReturnType(); err != nil {
-		return false
-	}
-	return p.peek.Type == lexer.TokenArrow
-}
-
-func (p *Parser) isForEachLoopStart() bool {
-	saved := p.snapshot()
-	defer p.restore(saved)
-
-	p.nextToken()
-	if p.current.Type == lexer.TokenLet {
-		return false
-	}
-	if p.current.Type != lexer.TokenVar && p.current.Type != lexer.TokenConst {
-		return false
-	}
-	if p.peek.Type != lexer.TokenIdent {
-		return false
-	}
-	p.nextToken()
-	return p.peek.Type == lexer.TokenOf || p.peek.Type == lexer.TokenIn
-}
-
-func (p *Parser) isDestructuringAssignmentStart() bool {
-	saved := p.snapshot()
-	defer p.restore(saved)
-
-	if p.current.Type != lexer.TokenLBrace && p.current.Type != lexer.TokenLBracket {
-		return false
-	}
-	if _, err := p.parsePattern(); err != nil {
-		return false
-	}
-	return p.peek.Type == lexer.TokenAssign
-}
-
-func isAssignmentToken(tokenType lexer.TokenType) bool {
-	switch tokenType {
-	case lexer.TokenAssign, lexer.TokenAddAssign, lexer.TokenSubAssign, lexer.TokenMulAssign, lexer.TokenDivAssign, lexer.TokenNullishAssign, lexer.TokenOrAssign, lexer.TokenAndAssign:
-		return true
-	default:
-		return false
-	}
-}
-
-func parseAssignmentOperatorToken(tokenType lexer.TokenType) (ast.AssignmentOperator, error) {
-	switch tokenType {
-	case lexer.TokenAssign:
-		return ast.AssignmentAssign, nil
-	case lexer.TokenAddAssign:
-		return ast.AssignmentAddAssign, nil
-	case lexer.TokenSubAssign:
-		return ast.AssignmentSubAssign, nil
-	case lexer.TokenMulAssign:
-		return ast.AssignmentMulAssign, nil
-	case lexer.TokenDivAssign:
-		return ast.AssignmentDivAssign, nil
-	case lexer.TokenNullishAssign:
-		return ast.AssignmentNullishAssign, nil
-	case lexer.TokenOrAssign:
-		return ast.AssignmentOrAssign, nil
-	case lexer.TokenAndAssign:
-		return ast.AssignmentAndAssign, nil
-	default:
-		return "", fmt.Errorf("expected assignment operator")
-	}
-}
-
-func parseTemplateLiteral(raw string) (ast.Expression, error) {
-	parts := []string{}
-	values := []ast.Expression{}
-	var text strings.Builder
-	for i := 0; i < len(raw); i++ {
-		if raw[i] == '$' && i+1 < len(raw) && raw[i+1] == '{' {
-			parts = append(parts, text.String())
-			text.Reset()
-			i += 2
-			start := i
-			depth := 1
-			for i < len(raw) {
-				if raw[i] == '{' {
-					depth++
-				} else if raw[i] == '}' {
-					depth--
-					if depth == 0 {
-						break
-					}
-				}
-				i++
-			}
-			if depth != 0 {
-				return nil, fmt.Errorf("unterminated template expression")
-			}
-			expr, err := parseEmbeddedExpression(raw[start:i])
-			if err != nil {
-				return nil, err
-			}
-			values = append(values, expr)
-			continue
-		}
-		text.WriteByte(raw[i])
-	}
-	parts = append(parts, text.String())
-	return &ast.TemplateLiteral{Parts: parts, Values: values}, nil
-}
-
-func parseEmbeddedExpression(source string) (ast.Expression, error) {
-	p := New(lexer.New(strings.TrimSpace(source)))
-	return p.parseExpression()
-}
-
-func parseOperator(tokenType lexer.TokenType) ast.BinaryOperator {
-	switch tokenType {
-	case lexer.TokenPlus:
-		return ast.OperatorAdd
-	case lexer.TokenMinus:
-		return ast.OperatorSub
-	case lexer.TokenStar:
-		return ast.OperatorMul
-	case lexer.TokenSlash:
-		return ast.OperatorDiv
-	case lexer.TokenBitAnd:
-		return ast.OperatorBitAnd
-	case lexer.TokenBitOr:
-		return ast.OperatorBitOr
-	case lexer.TokenBitXor:
-		return ast.OperatorBitXor
-	case lexer.TokenShiftLeft:
-		return ast.OperatorShl
-	case lexer.TokenShiftRight:
-		return ast.OperatorShr
-	default:
-		return ast.OperatorUShr
-	}
-}
-
-func isComparisonToken(tokenType lexer.TokenType) bool {
-	switch tokenType {
-	case lexer.TokenEq, lexer.TokenNe, lexer.TokenStrictEq, lexer.TokenStrictNe, lexer.TokenLt, lexer.TokenLte, lexer.TokenGt, lexer.TokenGte, lexer.TokenInstanceof, lexer.TokenIs:
-		return true
-	default:
-		return false
-	}
-}
-
-func parseComparisonOperator(tokenType lexer.TokenType) ast.ComparisonOperator {
-	switch tokenType {
-	case lexer.TokenEq:
-		return ast.OperatorEq
-	case lexer.TokenNe:
-		return ast.OperatorNe
-	case lexer.TokenStrictEq:
-		return ast.OperatorStrictEq
-	case lexer.TokenStrictNe:
-		return ast.OperatorStrictNe
-	case lexer.TokenLt:
-		return ast.OperatorLt
-	case lexer.TokenLte:
-		return ast.OperatorLte
-	case lexer.TokenGt:
-		return ast.OperatorGt
-	default:
-		return ast.OperatorGte
-	}
+	return p.parseAssignmentStatement(start, target, operator, false)
 }

@@ -136,12 +136,17 @@ Supported:
 - `writeStream.close()` and `writeStream.destroy()` are aliases for `end()`
 - `writeStream.on("error", callback)` registers an error callback; if the stream already errored, it runs immediately
 - `writeStream.on("finish", callback)` registers a completion callback; if the stream already ended successfully, it runs immediately
+- `writeStream.on("drain", callback)` registers a backpressure-drain callback
 - `writeStream.once("error", callback)` and `writeStream.once("finish", callback)` register single-use callbacks
+- `writeStream.once("drain", callback)` registers a single-use backpressure-drain callback
 - `writeStream.off(event)` and `writeStream.removeListener(event)` remove all callbacks for that event
 - `writeStream.off(event, callback)` and `writeStream.removeListener(event, callback)` remove one matching callback for that event
 - `writeStream.listenerCount(event)` returns the number of persistent and one-shot callbacks for that event
 - `writeStream.eventNames()` returns event names with active callbacks
 - `writeStream.writableEnded` is `true` after `end()`
+- `writeStream.writableLength` reports the current logical buffered byte count
+- `writeStream.writableHighWaterMark` reports the current high-water-mark threshold
+- `writeStream.writableNeedDrain` is `true` after `write(...)` crosses the high-water mark and before the synchronous drain path clears it
 - `stream.closed` is `true` after the stream is closed explicitly or by `end()`
 - `stream.errored` is `true` after an open/read/write/flush error
 - `stream.error` contains the last stream error object, or `null`
@@ -160,8 +165,10 @@ Current boundary:
 
 - Streams are synchronous native file streams.
 - `on("data", ...)` and `pipe(...)` drain synchronously in the current runtime.
+- The same synchronous stream model is also used by the current compression transform streams, which can be piped between file streams or driven directly through `write(...)`, `end()`, and `read(...)` / `readBytes(...)`.
 - Multiple listeners per event are supported, and listeners run in registration order.
-- Backpressure, `drain`, async event scheduling, and general EventEmitter semantics are not implemented yet.
+- File write streams and compression transform streams now expose a small synchronous backpressure surface through `write(...)`, `writableLength`, `writableHighWaterMark`, `writableNeedDrain`, and `drain`.
+- `drain` is still synchronous on the current runtime; async event scheduling and general EventEmitter semantics are not implemented yet.
 - `fs.watch(path)` and `fs.watchSync(path)` are polling-based: changes are detected when `poll()` or `pollAsync(...)` checks the path, and they currently compare existence, type, size, and modification time.
 
 ## Existence and Metadata
@@ -179,6 +186,11 @@ var stat = fs.stat("notes.txt");
 - `size`
 - `mtimeMs`
 - `permissions`
+
+`permissions` is intentionally normalized by host family rather than exposing raw platform bits directly:
+
+- POSIX hosts return a 9-character `rwxrwxrwx`-style string
+- Windows currently returns the coarse capability string `"rwx"`
 
 ## Directories
 

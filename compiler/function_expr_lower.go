@@ -733,6 +733,7 @@ func (l *functionExprLowerer) hoistFunctionExpression(expr *ast.FunctionExpressi
 	name := fmt.Sprintf("__jayess_lambda_%d", l.counter)
 	l.counter++
 	l.globals[name] = true
+	outerCellBindings := l.currentCellBindings()
 
 	localScope := l.functionScope(expr.Params, expr.Body)
 	localScope["__env"] = true
@@ -799,7 +800,18 @@ func (l *functionExprLowerer) hoistFunctionExpression(expr *ast.FunctionExpressi
 	if len(captures.names) == 0 && !captures.hasThis && !captures.hasSuper {
 		return &ast.Identifier{BaseNode: expr.BaseNode, Name: name}, nil
 	}
-	return &ast.ClosureExpression{BaseNode: expr.BaseNode, FunctionName: name, Environment: buildClosureEnvironment(captures, superCtx, l.currentCellBindings())}, nil
+	environmentBindings := outerCellBindings
+	if len(localCellBindings) > 0 {
+		merged := map[string]string{}
+		for name, binding := range outerCellBindings {
+			merged[name] = binding
+		}
+		for name, binding := range localCellBindings {
+			merged[name] = binding
+		}
+		environmentBindings = merged
+	}
+	return &ast.ClosureExpression{BaseNode: expr.BaseNode, FunctionName: name, Environment: buildClosureEnvironment(captures, superCtx, environmentBindings)}, nil
 }
 
 func analyzeCaptures(expr *ast.FunctionExpression, localScope map[string]bool, outerScope map[string]bool) captureSet {
@@ -1576,10 +1588,15 @@ func (l *functionExprLowerer) rewriteNestedClosureEnvironment(env ast.Expression
 	}
 
 	out := &ast.ObjectLiteral{}
+	cellBindings := l.currentCellBindings()
 	for _, property := range objectEnv.Properties {
 		rewritten := property
 		if captures.nameLookup[property.Key] {
-			rewritten.Value = &ast.MemberExpression{Target: &ast.Identifier{Name: "__env"}, Property: property.Key}
+			if cellBindings != nil && cellBindings[property.Key] != "" {
+				rewritten.Value = &ast.Identifier{Name: cellBindings[property.Key]}
+			} else {
+				rewritten.Value = &ast.MemberExpression{Target: &ast.Identifier{Name: "__env"}, Property: property.Key}
+			}
 		} else {
 			value, err := l.rewriteCapturedExpression(property.Value, scope, captures, allowLexicalThis, superCtx)
 			if err != nil {

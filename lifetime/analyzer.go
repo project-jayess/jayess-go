@@ -3,7 +3,6 @@ package lifetime
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"jayess-go/ast"
 )
@@ -14,17 +13,38 @@ type Finding struct {
 	Message string
 }
 
+type LocalClassification struct {
+	Function string
+	Name     string
+	Line     int
+	Column   int
+	Kind     ast.DeclarationKind
+	InLoop   bool
+}
+
+type ParameterClassification struct {
+	Function string
+	Name     string
+}
+
 type Report struct {
 	EscapesDetected bool
 	Findings        []Finding
+	Eligible        []LocalClassification
+	EligibleParams  []ParameterClassification
 }
 
 type Analyzer struct {
-	findings     []Finding
-	seen         map[findingKey]bool
-	functions    map[string]bool
-	externs      map[string]bool
-	classes      map[string]bool
+	findings        []Finding
+	eligible        []LocalClassification
+	eligibleParams  []ParameterClassification
+	seen            map[findingKey]bool
+	functions       map[string]bool
+	externs         map[string]bool
+	borrowedExterns map[string]bool
+	classes         map[string]bool
+	currentEscapes  map[string]bool
+	currentFunction string
 }
 
 var knownRuntimeCalls = map[string]bool{
@@ -45,10 +65,12 @@ type findingKey struct {
 
 func New() *Analyzer {
 	return &Analyzer{
-		seen:      map[findingKey]bool{},
-		functions: map[string]bool{},
-		externs:   map[string]bool{},
-		classes:   map[string]bool{},
+		seen:            map[findingKey]bool{},
+		functions:       map[string]bool{},
+		externs:         map[string]bool{},
+		borrowedExterns: map[string]bool{},
+		classes:         map[string]bool{},
+		currentEscapes:  nil,
 	}
 }
 
@@ -59,6 +81,9 @@ func (a *Analyzer) Analyze(program *ast.Program) Report {
 	}
 	for _, extern := range program.ExternFunctions {
 		a.externs[extern.Name] = true
+		if extern.BorrowsArgs {
+			a.borrowedExterns[extern.Name] = true
+		}
 	}
 	for _, fn := range program.Functions {
 		a.functions[fn.Name] = true
@@ -67,7 +92,7 @@ func (a *Analyzer) Analyze(program *ast.Program) Report {
 		a.classes[classDecl.Name] = true
 	}
 	for _, fn := range program.Functions {
-		a.analyzeFunction(fn.Params, fn.Body, globals)
+		a.analyzeFunction(fn.Name, fn.Params, fn.Body, globals)
 	}
 	for _, classDecl := range program.Classes {
 		for _, member := range classDecl.Members {
@@ -75,7 +100,7 @@ func (a *Analyzer) Analyze(program *ast.Program) Report {
 			if !ok {
 				continue
 			}
-			a.analyzeFunction(method.Params, method.Body, globals)
+			a.analyzeFunction(classDecl.Name+"."+method.Name, method.Params, method.Body, globals)
 		}
 	}
 	sort.Slice(a.findings, func(i, j int) bool {
@@ -87,14 +112,26 @@ func (a *Analyzer) Analyze(program *ast.Program) Report {
 		}
 		return a.findings[i].Message < a.findings[j].Message
 	})
+	sort.Slice(a.eligible, func(i, j int) bool {
+		if a.eligible[i].Line != a.eligible[j].Line {
+			return a.eligible[i].Line < a.eligible[j].Line
+		}
+		if a.eligible[i].Column != a.eligible[j].Column {
+			return a.eligible[i].Column < a.eligible[j].Column
+		}
+		return a.eligible[i].Name < a.eligible[j].Name
+	})
 	return Report{
 		EscapesDetected: len(a.findings) > 0,
 		Findings:        append([]Finding{}, a.findings...),
+		Eligible:        append([]LocalClassification{}, a.eligible...),
+		EligibleParams:  append([]ParameterClassification{}, a.eligibleParams...),
 	}
 }
 
-func (a *Analyzer) analyzeFunction(params []ast.Parameter, body []ast.Statement, globals map[string]bool) {
+func (a *Analyzer) analyzeFunction(name string, params []ast.Parameter, body []ast.Statement, globals map[string]bool) {
 	locals := map[string]bool{}
+	localDecls := map[string]LocalClassification{}
 	for _, param := range params {
 		if param.Name != "" {
 			locals[param.Name] = true
@@ -102,7 +139,30 @@ func (a *Analyzer) analyzeFunction(params []ast.Parameter, body []ast.Statement,
 		collectPatternNames(param.Pattern, locals)
 	}
 	collectDeclaredNames(body, locals)
+	collectLocalDeclarations(body, localDecls, false)
+	previousEscapes := a.currentEscapes
+	previousFunction := a.currentFunction
+	a.currentEscapes = map[string]bool{}
+	a.currentFunction = name
 	a.analyzeStatements(body, locals, globals)
+	for name, item := range localDecls {
+		if a.currentEscapes[name] {
+			continue
+		}
+		item.Function = a.currentFunction
+		a.eligible = append(a.eligible, item)
+	}
+	for _, param := range params {
+		if param.Name == "" || a.currentEscapes[param.Name] {
+			continue
+		}
+		a.eligibleParams = append(a.eligibleParams, ParameterClassification{
+			Function: a.currentFunction,
+			Name:     param.Name,
+		})
+	}
+	a.currentEscapes = previousEscapes
+	a.currentFunction = previousFunction
 }
 
 func collectDeclaredNames(statements []ast.Statement, locals map[string]bool) {
@@ -150,6 +210,49 @@ func collectDeclaredNames(statements []ast.Statement, locals map[string]bool) {
 	}
 }
 
+func collectLocalDeclarations(statements []ast.Statement, decls map[string]LocalClassification, inLoop bool) {
+	for _, stmt := range statements {
+		switch stmt := stmt.(type) {
+		case *ast.VariableDecl:
+			if stmt.Name != "" {
+				pos := stmt.SourcePosition()
+				decls[stmt.Name] = LocalClassification{
+					Name:   stmt.Name,
+					Line:   pos.Line,
+					Column: pos.Column,
+					Kind:   stmt.Kind,
+					InLoop: inLoop,
+				}
+			}
+		case *ast.IfStatement:
+			collectLocalDeclarations(stmt.Consequence, decls, inLoop)
+			collectLocalDeclarations(stmt.Alternative, decls, inLoop)
+		case *ast.WhileStatement:
+			collectLocalDeclarations(stmt.Body, decls, true)
+		case *ast.DoWhileStatement:
+			collectLocalDeclarations(stmt.Body, decls, true)
+		case *ast.ForStatement:
+			if stmt.Init != nil {
+				collectLocalDeclarations([]ast.Statement{stmt.Init}, decls, true)
+			}
+			collectLocalDeclarations(stmt.Body, decls, true)
+		case *ast.BlockStatement:
+			collectLocalDeclarations(stmt.Body, decls, inLoop)
+		case *ast.SwitchStatement:
+			for _, switchCase := range stmt.Cases {
+				collectLocalDeclarations(switchCase.Consequent, decls, inLoop)
+			}
+			collectLocalDeclarations(stmt.Default, decls, inLoop)
+		case *ast.TryStatement:
+			collectLocalDeclarations(stmt.TryBody, decls, inLoop)
+			collectLocalDeclarations(stmt.CatchBody, decls, inLoop)
+			collectLocalDeclarations(stmt.FinallyBody, decls, inLoop)
+		case *ast.LabeledStatement:
+			collectLocalDeclarations([]ast.Statement{stmt.Statement}, decls, inLoop)
+		}
+	}
+}
+
 func collectPatternNames(pattern ast.Pattern, locals map[string]bool) {
 	switch pattern := pattern.(type) {
 	case *ast.IdentifierPattern:
@@ -186,21 +289,21 @@ func (a *Analyzer) analyzeStatement(stmt ast.Statement, locals map[string]bool, 
 		switch escapeTargetKind(stmt.Target, globals) {
 		case assignmentEscapesGlobalState:
 			for _, name := range retainedLocals(stmt.Value, locals) {
-				a.addFinding(stmt.Value, "local %s escapes via assignment to global state", name)
+				a.addEscapeFinding(stmt.Value, name, "local %s escapes via assignment to global state", name)
 			}
 		case assignmentEscapesOuterScope:
 			for _, name := range retainedLocals(stmt.Value, locals) {
-				a.addFinding(stmt.Value, "local %s escapes via assignment to outer scope", name)
+				a.addEscapeFinding(stmt.Value, name, "local %s escapes via assignment to outer scope", name)
 			}
 		}
 		switch classifyStorageTarget(stmt.Target) {
 		case storageTargetObject:
 			for _, name := range retainedLocals(stmt.Value, locals) {
-				a.addFinding(stmt.Value, "local %s escapes via object storage", name)
+				a.addEscapeFinding(stmt.Value, name, "local %s escapes via object storage", name)
 			}
 		case storageTargetArray:
 			for _, name := range retainedLocals(stmt.Value, locals) {
-				a.addFinding(stmt.Value, "local %s escapes via array storage", name)
+				a.addEscapeFinding(stmt.Value, name, "local %s escapes via array storage", name)
 			}
 		}
 	case *ast.DestructuringAssignment:
@@ -208,8 +311,10 @@ func (a *Analyzer) analyzeStatement(stmt ast.Statement, locals map[string]bool, 
 	case *ast.ReturnStatement:
 		if stmt.Value != nil {
 			a.analyzeExpression(stmt.Value, locals)
-			for _, name := range retainedLocals(stmt.Value, locals) {
-				a.addFinding(stmt.Value, "local %s escapes via return", name)
+			if a.returnRequiresConservativeEscape(stmt.Value) {
+				for _, name := range retainedLocals(stmt.Value, locals) {
+					a.addEscapeFinding(stmt.Value, name, "local %s escapes via return", name)
+				}
 			}
 		}
 	case *ast.ExpressionStatement:
@@ -284,7 +389,7 @@ func (a *Analyzer) analyzeExpression(expr ast.Expression, locals map[string]bool
 		a.analyzeExpression(expr.Value, locals)
 	case *ast.ClosureExpression:
 		for _, name := range retainedLocals(expr.Environment, locals) {
-			a.addFinding(expr, "local %s escapes via closure capture", name)
+			a.addEscapeFinding(expr, name, "local %s escapes via closure capture", name)
 		}
 		a.analyzeExpression(expr.Environment, locals)
 	case *ast.BinaryExpression:
@@ -325,7 +430,7 @@ func (a *Analyzer) analyzeExpression(expr ast.Expression, locals map[string]bool
 		if a.callRequiresConservativeEscape(expr.Callee) {
 			for _, arg := range expr.Arguments {
 				for _, name := range retainedLocals(arg, locals) {
-					a.addFinding(arg, "local %s escapes via call to unknown or external function", name)
+					a.addEscapeFinding(arg, name, "local %s escapes via call to unknown or external function", name)
 				}
 			}
 		}
@@ -336,7 +441,7 @@ func (a *Analyzer) analyzeExpression(expr ast.Expression, locals map[string]bool
 		}
 		for _, arg := range expr.Arguments {
 			for _, name := range retainedLocals(arg, locals) {
-				a.addFinding(arg, "local %s escapes via call to unknown or external function", name)
+				a.addEscapeFinding(arg, name, "local %s escapes via call to unknown or external function", name)
 			}
 		}
 	case *ast.NewExpression:
@@ -347,7 +452,7 @@ func (a *Analyzer) analyzeExpression(expr ast.Expression, locals map[string]bool
 		if a.newRequiresConservativeEscape(expr.Callee) {
 			for _, arg := range expr.Arguments {
 				for _, name := range retainedLocals(arg, locals) {
-					a.addFinding(arg, "local %s escapes via call to unknown or external function", name)
+					a.addEscapeFinding(arg, name, "local %s escapes via call to unknown or external function", name)
 				}
 			}
 		}
@@ -454,129 +559,6 @@ func collectRetainedLocals(expr ast.Expression, locals map[string]bool, names ma
 	}
 }
 
-func normalizedLocalName(name string, locals map[string]bool) string {
-	if locals[name] {
-		return normalizedDisplayName(name)
-	}
-	normalized := normalizedDisplayName(name)
-	if normalized != name && locals[normalized] {
-		return normalized
-	}
-	return ""
-}
-
-func normalizedDisplayName(name string) string {
-	if strings.HasPrefix(name, "__jayess_cell_") {
-		return strings.TrimPrefix(name, "__jayess_cell_")
-	}
-	return name
-}
-
-func capturedEnvName(target ast.Expression, property string) string {
-	ident, ok := target.(*ast.Identifier)
-	if !ok || ident.Name != "__env" || property == "" {
-		return ""
-	}
-	return property
-}
-
-func capturedEnvIndexName(target ast.Expression, index ast.Expression) string {
-	ident, ok := target.(*ast.Identifier)
-	if !ok || ident.Name != "__env" {
-		return ""
-	}
-	literal, ok := index.(*ast.StringLiteral)
-	if !ok || literal.Value == "" {
-		return ""
-	}
-	return literal.Value
-}
-
-type assignmentEscapeKind int
-
-const (
-	assignmentEscapesNone assignmentEscapeKind = iota
-	assignmentEscapesGlobalState
-	assignmentEscapesOuterScope
-)
-
-func escapeTargetKind(target ast.Expression, globals map[string]bool) assignmentEscapeKind {
-	root := rootIdentifier(target)
-	switch {
-	case root == "__env":
-		return assignmentEscapesOuterScope
-	case root != "" && globals[root]:
-		return assignmentEscapesGlobalState
-	default:
-		return assignmentEscapesNone
-	}
-}
-
-type storageTargetKind int
-
-const (
-	storageTargetNone storageTargetKind = iota
-	storageTargetObject
-	storageTargetArray
-)
-
-func classifyStorageTarget(target ast.Expression) storageTargetKind {
-	switch target := target.(type) {
-	case *ast.MemberExpression:
-		return storageTargetObject
-	case *ast.IndexExpression:
-		if literal, ok := target.Index.(*ast.StringLiteral); ok && literal.Value != "" {
-			return storageTargetObject
-		}
-		return storageTargetArray
-	default:
-		return storageTargetNone
-	}
-}
-
-func rootIdentifier(expr ast.Expression) string {
-	switch expr := expr.(type) {
-	case *ast.Identifier:
-		return expr.Name
-	case *ast.MemberExpression:
-		return rootIdentifier(expr.Target)
-	case *ast.IndexExpression:
-		return rootIdentifier(expr.Target)
-	default:
-		return ""
-	}
-}
-
-func (a *Analyzer) callRequiresConservativeEscape(callee string) bool {
-	if callee == "" {
-		return true
-	}
-	if knownRuntimeCalls[callee] {
-		return false
-	}
-	if strings.HasPrefix(callee, "__jayess_") {
-		return false
-	}
-	if a.externs[callee] {
-		return true
-	}
-	if a.functions[callee] || a.classes[callee] {
-		return false
-	}
-	return true
-}
-
-func (a *Analyzer) newRequiresConservativeEscape(callee ast.Expression) bool {
-	ident, ok := callee.(*ast.Identifier)
-	if !ok {
-		return true
-	}
-	if strings.HasPrefix(ident.Name, "__jayess_") {
-		return false
-	}
-	return !a.classes[ident.Name]
-}
-
 func (a *Analyzer) addFinding(node any, format string, args ...any) {
 	pos := ast.PositionOf(node)
 	finding := Finding{
@@ -590,6 +572,13 @@ func (a *Analyzer) addFinding(node any, format string, args ...any) {
 	}
 	a.seen[key] = true
 	a.findings = append(a.findings, finding)
+}
+
+func (a *Analyzer) addEscapeFinding(node any, name string, format string, args ...any) {
+	if a.currentEscapes != nil && name != "" {
+		a.currentEscapes[name] = true
+	}
+	a.addFinding(node, format, args...)
 }
 
 func sprintf(format string, args ...any) string {

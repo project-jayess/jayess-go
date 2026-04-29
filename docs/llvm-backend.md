@@ -69,25 +69,39 @@ generated control flow.
 
 ## Debug information and source mapping
 
-Jayess does not currently emit DWARF or other platform-native debug metadata
-into LLVM IR. That means native debuggers do not yet get full source-level
-stepping directly from emitted Jayess IR.
+Jayess now emits LLVM debug metadata for lowered functions when source
+line/column information is present in the IR module.
 
-The backend does preserve debug-friendly source information in two practical
-ways today:
+Current emitted metadata includes:
 
-- emitted LLVM IR includes source comments for lowered functions, for example:
-  - `; source function main at 10:1`
-  - `; debug frame main (10:1)`
-- runtime call-frame labels include the Jayess function name plus line/column
-  when available, and uncaught exception stack traces print those labels
+- `source_filename = ...`
+- `!llvm.dbg.cu`
+- `!DICompileUnit`
+- `!DIFile`
+- `!DISubprogram`
+- `!DILocation` on emitted call sites inside lowered Jayess functions
 
-That gives current crash/debug workflows a reasonable mapping back to Jayess
-source even without full DWARF support:
+On the native-build side, object/executable/shared-library compilation now
+passes `-g` when the input LLVM IR carries that metadata, so platform-native
+debug sections are retained instead of being dropped during clang codegen.
 
-- emitted IR stays readable during backend inspection
-- runtime stack traces show `function (line:col)` entries
-- no-opt (`O0`) builds are regression-tested to preserve those stack locations
+The current proven boundary is:
+
+- emitted LLVM IR contains stable source comments for lowered functions
+- emitted LLVM IR contains LLVM debug metadata for Jayess functions
+- Linux object-file builds carry real DWARF entries that `llvm-dwarfdump`
+  can inspect for:
+  - compile unit
+  - source filename
+  - lowered function symbols and Jayess function names
+- runtime call-frame labels still include Jayess function name plus line/column
+  for uncaught exception stack reporting
+
+That gives current crash/debug workflows both:
+
+- readable emitted IR for backend inspection
+- native DWARF/object metadata for debugger and toolchain inspection where
+  supported
 
 ## Native interoperability boundary
 
@@ -139,10 +153,33 @@ Current built-in system link assumptions are:
 Manual native binding link flags from `*.bind.js` are appended after those
 platform defaults.
 
+Those default runtime/link flags are also covered by backend argument tests for
+Linux, Darwin, and Windows target triples, so the platform-specific linkage
+contract is explicit rather than only implicit in toolchain code.
+
 Other current platform notes:
 
-- cross-target object builds are covered for major targets, but linked native
-  executable coverage is only proven on Linux in this repository today
+- cross-target object builds are covered for the current named target set:
+  - `linux-x64`
+  - `linux-arm64`
+  - `darwin-x64`
+  - `darwin-arm64`
+  - `windows-x64`
+- linked native executable coverage is still only proven on Linux in this
+  repository today
+- current executable proof matrix is intentionally split:
+  - proven executable target: `linux-x64`
+  - proven cross-target object emission only: `darwin-x64`, `darwin-arm64`,
+    `windows-x64`, `linux-arm64`
+- when cross-target executable builds fail because the host toolchain lacks the
+  target SDK or C runtime headers, Jayess reports that boundary explicitly as a
+  native toolchain error instead of only surfacing raw clang output
+  - darwin targets now point at the missing Apple SDK/sysroot boundary and call
+    out `xcrun` / `SDKROOT` style setup explicitly
+  - windows targets now point at the missing Windows SDK plus C runtime
+    boundary and call out MSVC/`clang-cl` or MinGW-style sysroot setup
+  - other cross-target libc failures still point at the missing target sysroot
+    boundary explicitly
 - Jayess does not emit a custom linker script or platform-specific CRT startup
   path; it relies on the selected clang target triple and host toolchain
 - path handling, file permissions, and networking semantics above the LLVM

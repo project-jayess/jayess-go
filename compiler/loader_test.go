@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,33 @@ func repoRootFromCompilerTest(t *testing.T) string {
 		t.Fatalf("runtime.Caller failed")
 	}
 	return filepath.Dir(filepath.Dir(file))
+}
+
+func copyDirRecursiveCompilerTest(t *testing.T, srcDir, dstDir string) {
+	t.Helper()
+	if err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		var rel string
+		var target string
+		var data []byte
+		if err != nil {
+			return err
+		}
+		rel, err = filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		target = filepath.Join(dstDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	}); err != nil {
+		t.Fatalf("copyDirRecursiveCompilerTest returned error: %v", err)
+	}
 }
 
 func TestCompilePathSupportsExportStarFrom(t *testing.T) {
@@ -70,7 +98,7 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("CompilePath returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@add(") {
+	if !strings.Contains(string(result.LLVMIR), "@jayess_fn_add(") {
 		t.Fatalf("expected exported symbol to be imported through export *, got:\n%s", string(result.LLVMIR))
 	}
 }
@@ -719,6 +747,323 @@ function main(args) {
 	}
 }
 
+func TestCompilePathSupportsManualSDLAudioBindFiles(t *testing.T) {
+	dir := t.TempDir()
+	nativeDir := filepath.Join(dir, "native")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	repoRoot := repoRootFromCompilerTest(t)
+	sdlIncludeDir := filepath.ToSlash(filepath.Join(repoRoot, "refs", "SDL", "include"))
+	if err := os.WriteFile(filepath.Join(nativeDir, "sdl_audio.c"), []byte(`#include "jayess_runtime.h"
+#include <SDL3/SDL.h>
+
+jayess_value *jayess_sdl_audio_driver_count(void) {
+    return jayess_value_from_number((double) SDL_GetNumAudioDrivers());
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "sdl_audio_stub.c"), []byte(`#include <SDL3/SDL.h>
+
+int SDL_GetNumAudioDrivers(void) {
+    return 1;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "sdl_audio.bind.js"), []byte(`const f = () => {};
+export const getNumAudioDrivers = f;
+
+export default {
+  sources: ["./sdl_audio.c", "./sdl_audio_stub.c"],
+  includeDirs: [`+"\""+sdlIncludeDir+"\""+`],
+  cflags: [],
+  ldflags: [],
+  exports: {
+    getNumAudioDrivers: { symbol: "jayess_sdl_audio_driver_count", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	entry := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { getNumAudioDrivers } from "./native/sdl_audio.bind.js";
+
+function main(args) {
+  return getNumAudioDrivers();
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := CompilePath(entry, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+	if !strings.Contains(string(result.LLVMIR), "@jayess_sdl_audio_driver_count(") {
+		t.Fatalf("expected SDL audio bind symbol in LLVM IR, got:\n%s", string(result.LLVMIR))
+	}
+	if len(result.NativeImports) != 2 {
+		t.Fatalf("expected 2 native sources from SDL audio bind file, got %#v", result.NativeImports)
+	}
+	if len(result.NativeIncludeDirs) != 1 || !strings.HasSuffix(filepath.ToSlash(result.NativeIncludeDirs[0]), "/refs/SDL/include") {
+		t.Fatalf("expected SDL include dir from bind file, got %#v", result.NativeIncludeDirs)
+	}
+}
+
+func TestCompilePathSupportsManualOpenALBindFiles(t *testing.T) {
+	dir := t.TempDir()
+	nativeDir := filepath.Join(dir, "native")
+	includeDir := filepath.Join(nativeDir, "include", "AL")
+	if err := os.MkdirAll(includeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(includeDir, "al.h"), []byte(`#pragma once
+typedef char ALchar;
+typedef int ALenum;
+#define AL_VENDOR 0xB001
+const ALchar *alGetString(ALenum param);
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(includeDir, "alc.h"), []byte(`#pragma once
+typedef char ALCchar;
+typedef int ALCenum;
+typedef int ALCint;
+typedef struct ALCdevice_struct ALCdevice;
+typedef struct ALCcontext_struct ALCcontext;
+#define ALC_DEFAULT_DEVICE_SPECIFIER 0x1004
+ALCdevice *alcOpenDevice(const ALCchar *devicename);
+int alcCloseDevice(ALCdevice *device);
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "openal.c"), []byte(`#include "jayess_runtime.h"
+#include <AL/al.h>
+#include <AL/alc.h>
+
+jayess_value *jayess_openal_default_device_name(void) {
+    const ALCchar *name = alcOpenDevice(NULL) != NULL ? "stub-openal-device" : NULL;
+    if (name == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(name);
+}
+
+jayess_value *jayess_openal_vendor_name(void) {
+    const ALchar *vendor = alGetString(AL_VENDOR);
+    if (vendor == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(vendor);
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "openal_stub.c"), []byte(`#include <AL/al.h>
+#include <AL/alc.h>
+
+struct ALCdevice_struct { int open; };
+static struct ALCdevice_struct jayess_openal_device = { 1 };
+
+ALCdevice *alcOpenDevice(const ALCchar *devicename) {
+    (void)devicename;
+    return &jayess_openal_device;
+}
+
+int alcCloseDevice(ALCdevice *device) {
+    return device != 0;
+}
+
+const ALchar *alGetString(ALenum param) {
+    return param == AL_VENDOR ? "stub-openal" : 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "openal.bind.js"), []byte(`const f = () => {};
+export const getDefaultDeviceName = f;
+export const getVendorName = f;
+
+export default {
+  sources: ["./openal.c", "./openal_stub.c"],
+  includeDirs: ["./include"],
+  cflags: [],
+  ldflags: [],
+  exports: {
+    getDefaultDeviceName: { symbol: "jayess_openal_default_device_name", type: "function" },
+    getVendorName: { symbol: "jayess_openal_vendor_name", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	entry := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { getDefaultDeviceName, getVendorName } from "./native/openal.bind.js";
+
+function main(args) {
+  return (getDefaultDeviceName() + ":" + getVendorName()).length;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := CompilePath(entry, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+	if !strings.Contains(string(result.LLVMIR), "@jayess_openal_default_device_name(") {
+		t.Fatalf("expected OpenAL bind symbol in LLVM IR, got:\n%s", string(result.LLVMIR))
+	}
+	if len(result.NativeImports) != 2 {
+		t.Fatalf("expected 2 native sources from OpenAL bind file, got %#v", result.NativeImports)
+	}
+	if len(result.NativeIncludeDirs) != 1 || !strings.HasSuffix(filepath.ToSlash(result.NativeIncludeDirs[0]), "/native/include") {
+		t.Fatalf("expected OpenAL include dir from bind file, got %#v", result.NativeIncludeDirs)
+	}
+}
+
+func TestCompilePathSupportsManualMiniaudioBindFiles(t *testing.T) {
+	dir := t.TempDir()
+	nativeDir := filepath.Join(dir, "native")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	repoRoot := repoRootFromCompilerTest(t)
+	miniaudioDir := filepath.ToSlash(filepath.Join(repoRoot, "refs", "miniaudio"))
+	if err := os.WriteFile(filepath.Join(nativeDir, "miniaudio_wrapper.c"), []byte(`#include "jayess_runtime.h"
+#include "miniaudio.h"
+
+jayess_value *jayess_miniaudio_backend_name(void) {
+    ma_backend backends[] = { ma_backend_null };
+    ma_context context;
+    ma_result result = ma_context_init(backends, 1, NULL, &context);
+    if (result != MA_SUCCESS) {
+        return jayess_value_undefined();
+    }
+    jayess_value *value = jayess_value_from_string(ma_get_backend_name(context.backend));
+    ma_context_uninit(&context);
+    return value;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	miniaudioBind := "const f = () => {};\n" +
+		"export const getBackendName = f;\n\n" +
+		"export default {\n" +
+		"  sources: [\"./miniaudio_wrapper.c\", " + strconv.Quote(filepath.ToSlash(filepath.Join(miniaudioDir, "miniaudio.c"))) + "],\n" +
+		"  includeDirs: [" + strconv.Quote(filepath.ToSlash(miniaudioDir)) + "],\n" +
+		"  cflags: [\"-DMA_ENABLE_ONLY_NULL\"],\n" +
+		"  ldflags: [\"-pthread\", \"-ldl\", \"-lm\"],\n" +
+		"  exports: {\n" +
+		"    getBackendName: { symbol: \"jayess_miniaudio_backend_name\", type: \"function\" }\n" +
+		"  }\n" +
+		"};\n"
+	if err := os.WriteFile(filepath.Join(nativeDir, "miniaudio.bind.js"), []byte(miniaudioBind), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	entry := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { getBackendName } from "./native/miniaudio.bind.js";
+
+function main(args) {
+  return getBackendName().length;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := CompilePath(entry, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+	if !strings.Contains(string(result.LLVMIR), "@jayess_miniaudio_backend_name(") {
+		t.Fatalf("expected miniaudio bind symbol in LLVM IR, got:\n%s", string(result.LLVMIR))
+	}
+	if len(result.NativeImports) != 2 {
+		t.Fatalf("expected 2 native sources from miniaudio bind file, got %#v", result.NativeImports)
+	}
+	if len(result.NativeIncludeDirs) != 1 || !strings.HasSuffix(filepath.ToSlash(result.NativeIncludeDirs[0]), "/refs/miniaudio") {
+		t.Fatalf("expected miniaudio include dir from bind file, got %#v", result.NativeIncludeDirs)
+	}
+	if len(result.NativeCompileFlags) != 1 || result.NativeCompileFlags[0] != "-DMA_ENABLE_ONLY_NULL" {
+		t.Fatalf("expected miniaudio compile flags from bind file, got %#v", result.NativeCompileFlags)
+	}
+}
+
+func TestCompilePathSupportsManualPortAudioBindFiles(t *testing.T) {
+	dir := t.TempDir()
+	nativeDir := filepath.Join(dir, "native")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	repoRoot := repoRootFromCompilerTest(t)
+	portaudioIncludeDir := filepath.ToSlash(filepath.Join(repoRoot, "refs", "portaudio", "include"))
+	if err := os.WriteFile(filepath.Join(nativeDir, "portaudio_wrapper.c"), []byte(`#include "jayess_runtime.h"
+#include <portaudio.h>
+
+jayess_value *jayess_portaudio_version_text(void) {
+    const char *text = Pa_GetVersionText();
+    if (text == NULL) {
+        return jayess_value_undefined();
+    }
+    return jayess_value_from_string(text);
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "portaudio_stub.c"), []byte(`#include <portaudio.h>
+
+const char* Pa_GetVersionText(void) {
+    return "stub-portaudio";
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "portaudio.bind.js"), []byte(`const f = () => {};
+export const getVersionText = f;
+
+export default {
+  sources: ["./portaudio_wrapper.c", "./portaudio_stub.c"],
+  includeDirs: [`+"\""+portaudioIncludeDir+"\""+`],
+  cflags: [],
+  ldflags: [],
+  exports: {
+    getVersionText: { symbol: "jayess_portaudio_version_text", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	entry := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { getVersionText } from "./native/portaudio.bind.js";
+
+function main(args) {
+  return getVersionText().length;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := CompilePath(entry, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+	if !strings.Contains(string(result.LLVMIR), "@jayess_portaudio_version_text(") {
+		t.Fatalf("expected PortAudio bind symbol in LLVM IR, got:\n%s", string(result.LLVMIR))
+	}
+	if len(result.NativeImports) != 2 {
+		t.Fatalf("expected 2 native sources from PortAudio bind file, got %#v", result.NativeImports)
+	}
+	if len(result.NativeIncludeDirs) != 1 || !strings.HasSuffix(filepath.ToSlash(result.NativeIncludeDirs[0]), "/refs/portaudio/include") {
+		t.Fatalf("expected PortAudio include dir from bind file, got %#v", result.NativeIncludeDirs)
+	}
+}
+
 func TestCompilePathSupportsPackageLocalBindFiles(t *testing.T) {
 	dir := t.TempDir()
 	pkgDir := filepath.Join(dir, "node_modules", "demo-bind-pkg")
@@ -987,11 +1332,51 @@ int glfwInit(void);
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(pkgDir, "index.js"), []byte(`
-import { initNative } from "./native/glfw.bind.js";
+	import { initNative, createOpenGLWindowNative, makeContextCurrentNative, isContextCurrentNative, swapIntervalNative, getProcAddressNative, hasProcAddressNative, isVulkanSupportedNative, getRequiredVulkanInstanceExtensionsNative, getVulkanInstanceProcAddressNative, createVulkanSurfaceNative } from "./native/glfw.bind.js";
 import { setKeyCallbackNative } from "./native/glfw.bind.js";
 
 export function init() {
   return initNative();
+}
+
+export function createOpenGLWindow(width, height, title) {
+  return createOpenGLWindowNative(width, height, title);
+}
+
+export function makeContextCurrent(window) {
+  return makeContextCurrentNative(window);
+}
+
+export function isContextCurrent(window) {
+  return isContextCurrentNative(window);
+}
+
+export function swapInterval(interval) {
+  return swapIntervalNative(interval);
+}
+
+export function getProcAddress(name) {
+  return getProcAddressNative(name);
+}
+
+export function hasProcAddress(name) {
+  return hasProcAddressNative(name);
+}
+
+export function isVulkanSupported() {
+  return isVulkanSupportedNative();
+}
+
+export function getRequiredVulkanInstanceExtensions() {
+  return getRequiredVulkanInstanceExtensionsNative();
+}
+
+export function getVulkanInstanceProcAddress(name) {
+  return getVulkanInstanceProcAddressNative(name);
+}
+
+export function createVulkanSurface(window, instance) {
+  return createVulkanSurfaceNative(window, instance);
 }
 
 export function setKeyCallback(window, callback) {
@@ -1011,6 +1396,16 @@ jayess_value *jayess_glfw_init(void) {
 	}
 	if err := os.WriteFile(filepath.Join(nativeDir, "glfw.bind.js"), []byte(`const f = () => {};
 export const initNative = f;
+export const createOpenGLWindowNative = f;
+export const makeContextCurrentNative = f;
+export const isContextCurrentNative = f;
+export const swapIntervalNative = f;
+export const getProcAddressNative = f;
+export const hasProcAddressNative = f;
+export const isVulkanSupportedNative = f;
+export const getRequiredVulkanInstanceExtensionsNative = f;
+export const getVulkanInstanceProcAddressNative = f;
+export const createVulkanSurfaceNative = f;
 export const setKeyCallbackNative = f;
 
 export default {
@@ -1020,6 +1415,16 @@ export default {
   ldflags: ["-lglfw"],
   exports: {
     initNative: { symbol: "jayess_glfw_init", type: "function" },
+    createOpenGLWindowNative: { symbol: "jayess_glfw_create_opengl_window", type: "function" },
+    makeContextCurrentNative: { symbol: "jayess_glfw_make_context_current", type: "function" },
+    isContextCurrentNative: { symbol: "jayess_glfw_is_context_current", type: "function" },
+    swapIntervalNative: { symbol: "jayess_glfw_swap_interval", type: "function" },
+    getProcAddressNative: { symbol: "jayess_glfw_get_proc_address", type: "function" },
+    hasProcAddressNative: { symbol: "jayess_glfw_has_proc_address", type: "function" },
+    isVulkanSupportedNative: { symbol: "jayess_glfw_is_vulkan_supported", type: "function" },
+    getRequiredVulkanInstanceExtensionsNative: { symbol: "jayess_glfw_get_required_vulkan_instance_extensions", type: "function" },
+    getVulkanInstanceProcAddressNative: { symbol: "jayess_glfw_get_vulkan_instance_proc_address", type: "function" },
+    createVulkanSurfaceNative: { symbol: "jayess_glfw_create_vulkan_surface", type: "function" },
     setKeyCallbackNative: { symbol: "jayess_glfw_set_key_callback", type: "function" }
   }
 };
@@ -1028,9 +1433,19 @@ export default {
 	}
 	entry := filepath.Join(dir, "main.js")
 	if err := os.WriteFile(entry, []byte(`
-import { init, setKeyCallback } from "@jayess/glfw";
+	import { init, createOpenGLWindow, makeContextCurrent, isContextCurrent, swapInterval, getProcAddress, hasProcAddress, isVulkanSupported, getRequiredVulkanInstanceExtensions, getVulkanInstanceProcAddress, createVulkanSurface, setKeyCallback } from "@jayess/glfw";
 
 function main(args) {
+  var window = createOpenGLWindow(32, 24, "gl");
+  makeContextCurrent(window);
+  swapInterval(1);
+  getProcAddress("glClear");
+  hasProcAddress("glClear");
+  isVulkanSupported();
+  getRequiredVulkanInstanceExtensions();
+  getVulkanInstanceProcAddress("vkCreateInstance");
+  createVulkanSurface(undefined, 1n);
+  isContextCurrent(window);
   setKeyCallback(undefined, function (event) { return event.key; });
   return init();
 }
@@ -1042,8 +1457,23 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("CompilePath returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@jayess_glfw_init(") || !strings.Contains(string(result.LLVMIR), "@jayess_glfw_set_key_callback(") {
-		t.Fatalf("expected GLFW package symbols in LLVM IR, got:\n%s", string(result.LLVMIR))
+	for _, symbol := range []string{
+		"@jayess_glfw_init(",
+		"@jayess_glfw_create_opengl_window(",
+		"@jayess_glfw_make_context_current(",
+		"@jayess_glfw_is_context_current(",
+		"@jayess_glfw_swap_interval(",
+		"@jayess_glfw_get_proc_address(",
+		"@jayess_glfw_has_proc_address(",
+		"@jayess_glfw_is_vulkan_supported(",
+		"@jayess_glfw_get_required_vulkan_instance_extensions(",
+		"@jayess_glfw_get_vulkan_instance_proc_address(",
+		"@jayess_glfw_create_vulkan_surface(",
+		"@jayess_glfw_set_key_callback(",
+	} {
+		if !strings.Contains(string(result.LLVMIR), symbol) {
+			t.Fatalf("expected GLFW package symbol %q in LLVM IR, got:\n%s", symbol, string(result.LLVMIR))
+		}
 	}
 	if len(result.NativeImports) != 1 || !strings.HasSuffix(filepath.ToSlash(result.NativeImports[0]), "/node_modules/@jayess/glfw/native/glfw.c") {
 		t.Fatalf("expected GLFW native import to be carried through, got %#v", result.NativeImports)
@@ -1071,7 +1501,7 @@ func TestCompilePathSupportsJayessRaylibPackage(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(pkgDir, "index.js"), []byte(`
-import { initWindowNative, isWindowReadyNative, drawTextNative } from "./native/raylib.bind.js";
+	import { initWindowNative, isWindowReadyNative, drawTextNative } from "./native/raylib.bind.js";
 
 export function initWindow(width, height, title) {
   return initWindowNative(width, height, title);
@@ -1169,10 +1599,52 @@ func TestCompilePathSupportsJayessAudioPackage(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(includeDir, "cubeb.h"), []byte(`#pragma once
 typedef struct cubeb cubeb;
+typedef unsigned int uint32_t;
+#define CUBEB_DEVICE_TYPE_INPUT 1
+#define CUBEB_DEVICE_TYPE_OUTPUT 2
+#define CUBEB_DEVICE_STATE_DISABLED 0
+#define CUBEB_DEVICE_STATE_UNPLUGGED 1
+#define CUBEB_DEVICE_STATE_ENABLED 2
+#define CUBEB_DEVICE_PREF_NONE 0x00
+#define CUBEB_DEVICE_PREF_MULTIMEDIA 0x01
+#define CUBEB_DEVICE_PREF_VOICE 0x02
+#define CUBEB_DEVICE_PREF_NOTIFICATION 0x04
+#define CUBEB_DEVICE_FMT_S16LE 0x0010
+#define CUBEB_DEVICE_FMT_S16BE 0x0020
+#define CUBEB_DEVICE_FMT_F32LE 0x1000
+#define CUBEB_DEVICE_FMT_F32BE 0x2000
+typedef int cubeb_device_type;
+typedef int cubeb_device_state;
+typedef int cubeb_device_pref;
+typedef int cubeb_device_fmt;
+typedef struct {
+  void * devid;
+  char const * device_id;
+  char const * friendly_name;
+  char const * group_id;
+  char const * vendor_name;
+  cubeb_device_type type;
+  cubeb_device_state state;
+  cubeb_device_pref preferred;
+  cubeb_device_fmt format;
+  cubeb_device_fmt default_format;
+  uint32_t max_channels;
+  uint32_t default_rate;
+  uint32_t max_rate;
+  uint32_t min_rate;
+  uint32_t latency_lo;
+  uint32_t latency_hi;
+} cubeb_device_info;
+typedef struct {
+  cubeb_device_info * device;
+  unsigned long count;
+} cubeb_device_collection;
 #define CUBEB_OK 0
 int cubeb_init(cubeb ** context, char const * context_name, char const * backend_name);
 char const * cubeb_get_backend_id(cubeb * context);
 int cubeb_get_max_channel_count(cubeb * context, unsigned int * max_channels);
+int cubeb_enumerate_devices(cubeb * context, cubeb_device_type devtype, cubeb_device_collection * collection);
+int cubeb_device_collection_destroy(cubeb * context, cubeb_device_collection * collection);
 void cubeb_destroy(cubeb * context);
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
@@ -1181,10 +1653,99 @@ void cubeb_destroy(cubeb * context);
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(pkgDir, "index.js"), []byte(`
-import { createContextNative } from "./native/audio.bind.js";
+import { createContextNative, listOutputDevicesNative, listInputDevicesNative } from "./native/audio.bind.js";
+import { preferredSampleRateNative, minLatencyNative, createPlaybackStreamNative, startPlaybackStreamNative, pausePlaybackStreamNative, stopPlaybackStreamNative, submitPlaybackSamplesNative, playbackStatsNative, closePlaybackStreamNative, nextStreamEventNative, createCaptureStreamNative, startCaptureStreamNative, stopCaptureStreamNative, readCapturedSamplesNative, captureStatsNative, closeCaptureStreamNative, loadWavNative, loadOggNative, loadMp3Native, loadFlacNative } from "./native/audio.bind.js";
 
 export function createContext(name, backendName) {
   return createContextNative(name, backendName);
+}
+
+export function listOutputDevices(context) {
+  return listOutputDevicesNative(context);
+}
+
+export function listInputDevices(context) {
+  return listInputDevicesNative(context);
+}
+
+export function preferredSampleRate(context) {
+  return preferredSampleRateNative(context);
+}
+
+export function minLatency(context, options) {
+  return minLatencyNative(context, options);
+}
+
+export function createPlaybackStream(context, options) {
+  return createPlaybackStreamNative(context, options);
+}
+
+export function startPlaybackStream(stream) {
+  return startPlaybackStreamNative(stream);
+}
+
+export function pausePlaybackStream(stream) {
+  return pausePlaybackStreamNative(stream);
+}
+
+export function stopPlaybackStream(stream) {
+  return stopPlaybackStreamNative(stream);
+}
+
+export function submitPlaybackSamples(stream, samples) {
+  return submitPlaybackSamplesNative(stream, samples);
+}
+
+export function playbackStats(stream) {
+  return playbackStatsNative(stream);
+}
+
+export function closePlaybackStream(stream) {
+  return closePlaybackStreamNative(stream);
+}
+
+export function nextStreamEvent(stream) {
+  return nextStreamEventNative(stream);
+}
+
+export function createCaptureStream(context, options) {
+  return createCaptureStreamNative(context, options);
+}
+
+export function startCaptureStream(stream) {
+  return startCaptureStreamNative(stream);
+}
+
+export function stopCaptureStream(stream) {
+  return stopCaptureStreamNative(stream);
+}
+
+export function readCapturedSamples(stream, frames) {
+  return readCapturedSamplesNative(stream, frames);
+}
+
+export function captureStats(stream) {
+  return captureStatsNative(stream);
+}
+
+export function closeCaptureStream(stream) {
+  return closeCaptureStreamNative(stream);
+}
+
+export function loadWav(path) {
+  return loadWavNative(path);
+}
+
+export function loadOgg(path) {
+  return loadOggNative(path);
+}
+
+export function loadMp3(path) {
+  return loadMp3Native(path);
+}
+
+export function loadFlac(path) {
+  return loadFlacNative(path);
 }
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
@@ -1197,19 +1758,157 @@ jayess_value *jayess_audio_create_context(jayess_value *name_value, jayess_value
     (void) backend_value;
     return jayess_value_undefined();
 }
+jayess_value *jayess_audio_list_output_devices(jayess_value *context_value) {
+    (void) context_value;
+    return jayess_value_undefined();
+}
+
+jayess_value *jayess_audio_list_input_devices(jayess_value *context_value) {
+    (void) context_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_preferred_sample_rate(jayess_value *context_value) {
+    (void) context_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_min_latency(jayess_value *context_value, jayess_value *options_value) {
+    (void) context_value;
+    (void) options_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_create_playback_stream(jayess_value *context_value, jayess_value *options_value) {
+    (void) context_value;
+    (void) options_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_start_playback_stream(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_pause_playback_stream(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_stop_playback_stream(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_submit_playback_samples(jayess_value *stream_value, jayess_value *samples_value) {
+    (void) stream_value;
+    (void) samples_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_playback_stats(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_close_playback_stream(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_next_stream_event(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_create_capture_stream(jayess_value *context_value, jayess_value *options_value) {
+    (void) context_value;
+    (void) options_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_start_capture_stream(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_stop_capture_stream(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_read_captured_samples(jayess_value *stream_value, jayess_value *frames_value) {
+    (void) stream_value;
+    (void) frames_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_capture_stats(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_close_capture_stream(jayess_value *stream_value) {
+    (void) stream_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_load_wav(jayess_value *path_value) {
+    (void) path_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_load_ogg(jayess_value *path_value) {
+    (void) path_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_load_mp3(jayess_value *path_value) {
+    (void) path_value;
+    return jayess_value_undefined();
+}
+jayess_value *jayess_audio_load_flac(jayess_value *path_value) {
+    (void) path_value;
+    return jayess_value_undefined();
+}
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(nativeDir, "audio.bind.js"), []byte(`const f = () => {};
 export const createContextNative = f;
+export const listOutputDevicesNative = f;
+export const listInputDevicesNative = f;
+export const preferredSampleRateNative = f;
+export const minLatencyNative = f;
+export const createPlaybackStreamNative = f;
+export const startPlaybackStreamNative = f;
+export const pausePlaybackStreamNative = f;
+export const stopPlaybackStreamNative = f;
+export const submitPlaybackSamplesNative = f;
+export const playbackStatsNative = f;
+export const closePlaybackStreamNative = f;
+export const nextStreamEventNative = f;
+export const createCaptureStreamNative = f;
+export const startCaptureStreamNative = f;
+export const stopCaptureStreamNative = f;
+export const readCapturedSamplesNative = f;
+export const captureStatsNative = f;
+export const closeCaptureStreamNative = f;
+export const loadWavNative = f;
+export const loadOggNative = f;
+export const loadMp3Native = f;
+export const loadFlacNative = f;
 
 export default {
   sources: ["./audio.c"],
   includeDirs: ["../../../../refs/cubeb/include"],
   cflags: [],
-  ldflags: ["-lcubeb"],
+  ldflags: ["-lcubeb", "-pthread"],
   exports: {
-    createContextNative: { symbol: "jayess_audio_create_context", type: "function" }
+    createContextNative: { symbol: "jayess_audio_create_context", type: "function" },
+    listOutputDevicesNative: { symbol: "jayess_audio_list_output_devices", type: "function" },
+    listInputDevicesNative: { symbol: "jayess_audio_list_input_devices", type: "function" },
+    preferredSampleRateNative: { symbol: "jayess_audio_preferred_sample_rate", type: "function" },
+    minLatencyNative: { symbol: "jayess_audio_min_latency", type: "function" },
+    createPlaybackStreamNative: { symbol: "jayess_audio_create_playback_stream", type: "function" },
+    startPlaybackStreamNative: { symbol: "jayess_audio_start_playback_stream", type: "function" },
+    pausePlaybackStreamNative: { symbol: "jayess_audio_pause_playback_stream", type: "function" },
+    stopPlaybackStreamNative: { symbol: "jayess_audio_stop_playback_stream", type: "function" },
+    submitPlaybackSamplesNative: { symbol: "jayess_audio_submit_playback_samples", type: "function" },
+    playbackStatsNative: { symbol: "jayess_audio_playback_stats", type: "function" },
+    closePlaybackStreamNative: { symbol: "jayess_audio_close_playback_stream", type: "function" },
+    nextStreamEventNative: { symbol: "jayess_audio_next_stream_event", type: "function" },
+    createCaptureStreamNative: { symbol: "jayess_audio_create_capture_stream", type: "function" },
+    startCaptureStreamNative: { symbol: "jayess_audio_start_capture_stream", type: "function" },
+    stopCaptureStreamNative: { symbol: "jayess_audio_stop_capture_stream", type: "function" },
+    readCapturedSamplesNative: { symbol: "jayess_audio_read_captured_samples", type: "function" },
+    captureStatsNative: { symbol: "jayess_audio_capture_stats", type: "function" },
+    closeCaptureStreamNative: { symbol: "jayess_audio_close_capture_stream", type: "function" },
+    loadWavNative: { symbol: "jayess_audio_load_wav", type: "function" },
+    loadOggNative: { symbol: "jayess_audio_load_ogg", type: "function" },
+    loadMp3Native: { symbol: "jayess_audio_load_mp3", type: "function" },
+    loadFlacNative: { symbol: "jayess_audio_load_flac", type: "function" }
   }
 };
 `), 0o644); err != nil {
@@ -1217,10 +1916,33 @@ export default {
 	}
 	entry := filepath.Join(dir, "main.js")
 	if err := os.WriteFile(entry, []byte(`
-import { createContext } from "@jayess/audio";
+import { createContext, listOutputDevices, listInputDevices, preferredSampleRate, minLatency, createPlaybackStream, startPlaybackStream, pausePlaybackStream, stopPlaybackStream, submitPlaybackSamples, playbackStats, closePlaybackStream, nextStreamEvent, createCaptureStream, startCaptureStream, stopCaptureStream, readCapturedSamples, captureStats, closeCaptureStream, loadWav, loadOgg, loadMp3, loadFlac } from "@jayess/audio";
 
 function main(args) {
-  return createContext("jayess-test", null);
+  var ctx = createContext("jayess-test", null);
+  listOutputDevices(ctx);
+  listInputDevices(ctx);
+  var rate = preferredSampleRate(ctx);
+  minLatency(ctx, { sampleRate: rate, channels: 2, format: "f32" });
+  var stream = createPlaybackStream(ctx, { sampleRate: 48000, channels: 2, format: "f32" });
+  startPlaybackStream(stream);
+  pausePlaybackStream(stream);
+  stopPlaybackStream(stream);
+  submitPlaybackSamples(stream, [0, 0, 0, 0]);
+  playbackStats(stream);
+  nextStreamEvent(stream);
+  closePlaybackStream(stream);
+  var capture = createCaptureStream(ctx, { sampleRate: 48000, channels: 1, format: "f32" });
+  startCaptureStream(capture);
+  readCapturedSamples(capture, 4);
+  captureStats(capture);
+  stopCaptureStream(capture);
+  closeCaptureStream(capture);
+  loadWav("sample.wav");
+  loadOgg("sample.ogg");
+  loadMp3("sample.mp3");
+  loadFlac("sample.flac");
+  return ctx;
 }
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
@@ -1233,10 +1955,35 @@ function main(args) {
 	if !strings.Contains(string(result.LLVMIR), "@jayess_audio_create_context(") {
 		t.Fatalf("expected audio package symbol in LLVM IR, got:\n%s", string(result.LLVMIR))
 	}
+	for _, symbol := range []string{
+		"@jayess_audio_list_output_devices(",
+		"@jayess_audio_list_input_devices(",
+		"@jayess_audio_preferred_sample_rate(",
+		"@jayess_audio_min_latency(",
+		"@jayess_audio_create_playback_stream(",
+		"@jayess_audio_start_playback_stream(",
+		"@jayess_audio_pause_playback_stream(",
+		"@jayess_audio_stop_playback_stream(",
+		"@jayess_audio_submit_playback_samples(",
+		"@jayess_audio_playback_stats(",
+		"@jayess_audio_close_playback_stream(",
+		"@jayess_audio_next_stream_event(",
+		"@jayess_audio_create_capture_stream(",
+		"@jayess_audio_start_capture_stream(",
+		"@jayess_audio_stop_capture_stream(",
+		"@jayess_audio_read_captured_samples(",
+		"@jayess_audio_capture_stats(",
+		"@jayess_audio_close_capture_stream(",
+		"@jayess_audio_load_wav(",
+	} {
+		if !strings.Contains(string(result.LLVMIR), symbol) {
+			t.Fatalf("expected audio package symbol %q in LLVM IR, got:\n%s", symbol, string(result.LLVMIR))
+		}
+	}
 	if len(result.NativeImports) != 1 || !strings.HasSuffix(filepath.ToSlash(result.NativeImports[0]), "/node_modules/@jayess/audio/native/audio.c") {
 		t.Fatalf("expected audio native import to be carried through, got %#v", result.NativeImports)
 	}
-	if len(result.NativeLinkFlags) != 1 || result.NativeLinkFlags[0] != "-lcubeb" {
+	if len(result.NativeLinkFlags) != 2 || result.NativeLinkFlags[0] != "-lcubeb" || result.NativeLinkFlags[1] != "-pthread" {
 		t.Fatalf("expected audio link flag, got %#v", result.NativeLinkFlags)
 	}
 }
@@ -2972,6 +3719,9 @@ function main(args) {
 	if !containsPathSuffix(result.NativeImports, "/node_modules/@jayess/openssl/native/openssl.c") {
 		t.Fatalf("expected OpenSSL native import to be carried through, got %#v", result.NativeImports)
 	}
+	if !containsPathSuffix(result.NativeIncludeDirs, "/refs/openssl/include") {
+		t.Fatalf("expected vendored OpenSSL include dir to be carried through, got %#v", result.NativeIncludeDirs)
+	}
 	if !containsString(result.NativeLinkFlags, "-lssl") || !containsString(result.NativeLinkFlags, "-lcrypto") {
 		t.Fatalf("expected OpenSSL link flags to be carried through, got %#v", result.NativeLinkFlags)
 	}
@@ -3046,6 +3796,9 @@ function main(args) {
 	if !containsPathSuffix(result.NativeImports, "/node_modules/@jayess/curl/native/curl.c") {
 		t.Fatalf("expected curl native import to be carried through, got %#v", result.NativeImports)
 	}
+	if !containsPathSuffix(result.NativeIncludeDirs, "/refs/curl/include") {
+		t.Fatalf("expected curl vendored include dir to be carried through, got %#v", result.NativeIncludeDirs)
+	}
 	if !containsString(result.NativeLinkFlags, "/lib/x86_64-linux-gnu/libcurl.so.4") {
 		t.Fatalf("expected curl link flag to be carried through, got %#v", result.NativeLinkFlags)
 	}
@@ -3099,6 +3852,7 @@ function main(args) {
   closeLoop(loop);
   return 0;
 }
+
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
@@ -3153,5 +3907,321 @@ function main(args) {
 		if !containsString(result.NativeLinkFlags, flag) {
 			t.Fatalf("expected vendored libuv link flag %q to be carried through, got %#v", flag, result.NativeLinkFlags)
 		}
+	}
+}
+
+func TestCompilePathSupportsJayessHTMLPackage(t *testing.T) {
+	repoRoot := repoRootFromCompilerTest(t)
+	dir, err := os.MkdirTemp(repoRoot, "jayess-html-loader-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp returned error: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	copyDirRecursiveCompilerTest(
+		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "html"),
+		filepath.Join(dir, "node_modules", "@jayess", "html"),
+	)
+
+	entry := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { tokenizeHtml, parseHtml, parseHtmlFragment, serializeHtml, createElement, createText, createComment, setAttribute, removeAttribute, appendChild, removeChild, replaceChild, cloneNode, walkDepthFirst, findByTag, matchesSelector, querySelectorAll } from "@jayess/html";
+
+function main(args) {
+  var tokens = tokenizeHtml("<!DOCTYPE html><div id=a disabled><span>hi</span><!--note--><br/></div>");
+  var doc = parseHtml("<div id=a disabled><span>hi</span><!--note--><br/></div>");
+  var fragment = parseHtmlFragment("<p class=x>ok</p>tail");
+  var built = createElement("section", undefined, undefined);
+  appendChild(built, createText("body"));
+  appendChild(built, createComment("note"));
+  setAttribute(built, "id", "s1");
+  setAttribute(built, "class", "hero");
+  removeAttribute(built, "id");
+  var inner = createElement("span", undefined, undefined);
+  appendChild(inner, createText("x"));
+  appendChild(built, inner);
+  replaceChild(built, 0, createText("lead"));
+  removeChild(built, 1);
+  var clone = cloneNode(built);
+  console.log(tokens.length + doc.children.length + fragment.children.length + serializeHtml(doc).length + walkDepthFirst(clone).length + findByTag(doc, "span").length + querySelectorAll(doc, "div > span").length + matchesSelector(inner, "#s1") + doc.span.start.line + doc.children[0].span.end.column);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := CompilePath(entry, Options{TargetTriple: "x86_64-unknown-linux-gnu"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, symbol := range []string{
+		"@jayess_html_tokenize(",
+		"@jayess_html_parse_document(",
+		"@jayess_html_parse_fragment(",
+		"@jayess_html_serialize(",
+		"@jayess_html_create_element(",
+		"@jayess_html_create_text(",
+		"@jayess_html_create_comment(",
+		"@jayess_html_set_attribute(",
+		"@jayess_html_remove_attribute(",
+		"@jayess_html_append_child(",
+		"@jayess_html_remove_child(",
+		"@jayess_html_replace_child(",
+		"@jayess_html_clone_node(",
+		"@jayess_html_walk_depth_first(",
+		"@jayess_html_find_by_tag(",
+		"@jayess_html_matches_selector(",
+		"@jayess_html_query_selector_all(",
+	} {
+		if !strings.Contains(irText, symbol) {
+			t.Fatalf("expected HTML package symbol %q in LLVM IR, got:\n%s", symbol, irText)
+		}
+	}
+	if len(result.NativeImports) != 1 || !containsPathSuffix(result.NativeImports, "/node_modules/@jayess/html/native/html.c") {
+		t.Fatalf("expected HTML native import to be carried through, got %#v", result.NativeImports)
+	}
+	if len(result.NativeLinkFlags) != 0 {
+		t.Fatalf("expected HTML package to avoid extra link flags, got %#v", result.NativeLinkFlags)
+	}
+}
+
+func TestCompilePathSupportsJayessXMLPackage(t *testing.T) {
+	repoRoot := repoRootFromCompilerTest(t)
+	dir, err := os.MkdirTemp(repoRoot, "jayess-xml-loader-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp returned error: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	copyDirRecursiveCompilerTest(
+		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "xml"),
+		filepath.Join(dir, "node_modules", "@jayess", "xml"),
+	)
+	if err := os.WriteFile(filepath.Join(dir, "sample.xml"), []byte(`<?xml version="1.0"?><root id="a"><child>hi</child><![CDATA[<raw>]]></root>`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ns.xml"), []byte(`<ns:root xmlns:ns="urn:test" xmlns="urn:default"><ns:item ns:id="7"/><child/></ns:root>`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	entry := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { tokenizeXml, parseXml, serializeXml } from "@jayess/xml";
+
+function main(args) {
+  var source = fs.readFile("./sample.xml", "utf8");
+  var tokens = tokenizeXml(source);
+  var doc = parseXml(source);
+  var nsDoc = parseXml(fs.readFile("./ns.xml", "utf8"));
+  console.log(tokens.length + doc.children.length + serializeXml(doc).length + nsDoc.children[0].localName.length + nsDoc.children[0].children[0].namespaceURI.length + nsDoc.children[0].attributeDetails["xmlns:ns"].namespaceURI.length);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := CompilePath(entry, Options{TargetTriple: "x86_64-unknown-linux-gnu"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, symbol := range []string{
+		"@jayess_xml_tokenize(",
+		"@jayess_xml_parse_document(",
+		"@jayess_xml_serialize(",
+	} {
+		if !strings.Contains(irText, symbol) {
+			t.Fatalf("expected XML package symbol %q in LLVM IR, got:\n%s", symbol, irText)
+		}
+	}
+	if len(result.NativeImports) != 1 || !containsPathSuffix(result.NativeImports, "/node_modules/@jayess/xml/native/xml.c") {
+		t.Fatalf("expected XML native import to be carried through, got %#v", result.NativeImports)
+	}
+	if len(result.NativeLinkFlags) != 0 {
+		t.Fatalf("expected XML package to avoid extra link flags, got %#v", result.NativeLinkFlags)
+	}
+}
+
+func TestCompilePathSupportsJayessCSSPackage(t *testing.T) {
+	repoRoot := repoRootFromCompilerTest(t)
+	dir, err := os.MkdirTemp(repoRoot, "jayess-css-loader-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp returned error: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	copyDirRecursiveCompilerTest(
+		t,
+		filepath.Join(repoRoot, "node_modules", "@jayess", "css"),
+		filepath.Join(dir, "node_modules", "@jayess", "css"),
+	)
+	if err := os.WriteFile(filepath.Join(dir, "sample.css"), []byte(`@import "theme.css";
+/*lead*/
+@media screen and (min-width: 600px) { .card { padding: 8px; } }
+.btn.primary, #app > .item { color: red; margin: 1.5rem; content: "hi"; }
+#footer { padding: 8px; }`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	entry := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { tokenizeCss, parseCss, serializeCss } from "@jayess/css";
+
+function main(args) {
+  var source = fs.readFile("./sample.css", "utf8");
+  var tokens = tokenizeCss(source);
+  var sheet = parseCss(source);
+  console.log(tokens.length + sheet.rules.length + serializeCss(sheet).length);
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := CompilePath(entry, Options{TargetTriple: "x86_64-unknown-linux-gnu"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	for _, symbol := range []string{
+		"@jayess_css_tokenize(",
+		"@jayess_css_parse_stylesheet(",
+		"@jayess_css_serialize(",
+	} {
+		if !strings.Contains(irText, symbol) {
+			t.Fatalf("expected CSS package symbol %q in LLVM IR, got:\n%s", symbol, irText)
+		}
+	}
+	if len(result.NativeImports) != 1 || !containsPathSuffix(result.NativeImports, "/node_modules/@jayess/css/native/css.c") {
+		t.Fatalf("expected CSS native import to be carried through, got %#v", result.NativeImports)
+	}
+	if len(result.NativeLinkFlags) != 0 {
+		t.Fatalf("expected CSS package to avoid extra link flags, got %#v", result.NativeLinkFlags)
+	}
+}
+
+func TestCompilePathSupportsParserPackagesThroughLocalModules(t *testing.T) {
+	repoRoot := repoRootFromCompilerTest(t)
+	cases := []struct {
+		name         string
+		pkg          string
+		moduleSource string
+		entrySource  string
+		symbols      []string
+		importSuffix string
+	}{
+		{
+			name: "html",
+			pkg:  "html",
+			moduleSource: `
+import { parseHtmlFragment, querySelectorAll } from "@jayess/html";
+
+export function htmlSpanCount(source) {
+  var frag = parseHtmlFragment(source);
+  return querySelectorAll(frag, "section > span").length + frag.children.length;
+}
+`,
+			entrySource: `
+import { htmlSpanCount } from "./lib/parsers.js";
+
+function main(args) {
+  console.log(htmlSpanCount("<section><span>a</span><span>b</span></section>"));
+  return 0;
+}
+`,
+			symbols:      []string{"@jayess_html_parse_fragment(", "@jayess_html_query_selector_all("},
+			importSuffix: "/node_modules/@jayess/html/native/html.c",
+		},
+		{
+			name: "xml",
+			pkg:  "xml",
+			moduleSource: `
+import { parseXml } from "@jayess/xml";
+
+export function xmlRootTag(source) {
+  return parseXml(source).children[0].tagName;
+}
+`,
+			entrySource: `
+import { xmlRootTag } from "./lib/parsers.js";
+
+function main(args) {
+  console.log(xmlRootTag("<root><child/></root>"));
+  return 0;
+}
+`,
+			symbols:      []string{"@jayess_xml_parse_document("},
+			importSuffix: "/node_modules/@jayess/xml/native/xml.c",
+		},
+		{
+			name: "css",
+			pkg:  "css",
+			moduleSource: `
+import { parseCss } from "@jayess/css";
+
+export function cssRuleCount(source) {
+  return parseCss(source).rules.length;
+}
+`,
+			entrySource: `
+import { cssRuleCount } from "./lib/parsers.js";
+
+function main(args) {
+  console.log(cssRuleCount(".a { color: red; } .b { color: blue; }"));
+  return 0;
+}
+`,
+			symbols:      []string{"@jayess_css_parse_stylesheet("},
+			importSuffix: "/node_modules/@jayess/css/native/css.c",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := os.MkdirTemp(repoRoot, "jayess-parser-modules-loader-*")
+			if err != nil {
+				t.Fatalf("MkdirTemp returned error: %v", err)
+			}
+			defer os.RemoveAll(dir)
+
+			copyDirRecursiveCompilerTest(
+				t,
+				filepath.Join(repoRoot, "node_modules", "@jayess", tc.pkg),
+				filepath.Join(dir, "node_modules", "@jayess", tc.pkg),
+			)
+
+			libDir := filepath.Join(dir, "lib")
+			if err := os.MkdirAll(libDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll returned error: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(libDir, "parsers.js"), []byte(tc.moduleSource), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			entry := filepath.Join(dir, "main.js")
+			if err := os.WriteFile(entry, []byte(tc.entrySource), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			result, err := CompilePath(entry, Options{TargetTriple: "x86_64-unknown-linux-gnu"})
+			if err != nil {
+				t.Fatalf("CompilePath returned error: %v", err)
+			}
+			irText := string(result.LLVMIR)
+			for _, symbol := range tc.symbols {
+				if !strings.Contains(irText, symbol) {
+					t.Fatalf("expected parser package symbol %q in LLVM IR, got:\n%s", symbol, irText)
+				}
+			}
+			if !containsPathSuffix(result.NativeImports, tc.importSuffix) {
+				t.Fatalf("expected parser native import %q to be carried through, got %#v", tc.importSuffix, result.NativeImports)
+			}
+			if len(result.NativeLinkFlags) != 0 {
+				t.Fatalf("expected parser package to avoid extra link flags, got %#v", result.NativeLinkFlags)
+			}
+		})
 	}
 }

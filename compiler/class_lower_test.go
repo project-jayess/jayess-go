@@ -129,7 +129,7 @@ function main(args) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	irText := string(result.LLVMIR)
-	if !strings.Contains(irText, "@__jayess_dispatch__sound__0") {
+	if !strings.Contains(irText, "@jayess_fn___jayess_dispatch__sound__0") {
 		t.Fatalf("expected dispatch helper in LLVM IR, got:\n%s", irText)
 	}
 	if !strings.Contains(irText, "@jayess_value_from_function") || !strings.Contains(irText, "@jayess_value_function_ptr") {
@@ -161,7 +161,7 @@ function main(args) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	irText := string(result.LLVMIR)
-	if !strings.Contains(irText, "@__jayess_dispatch__sound__0") {
+	if !strings.Contains(irText, "@jayess_fn___jayess_dispatch__sound__0") {
 		t.Fatalf("expected extracted instance method to use dispatch helper")
 	}
 	if !strings.Contains(irText, "@jayess_value_from_function") || !strings.Contains(irText, "@jayess_value_function_ptr") {
@@ -189,7 +189,7 @@ function main(args) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	irText := string(result.LLVMIR)
-	if !strings.Contains(irText, "@Dog__kind") {
+	if !strings.Contains(irText, "@jayess_fn_Dog__kind") {
 		t.Fatalf("expected extracted static method to call lowered static symbol")
 	}
 	if !strings.Contains(irText, "@jayess_value_from_function") || !strings.Contains(irText, "@jayess_value_function_ptr") {
@@ -1665,6 +1665,462 @@ function main(args) {
 	}
 }
 
+func TestCompileExposesEligibleNonEscapingLocals(t *testing.T) {
+	source := `
+function helper() {
+  var count = 1;
+  var box = { total: count + 1 };
+  print(box.total);
+  return 0;
+}
+
+function main(args) {
+  helper();
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, item := range result.LifetimeReport.Eligible {
+		if item.Function == "helper" {
+			found[item.Name] = true
+		}
+	}
+	for _, want := range []string{"count", "box"} {
+		if !found[want] {
+			t.Fatalf("expected eligible local %q in %#v", want, result.LifetimeReport.Eligible)
+		}
+	}
+}
+
+func TestCompileExposesEligibleNonEscapingParameters(t *testing.T) {
+	workdir := t.TempDir()
+	nativeDir := filepath.Join(workdir, "native")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "borrow.c"), []byte(`int jayess_test_borrow(void) { return 0; }`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "borrow.bind.js"), []byte(`const f = () => {};
+export const borrow = f;
+export const retain = f;
+export default {
+  sources: ["./borrow.c"],
+  exports: {
+    borrow: { symbol: "jayess_test_borrow", type: "function", borrowsArgs: true },
+    retain: { symbol: "jayess_test_retain", type: "function" }
+  }
+};
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	entry := filepath.Join(workdir, "main.js")
+	if err := os.WriteFile(entry, []byte(`
+import { borrow, retain } from "./native/borrow.bind.js";
+
+function keep(label) {
+  return borrow(label);
+}
+
+function escape(label) {
+  return retain(label);
+}
+
+function main(args) {
+  keep("ok");
+  escape("nope");
+  return 0;
+}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	result, err := CompilePath(entry, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("CompilePath returned error: %v", err)
+	}
+
+	foundKeep := false
+	foundEscape := false
+	for _, item := range result.LifetimeReport.EligibleParams {
+		if item.Function == "keep" && item.Name == "label" {
+			foundKeep = true
+		}
+		if item.Function == "escape" && item.Name == "label" {
+			foundEscape = true
+		}
+	}
+	if !foundKeep {
+		t.Fatalf("expected eligible parameter keep(label) in %#v", result.LifetimeReport.EligibleParams)
+	}
+	if foundEscape {
+		t.Fatalf("expected escape(label) to be excluded, got %#v", result.LifetimeReport.EligibleParams)
+	}
+}
+
+func TestCompileDoesNotExposeSyntheticEligibleLocals(t *testing.T) {
+	source := `
+function buildClosures() {
+  var items = [];
+  for (var i = 0; i < 6; i = i + 1) {
+    var value = i;
+    if (value == 1) {
+      continue;
+    }
+    items.push(() => value);
+    if (value == 4) {
+      break;
+    }
+  }
+  return items;
+}
+
+function main(args) {
+  var items = buildClosures();
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	for _, item := range result.LifetimeReport.Eligible {
+		if strings.HasPrefix(item.Name, "__jayess_") {
+			t.Fatalf("unexpected synthetic eligible local %#v", item)
+		}
+	}
+}
+
+func TestCompileEmitsScopeExitCleanupForEligibleDynamicLocals(t *testing.T) {
+	source := `
+function makeValue() {
+  return undefined;
+}
+
+function freshNumber() {
+  return 11;
+}
+
+function inner() {
+  var value = makeValue();
+  return 1;
+}
+
+function main(args) {
+  freshNumber();
+  {
+    const scoped = makeValue();
+  }
+  return inner();
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	irText := string(result.LLVMIR)
+	if count := strings.Count(irText, "call void @jayess_value_free_unshared("); count < 3 {
+		t.Fatalf("expected at least three cleanup calls in LLVM IR, got %d:\n%s", count, irText)
+	}
+	if !strings.Contains(irText, "call ptr @jayess_fn_freshNumber()") {
+		t.Fatalf("expected direct call to freshNumber in LLVM IR:\n%s", irText)
+	}
+}
+
+func TestCompileEmitsDiscardedFreshExpressionCleanup(t *testing.T) {
+	source := `
+class FreshBox {}
+class PlainCtorBox {
+  constructor() {
+    this.kind = "plain";
+  }
+}
+
+class FreshReturnCtorBox {
+  constructor() {
+    return { kind: "alt-fresh" };
+  }
+}
+
+function freshObject() {
+  return { kind: "fresh-call" };
+}
+
+function freshInvokeObject() {
+  return { kind: "invoke-fresh" };
+}
+
+function freshBox() {
+  return new FreshBox();
+}
+
+function freshSwitchCase() {
+  switch ("case-" + "a") {
+    case "case-a":
+      break;
+    case "case-b":
+      break;
+  }
+}
+
+function boundOffset(offset, x) {
+  return x + offset;
+}
+
+function largeOffset(x) {
+  return x + 20;
+}
+
+function boundGreaterThan(min, x) {
+  return x > min;
+}
+
+function boundEquals(expected, x) {
+  return x == expected;
+}
+
+function boundPairSum(a, b, x) {
+  return x + a + b;
+}
+
+function boundBetween(min, max, x) {
+  return x > min && x < max;
+}
+
+function boundTripleEquals(a, b, x) {
+  return x == a + b;
+}
+
+function boundTripleSum(a, b, c, x) {
+  return x + a + b + c;
+}
+
+function boundWindow(min, mid, max, x) {
+  return x > min && x < max && x != mid;
+}
+
+function boundQuadEquals(a, b, c, x) {
+  return x == a + b + c;
+}
+
+function boundQuadSum(a, b, c, d, x) {
+  return x + a + b + c + d;
+}
+
+function boundOuterWindow(min, low, high, max, x) {
+  return x > min && x >= low && x < max && x != high;
+}
+
+function boundQuintEquals(a, b, c, d, x) {
+  return x == a + b + c + d;
+}
+
+function boundQuintSum(a, b, c, d, e, x) {
+  return x + a + b + c + d + e;
+}
+
+function boundSextEquals(a, b, c, d, e, x) {
+  return x == a + b + c + d + e;
+}
+
+function boundSextSum(a, b, c, d, e, f, x) {
+  return x + a + b + c + d + e + f;
+}
+
+function boundSeptEquals(a, b, c, d, e, f, x) {
+  return x == a + b + c + d + e + f;
+}
+
+function boundSeptSum(a, b, c, d, e, f, g, x) {
+  return x + a + b + c + d + e + f + g;
+}
+
+function boundOctEquals(a, b, c, d, e, f, g, x) {
+  return x == a + b + c + d + e + f + g;
+}
+
+function boundOctSum(a, b, c, d, e, f, g, h, x) {
+  return x + a + b + c + d + e + f + g + h;
+}
+
+function boundNonetEquals(a, b, c, d, e, f, g, h, x) {
+  return x == a + b + c + d + e + f + g + h;
+}
+
+function boundNonetSum(a, b, c, d, e, f, g, h, i, x) {
+  return x + a + b + c + d + e + f + g + h + i;
+}
+
+function boundDecetEquals(a, b, c, d, e, f, g, h, i, x) {
+  return x == a + b + c + d + e + f + g + h + i;
+}
+
+function boundDecetSum(a, b, c, d, e, f, g, h, i, j, x) {
+  return x + a + b + c + d + e + f + g + h + i + j;
+}
+
+function boundUndecEquals(a, b, c, d, e, f, g, h, i, j, x) {
+  return x == a + b + c + d + e + f + g + h + i + j;
+}
+
+function boundUndecSum(a, b, c, d, e, f, g, h, i, j, k, x) {
+  return x + a + b + c + d + e + f + g + h + i + j + k;
+}
+
+function boundDuodecEquals(a, b, c, d, e, f, g, h, i, j, k, l, x) {
+  return x == a + b + c + d + e + f + g + h + i + j + k + l;
+}
+
+function boundDuodecSum(a, b, c, d, e, f, g, h, i, j, k, l, x) {
+  return x + a + b + c + d + e + f + g + h + i + j + k + l;
+}
+
+
+function main(args) {
+  freshObject();
+  freshSwitchCase();
+  (() => "fresh-fn");
+  new PlainCtorBox();
+  new FreshReturnCtorBox();
+  ({ name: "kimchi" });
+  ({ answer: 41 }).answer;
+  ({ label: "index" })["label"];
+  ({ maybe: "opt-member" })?.maybe;
+  ({ maybe: "opt-index" })?.["maybe"];
+  "soup".length;
+  [1, 2, 3];
+  ` + "`soup${1}`" + `;
+  "left" + "right";
+  ~1;
+  1n & 3n;
+  1n === 1n;
+  ("cmp-left" + "x") === ("cmp-right" + "y");
+  !("not-left" + "right");
+  ("and-left" + "x") && ("and-right" + "y");
+  ("or-left" + "x") || ("or-right" + "y");
+  typeof ("type" + "of");
+  freshBox() instanceof FreshBox;
+  ("ok" is "ok" | "error");
+  ([1, "ok"] is [number, string]);
+  ({ kind: "ok", value: 3 } is { kind: "ok", value: number } | { kind: "error", message: string });
+  true ? ({ kind: "conditional" }) : ({ kind: "fallback" });
+  null ?? ({ kind: "nullish" });
+  (({ kind: "comma-left" }), ({ kind: "comma-right" }));
+  freshInvokeObject.bind(null);
+  freshInvokeObject.call(null);
+  freshInvokeObject.apply(null, []);
+  [1, 2].forEach((x) => 0);
+  [1, 2].map((x) => x + 1);
+  [1, 2].filter((x) => x > 0);
+  [1, 2].find((x) => false);
+  [1, 2].forEach(boundOffset.bind(null, 1));
+  [1, 2].forEach(boundOffset.bind(null, 20));
+  [1, 2].forEach(largeOffset);
+  [1, 2].map(boundOffset.bind(null, 1));
+  [1, 2].map(boundOffset.bind(null, 20));
+  [1, 2].filter(largeOffset);
+  [1, 2].filter(boundGreaterThan.bind(null, 0));
+  [1, 2].filter(boundOffset.bind(null, 20));
+  [1, 2].find(largeOffset);
+  [1, 2].find(boundEquals.bind(null, 9));
+  [1, 2].find(boundOffset.bind(null, 20));
+  [1, 2].forEach(boundPairSum.bind(null, 1, 2));
+  [1, 2].map(boundPairSum.bind(null, 1, 2));
+  [1, 2].map(boundPairSum.bind(null, 10, 10));
+  [1, 2].filter(boundBetween.bind(null, 0, 3));
+  [1, 2].find(boundPairSum.bind(null, 10, 10));
+  [1, 2].find(boundTripleEquals.bind(null, 4, 5));
+  [1, 2].forEach(boundTripleSum.bind(null, 1, 2, 3));
+  [1, 2].forEach(boundPairSum.bind(null, 10, 10));
+  [1, 2].map(boundTripleSum.bind(null, 1, 2, 3));
+  [1, 2].map(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].filter(boundWindow.bind(null, 0, 1, 3));
+  [1, 2].filter(boundPairSum.bind(null, 10, 10));
+  [1, 2].find(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].find(boundQuadEquals.bind(null, 3, 4, 5));
+  [1, 2].forEach(boundQuadSum.bind(null, 1, 2, 3, 4));
+  [1, 2].forEach(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].forEach(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].map(boundQuadSum.bind(null, 1, 2, 3, 4));
+  [1, 2].filter(boundOuterWindow.bind(null, 0, 1, 4, 3));
+  [1, 2].filter(boundTripleSum.bind(null, 10, 10, 10));
+  [1, 2].filter(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].find(boundQuadSum.bind(null, 4, 4, 4, 4));
+  [1, 2].forEach(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].map(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].find(boundQuintSum.bind(null, 1, 1, 1, 1, 16));
+  [1, 2].find(boundQuintEquals.bind(null, 30, 30, 30, 30, 30));
+  [1, 2].find(boundQuintEquals.bind(null, 3, 4, 5, 6));
+  [1, 2].forEach(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSextSum.bind(null, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSextEquals.bind(null, 40, 40, 40, 40, 40, 40));
+  [1, 2].forEach(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSeptSum.bind(null, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundSeptEquals.bind(null, 50, 50, 50, 50, 50, 50, 50));
+  [1, 2].forEach(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundOctSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundOctEquals.bind(null, 60, 60, 60, 60, 60, 60, 60, 60));
+  [1, 2].forEach(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundNonetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundNonetEquals.bind(null, 70, 70, 70, 70, 70, 70, 70, 70, 70));
+  [1, 2].forEach(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDecetSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDecetEquals.bind(null, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80));
+  [1, 2].forEach(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundUndecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundUndecEquals.bind(null, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90));
+  [1, 2].forEach(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].map(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].filter(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDuodecSum.bind(null, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16));
+  [1, 2].find(boundDuodecEquals.bind(null, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100));
+  return 0;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "call ptr @jayess_template_string(") {
+		t.Fatalf("expected template literal lowering in LLVM IR:\n%s", irText)
+	}
+	if !strings.Contains(irText, "call ptr @jayess_value_bind(") || !strings.Contains(irText, "call ptr @jayess_value_merge_bound_args(") {
+		t.Fatalf("expected bind/call/apply lowering in LLVM IR:\n%s", irText)
+	}
+	if !strings.Contains(irText, "call ptr @jayess_value_bitwise_not(") {
+		t.Fatalf("expected numeric bitwise lowering in LLVM IR:\n%s", irText)
+	}
+	if count := strings.Count(irText, "call void @jayess_value_free_unshared("); count < 6 {
+		t.Fatalf("expected discarded fresh-expression cleanup calls in LLVM IR, got %d:\n%s", count, irText)
+	}
+}
+
 func TestCompilePathReportsSemanticSourceSpan(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "broken.js")
@@ -1808,6 +2264,11 @@ function main(args) {
   var base = path.basename(file);
   var dir = path.dirname(file);
   var ext = path.extname(file);
+  var dnsResult = dns.lookup("localhost");
+  var dnsAll = dns.lookupAll("localhost");
+  var dnsReverse = dns.reverse("127.0.0.1");
+  var dnsSet = dns.setResolver({ hosts: { "kimchi.local": "127.0.0.9" }, reverse: { "127.0.0.9": "kimchi.local" } });
+  var dnsClear = dns.clearResolver();
   var killed = childProcess.kill({ pid: 123, signal: "SIGTERM" });
   var w = worker.create(function(message) { return message; });
   var wrote = fs.writeFile(file, "kimchi");
@@ -1820,7 +2281,7 @@ function main(args) {
   var copiedDir = fs.copyDir("build", "build-copy");
   var renamed = fs.rename(path.join("build", "tmp-copy.txt"), path.join("build", "tmp-copy-2.txt"));
   var removed = fs.remove("build-copy", { recursive: true });
-  console.log(cwd, argv, platform, arch, hr, home, atomicLoaded, sep, delimiter, normalized, resolved, relative, parsed, formatted, absolute, base, dir, ext, killed, w, wrote, made, exists, text, stat, entries, copied, copiedDir, renamed, removed);
+  console.log(cwd, argv, platform, arch, hr, home, atomicLoaded, sep, delimiter, normalized, resolved, relative, parsed, formatted, absolute, base, dir, ext, dnsResult, dnsAll, dnsReverse, dnsSet, dnsClear, killed, w, wrote, made, exists, text, stat, entries, copied, copiedDir, renamed, removed);
   return 0;
 }
 `
@@ -1850,6 +2311,11 @@ function main(args) {
 		"@jayess_std_path_basename",
 		"@jayess_std_path_dirname",
 		"@jayess_std_path_extname",
+		"@jayess_std_dns_lookup",
+		"@jayess_std_dns_lookup_all",
+		"@jayess_std_dns_reverse",
+		"@jayess_std_dns_set_resolver",
+		"@jayess_std_dns_clear_resolver",
 		"@jayess_std_child_process_kill",
 		"@jayess_std_worker_create",
 		"@jayess_atomics_load",
@@ -1972,7 +2438,7 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@greet(") {
+	if !strings.Contains(string(result.LLVMIR), "@jayess_fn_greet(") {
 		t.Fatalf("expected named function reference call to lower to greet")
 	}
 }
@@ -1997,7 +2463,7 @@ function main(args) {
 	if !strings.Contains(irText, "call ptr @jayess_value_from_number") {
 		t.Fatalf("expected var initialization to box number values, got:\n%s", irText)
 	}
-	if !strings.Contains(irText, "call ptr @jayess_value_from_string") {
+	if !strings.Contains(irText, "call ptr @jayess_value_from_string") && !strings.Contains(irText, "call ptr @jayess_value_from_static_string") {
 		t.Fatalf("expected var reassignment to box string values, got:\n%s", irText)
 	}
 }
@@ -2043,7 +2509,7 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@__jayess_lambda_0(") {
+	if !strings.Contains(string(result.LLVMIR), "@jayess_fn___jayess_lambda_0(") {
 		t.Fatalf("expected lowered function expression helper in LLVM IR")
 	}
 }
@@ -2061,7 +2527,7 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@__jayess_lambda_0(") {
+	if !strings.Contains(string(result.LLVMIR), "@jayess_fn___jayess_lambda_0(") {
 		t.Fatalf("expected lowered arrow function helper in LLVM IR")
 	}
 }
@@ -2656,7 +3122,7 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@__jayess_lambda_0") {
+	if !strings.Contains(string(result.LLVMIR), "@jayess_fn___jayess_lambda_0") {
 		t.Fatalf("expected arrow function with destructured parameters to lower successfully")
 	}
 }
@@ -2664,8 +3130,10 @@ function main(args) {
 func TestCompileSupportsDestructuringRestElementsAndDefaults(t *testing.T) {
 	source := `
 function main(args) {
-  const { a = 1, ...rest } = { b: 2 };
-  const [x = 3, ...tail] = [undefined, 4, 5];
+  const sourceObj = { b: 2 };
+  const sourceArray = [undefined, 4, 5];
+  const { a = 1, ...rest } = sourceObj;
+  const [x = 3, ...tail] = sourceArray;
   print(rest.b);
   print(tail.length);
   return a + x;
@@ -2682,6 +3150,194 @@ function main(args) {
 	}
 	if !strings.Contains(irText, "undefined") {
 		t.Fatalf("expected destructuring defaults to keep undefined checks in lowered IR")
+	}
+}
+
+func TestCompileDirectLiteralDestructuringRestAvoidsGenericRestHelpers(t *testing.T) {
+	source := `
+function main(args) {
+  const { a = 1, ...rest } = { b: 2 };
+  const [x = 3, ...tail] = [undefined, 4, 5];
+  print(rest.b);
+  print(tail.length);
+  return a + x;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if strings.Contains(irText, "call ptr @jayess_value_object_rest") || strings.Contains(irText, "call ptr @jayess_value_array_slice") {
+		t.Fatalf("expected fresh literal destructuring rest to avoid generic object-rest/array-slice helpers, got:\n%s", irText)
+	}
+	if !strings.Contains(irText, "undefined") {
+		t.Fatalf("expected destructuring defaults to keep undefined checks in lowered IR")
+	}
+}
+
+func TestCompileDuplicateObjectKeyDestructuringRestFallsBackToGenericHelper(t *testing.T) {
+	source := `
+function main(args) {
+  const { value, ...rest } = { value: 1, value: 2, extra: 3 };
+  print(rest.extra);
+  return value;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "call ptr @jayess_value_object_rest") {
+		t.Fatalf("expected duplicate-key object literal destructuring to fall back to generic object-rest helper")
+	}
+}
+
+func TestCompileArraySourceSpreadDestructuringFallsBackToGenericAccess(t *testing.T) {
+	source := `
+function main(args) {
+  const [first] = [1, ...[2, 3]];
+  return first;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_get_index") {
+		t.Fatalf("expected array-source-spread destructuring to fall back to generic indexed access")
+	}
+}
+
+func TestCompileObjectSourceSpreadDestructuringFallsBackToGenericAccess(t *testing.T) {
+	source := `
+function main(args) {
+  const { value } = { value: 1, ...{ extra: 2 } };
+  return value;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "call ptr @jayess_value_get_member") {
+		t.Fatalf("expected object-source-spread destructuring to fall back to generic member access")
+	}
+}
+
+func TestCompileSupportsDestructuringInForLoopInit(t *testing.T) {
+	source := `
+function main(args) {
+  var total = 0;
+  for (var [i, limit] = [0, 3]; i < limit; i = i + 1) {
+    total = total + i;
+  }
+  return total;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_get_index") {
+		t.Fatalf("expected for-loop init destructuring to lower through indexed access helpers")
+	}
+}
+
+func TestCompileSupportsDestructuringInForLoopUpdate(t *testing.T) {
+	source := `
+function main(args) {
+  var total = 0;
+  var i = 0;
+  for (; i < 4; [i] = [i + 1]) {
+    total = total + i;
+  }
+  return total;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_get_index") {
+		t.Fatalf("expected for-loop update destructuring to lower through indexed access helpers")
+	}
+}
+
+func TestCompileSupportsCompoundAssignmentInForLoopUpdate(t *testing.T) {
+	source := `
+function main(args) {
+  var total = 0;
+  for (var i = 0; i < 4; i += 1) {
+    total = total + i;
+  }
+  return total;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_add") {
+		t.Fatalf("expected compound for-loop update to lower through add helper")
+	}
+}
+
+func TestCompileSupportsDestructuringInForOfBinding(t *testing.T) {
+	source := `
+function main(args) {
+  var total = 0;
+  for (var [a, b] of [[1, 2], [3, 4]]) {
+    total = total + a + b;
+  }
+  return total;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_get_index") {
+		t.Fatalf("expected for...of destructuring binding to lower through indexed access helpers")
+	}
+}
+
+func TestCompileSupportsObjectDestructuringInForOfBinding(t *testing.T) {
+	source := `
+function main(args) {
+  var total = 0;
+  for (var { value = 1, ...rest } of [{ extra: 2 }, { value: 3, extra: 4 }]) {
+    total = total + value + rest.extra;
+  }
+  return total;
+}
+`
+
+	result, err := Compile(source, Options{TargetTriple: "x86_64-pc-windows-msvc"})
+	if err != nil {
+		t.Fatalf("Compile returned error: %v", err)
+	}
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_get_member") || !strings.Contains(irText, "@jayess_value_object_rest") {
+		t.Fatalf("expected for...of object destructuring binding to lower through member/object-rest helpers")
+	}
+	if !strings.Contains(irText, "undefined") {
+		t.Fatalf("expected for...of object destructuring defaults to keep undefined checks in lowered IR")
 	}
 }
 
@@ -2775,7 +3431,7 @@ function main(args) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	irText := string(result.LLVMIR)
-	if !strings.Contains(irText, "@__jayess_lambda_0") {
+	if !strings.Contains(irText, "@jayess_fn___jayess_lambda_0") {
 		t.Fatalf("expected lowered closure helper in LLVM IR")
 	}
 	if !strings.Contains(irText, "base") {
@@ -2800,7 +3456,7 @@ function main(args) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	irText := string(result.LLVMIR)
-	if !strings.Contains(irText, "@__jayess_lambda_0") || !strings.Contains(irText, "@__jayess_lambda_1") {
+	if !strings.Contains(irText, "@jayess_fn___jayess_lambda_0") || !strings.Contains(irText, "@jayess_fn___jayess_lambda_1") {
 		t.Fatalf("expected nested lowered closure helpers in LLVM IR")
 	}
 }
@@ -2852,7 +3508,7 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@Counter__read") {
+	if !strings.Contains(string(result.LLVMIR), "@jayess_fn_Counter__read") {
 		t.Fatalf("expected class method to compile with arrow closure")
 	}
 }
@@ -2883,7 +3539,7 @@ function main(args) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	irText := string(result.LLVMIR)
-	if !strings.Contains(irText, "@Base__read") {
+	if !strings.Contains(irText, "@jayess_fn_Base__read") {
 		t.Fatalf("expected captured super call to lower to base method symbol")
 	}
 }
@@ -2913,7 +3569,7 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@Child__total") {
+	if !strings.Contains(string(result.LLVMIR), "@jayess_fn_Child__total") {
 		t.Fatalf("expected derived class method with captured super property to compile")
 	}
 }
@@ -3025,7 +3681,7 @@ function main(args) {
 		t.Fatalf("Compile returned error: %v", err)
 	}
 	irText := string(result.LLVMIR)
-	if !strings.Contains(irText, "@__jayess_dispatch__sound__0") || !strings.Contains(irText, "@jayess_value_function_ptr") {
+	if !strings.Contains(irText, "@jayess_fn___jayess_dispatch__sound__0") || !strings.Contains(irText, "@jayess_value_function_ptr") {
 		t.Fatalf("expected extracted method stored in object to invoke through dispatch and first-class function helpers")
 	}
 }
@@ -3118,8 +3774,12 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@jayess_value_function_ptr") {
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_function_ptr") {
 		t.Fatalf("expected function.call to use first-class invoke helpers")
+	}
+	if strings.Contains(irText, "@.str.") && strings.Contains(irText, "c\"call\\00\"") && strings.Contains(irText, "@jayess_value_get_member") {
+		t.Fatalf("expected function.call lowering to target the callable value directly")
 	}
 }
 
@@ -3165,6 +3825,9 @@ function main(args) {
 	if !strings.Contains(irText, "@jayess_array_length") || !strings.Contains(irText, "@jayess_value_function_ptr") {
 		t.Fatalf("expected function.apply to use bounded apply helpers")
 	}
+	if strings.Contains(irText, "c\"apply\\00\"") && strings.Contains(irText, "@jayess_value_get_member") {
+		t.Fatalf("expected function.apply lowering to target the callable value directly")
+	}
 }
 
 func TestCompileSupportsFunctionBindMethod(t *testing.T) {
@@ -3183,8 +3846,12 @@ function main(args) {
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
-	if !strings.Contains(string(result.LLVMIR), "@jayess_value_function_ptr") {
+	irText := string(result.LLVMIR)
+	if !strings.Contains(irText, "@jayess_value_function_ptr") {
 		t.Fatalf("expected function.bind result to remain a first-class callable value")
+	}
+	if strings.Contains(irText, "c\"bind\\00\"") && strings.Contains(irText, "@jayess_value_get_member") {
+		t.Fatalf("expected function.bind lowering to target the callable value directly")
 	}
 }
 

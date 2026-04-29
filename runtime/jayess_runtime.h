@@ -2,32 +2,26 @@
 #define JAYESS_RUNTIME_H
 
 #include <stddef.h>
+#include "jayess_runtime_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct jayess_args jayess_args;
-typedef struct jayess_value jayess_value;
-typedef struct jayess_object jayess_object;
-typedef struct jayess_array jayess_array;
-typedef void (*jayess_native_handle_finalizer)(void *);
-
-typedef enum jayess_value_kind {
-    JAYESS_VALUE_NULL = 0,
-    JAYESS_VALUE_STRING = 1,
-    JAYESS_VALUE_NUMBER = 2,
-    JAYESS_VALUE_BIGINT = 3,
-    JAYESS_VALUE_BOOL = 4,
-    JAYESS_VALUE_OBJECT = 5,
-    JAYESS_VALUE_ARRAY = 6,
-    JAYESS_VALUE_UNDEFINED = 7,
-    JAYESS_VALUE_FUNCTION = 8,
-    JAYESS_VALUE_SYMBOL = 9
-} jayess_value_kind;
-
+/*
+ * Public jayess_value* ownership rule:
+ *
+ * - Unless a helper is explicitly documented below as returning an alias or a
+ *   borrowed view, every public helper that returns jayess_value* returns a
+ *   Jayess runtime-managed value that participates in the normal scope/lifetime
+ *   rules.
+ * - Accessors that expose an existing container slot, function environment, or
+ *   pending runtime slot return an alias to existing Jayess-managed state
+ *   rather than a fresh copy.
+ */
 jayess_value *jayess_value_null(void);
 jayess_value *jayess_value_undefined(void);
+jayess_value *jayess_value_from_static_string(const char *value);
 
 void jayess_print_string(const char *text);
 void jayess_print_number(double value);
@@ -47,6 +41,8 @@ jayess_value *jayess_value_add(jayess_value *left, jayess_value *right);
 
 char *jayess_read_line(const char *prompt);
 char *jayess_read_key(const char *prompt);
+char *jayess_read_line_value(jayess_value *prompt);
+char *jayess_read_key_value(jayess_value *prompt);
 void jayess_sleep_ms(int milliseconds);
 
 jayess_args *jayess_make_args(int argc, char **argv);
@@ -55,11 +51,14 @@ int jayess_args_length(jayess_args *args);
 
 jayess_object *jayess_object_new(void);
 void jayess_object_set_value(jayess_object *object, const char *key, jayess_value *value);
+/* Returns an alias to the stored member; it does not clone the value. */
 jayess_value *jayess_object_get(jayess_object *object, const char *key);
 void jayess_object_delete(jayess_object *object, const char *key);
 jayess_array *jayess_object_keys(jayess_object *object);
+void jayess_object_free_unshared(jayess_object *object);
 
 void jayess_value_set_member(jayess_value *target, const char *key, jayess_value *value);
+/* Returns an alias to the stored member; it does not clone the value. */
 jayess_value *jayess_value_get_member(jayess_value *target, const char *key);
 void jayess_value_delete_member(jayess_value *target, const char *key);
 jayess_value *jayess_value_object_keys(jayess_value *target);
@@ -134,6 +133,8 @@ double jayess_math_abs(double value);
 double jayess_math_pow(double left, double right);
 double jayess_math_sqrt(double value);
 double jayess_math_random(void);
+void jayess_value_free_unshared(jayess_value *value);
+void jayess_value_free_array_shallow(jayess_value *value);
 jayess_value *jayess_std_number_is_nan(jayess_value *value);
 jayess_value *jayess_std_number_is_finite(jayess_value *value);
 jayess_value *jayess_std_string_from_char_code(jayess_value *codes);
@@ -180,10 +181,13 @@ jayess_value *jayess_std_querystring_stringify(jayess_value *parts);
 jayess_value *jayess_std_dns_lookup(jayess_value *host);
 jayess_value *jayess_std_dns_lookup_all(jayess_value *host);
 jayess_value *jayess_std_dns_reverse(jayess_value *address);
+jayess_value *jayess_std_dns_set_resolver(jayess_value *options);
+jayess_value *jayess_std_dns_clear_resolver(void);
 jayess_value *jayess_std_child_process_exec(jayess_value *options);
 jayess_value *jayess_std_child_process_spawn(jayess_value *options);
 jayess_value *jayess_std_child_process_kill(jayess_value *options);
 jayess_value *jayess_std_worker_create(jayess_value *handler);
+void jayess_array_free_unshared(jayess_array *array);
 double jayess_atomics_load(jayess_value *target, jayess_value *index);
 double jayess_atomics_store(jayess_value *target, jayess_value *index, jayess_value *value);
 double jayess_atomics_add(jayess_value *target, jayess_value *index, jayess_value *value);
@@ -256,6 +260,7 @@ jayess_value *jayess_std_fs_watch(jayess_value *path);
 
 jayess_array *jayess_array_new(void);
 void jayess_array_set_value(jayess_array *array, int index, jayess_value *value);
+/* Returns an alias to the stored slot; it does not clone the value. */
 jayess_value *jayess_array_get(jayess_array *array, int index);
 int jayess_array_length(jayess_array *array);
 int jayess_array_push_value(jayess_array *array, jayess_value *value);
@@ -265,8 +270,10 @@ int jayess_array_unshift_value(jayess_array *array, jayess_value *value);
 jayess_array *jayess_array_slice_values(jayess_array *array, int start, int end, int has_end);
 
 void jayess_value_set_index(jayess_value *target, int index, jayess_value *value);
+/* Returns an alias to the stored slot/member; it does not clone the value. */
 jayess_value *jayess_value_get_index(jayess_value *target, int index);
 void jayess_value_set_dynamic_index(jayess_value *target, jayess_value *index, jayess_value *value);
+/* Returns an alias to the stored slot/member; it does not clone the value. */
 jayess_value *jayess_value_get_dynamic_index(jayess_value *target, jayess_value *index);
 void jayess_value_delete_dynamic_index(jayess_value *target, jayess_value *index);
 int jayess_value_array_length(jayess_value *target);
@@ -279,7 +286,26 @@ jayess_value *jayess_value_array_includes(jayess_value *target, jayess_value *va
 jayess_value *jayess_value_array_join(jayess_value *target, jayess_value *separator);
 void jayess_array_append_array(jayess_array *array, jayess_array *other);
 
+/*
+ * Ownership guide for native helpers:
+ *
+ * - "runtime-owned value" means the returned jayess_value* is owned by the
+ *   Jayess runtime and participates in its normal scope/lifetime rules.
+ * - "borrowed view" means the returned pointer aliases Jayess-managed storage
+ *   and is only valid during the current native call; do not retain it.
+ * - "copied buffer" means the returned pointer is an owned native allocation;
+ *   the caller must release it with the matching *_free helper.
+ * - Long-lived native state must either copy data out of Jayess-managed values
+ *   or keep the retained Jayess value reachable through wrapper object
+ *   properties; native code must not stash borrowed Jayess pointers/views as
+ *   standalone long-lived state.
+ * - "managed native handle" means jayess_value_close_native_handle marks the
+ *   wrapper closed and finalizes the underlying resource at most once.
+ */
+
+/* Constructors below return runtime-owned jayess_value* results. */
 jayess_value *jayess_value_from_string(const char *value);
+jayess_value *jayess_value_from_owned_string(char *value);
 jayess_value *jayess_value_from_number(double value);
 jayess_value *jayess_value_from_bigint(const char *value);
 jayess_value *jayess_value_from_bool(int value);
@@ -295,10 +321,13 @@ jayess_value *jayess_value_from_object(jayess_object *value);
 jayess_value *jayess_value_from_array(jayess_array *value);
 jayess_value *jayess_value_from_args(jayess_args *args);
 jayess_value *jayess_value_from_bytes_copy(const unsigned char *bytes, size_t length);
+
+/* Copy helpers return owned native buffers; free them with the matching helper. */
 unsigned char *jayess_value_to_bytes_copy(jayess_value *value, size_t *length_out);
 char *jayess_value_to_string_copy(jayess_value *value);
 void jayess_string_free(char *text);
 void jayess_bytes_free(void *bytes);
+
 jayess_value *jayess_value_from_native_handle(const char *kind, void *handle);
 jayess_value *jayess_value_from_managed_native_handle(const char *kind, void *handle, jayess_native_handle_finalizer finalizer);
 void *jayess_value_as_native_handle(jayess_value *value, const char *kind);
@@ -307,28 +336,50 @@ int jayess_value_close_native_handle(jayess_value *value);
 jayess_value *jayess_value_from_function(void *callee, jayess_value *env, const char *name, const char *class_name, int param_count, int has_rest);
 jayess_value *jayess_call_function(jayess_value *callback, jayess_value *argument);
 jayess_value *jayess_call_function2(jayess_value *callback, jayess_value *first, jayess_value *second);
+jayess_value *jayess_call_function3(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third);
+jayess_value *jayess_call_function4(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth);
+jayess_value *jayess_call_function5(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth);
+jayess_value *jayess_call_function6(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth, jayess_value *sixth);
+jayess_value *jayess_call_function7(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth, jayess_value *sixth, jayess_value *seventh);
+jayess_value *jayess_call_function8(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth, jayess_value *sixth, jayess_value *seventh, jayess_value *eighth);
+jayess_value *jayess_call_function9(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth, jayess_value *sixth, jayess_value *seventh, jayess_value *eighth, jayess_value *ninth);
+jayess_value *jayess_call_function10(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth, jayess_value *sixth, jayess_value *seventh, jayess_value *eighth, jayess_value *ninth, jayess_value *tenth);
+jayess_value *jayess_call_function11(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth, jayess_value *sixth, jayess_value *seventh, jayess_value *eighth, jayess_value *ninth, jayess_value *tenth, jayess_value *eleventh);
+jayess_value *jayess_call_function12(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth, jayess_value *sixth, jayess_value *seventh, jayess_value *eighth, jayess_value *ninth, jayess_value *tenth, jayess_value *eleventh, jayess_value *twelfth);
+jayess_value *jayess_call_function13(jayess_value *callback, jayess_value *first, jayess_value *second, jayess_value *third, jayess_value *fourth, jayess_value *fifth, jayess_value *sixth, jayess_value *seventh, jayess_value *eighth, jayess_value *ninth, jayess_value *tenth, jayess_value *eleventh, jayess_value *twelfth, jayess_value *thirteenth);
 void *jayess_value_function_ptr(jayess_value *value);
+/* Returns an alias to the function environment captured by the closure. */
 jayess_value *jayess_value_function_env(jayess_value *value);
 jayess_value *jayess_value_bind(jayess_value *value, jayess_value *bound_this, jayess_value *bound_args);
+/* Returns an alias to the bound `this` value captured by the bound function. */
 jayess_value *jayess_value_function_bound_this(jayess_value *value);
 const char *jayess_value_function_class_name(jayess_value *value);
 int jayess_value_function_param_count(jayess_value *value);
 int jayess_value_function_has_rest(jayess_value *value);
 int jayess_value_function_bound_arg_count(jayess_value *value);
+/* Returns an alias to the stored bound argument. */
 jayess_value *jayess_value_function_bound_arg(jayess_value *value, int index);
 jayess_value *jayess_value_merge_bound_args(jayess_value *value, jayess_value *tail_args);
+jayess_value *jayess_value_constructor_return(jayess_value *self, jayess_value *value);
 jayess_value *jayess_error_value(const char *name, const char *message);
+jayess_value *jayess_type_error_value(const char *message);
 void jayess_throw(jayess_value *value);
 void jayess_throw_error(const char *message);
 void jayess_throw_type_error(const char *message);
 void jayess_throw_named_error(const char *name, const char *message);
 int jayess_has_exception(void);
+/*
+ * Transfers the current pending exception out of the runtime error slot and
+ * returns that Jayess-managed value to the caller.
+ */
 jayess_value *jayess_take_exception(void);
 void jayess_report_uncaught_exception(void);
+void jayess_runtime_error_state_shutdown(void);
 void jayess_push_call_frame(const char *name);
 void jayess_pop_call_frame(void);
 void jayess_push_this(jayess_value *value);
 void jayess_pop_this(void);
+/* Returns an alias to the current `this` binding; it does not clone the value. */
 jayess_value *jayess_current_this(void);
 const char *jayess_value_typeof(jayess_value *value);
 int jayess_value_instanceof(jayess_value *target, const char *class_name);
@@ -346,10 +397,20 @@ const char *jayess_value_as_string(jayess_value *value);
 int jayess_value_as_bool(jayess_value *value);
 jayess_object *jayess_value_as_object(jayess_value *value);
 jayess_array *jayess_value_as_array(jayess_value *value);
+
+/* Borrowed view: valid only during the current native call; do not retain it. */
 const char *jayess_expect_string(jayess_value *value, const char *context);
+/* Borrowed view: valid only while the referenced Jayess value remains live. */
 jayess_object *jayess_expect_object(jayess_value *value, const char *context);
+/* Borrowed view: valid only while the referenced Jayess value remains live. */
 jayess_array *jayess_expect_array(jayess_value *value, const char *context);
+
+/* Copy helper: returns owned native bytes; free them with jayess_bytes_free. */
 unsigned char *jayess_expect_bytes_copy(jayess_value *value, size_t *length_out, const char *context);
+/*
+ * Borrowed native handle pointer: the returned pointer aliases the current
+ * wrapper state and must not outlive the managed wrapper lifecycle.
+ */
 void *jayess_expect_native_handle(jayess_value *value, const char *kind, const char *context);
 
 #ifdef __cplusplus

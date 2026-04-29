@@ -24,6 +24,8 @@ Supported helpers:
 - `path.dirname(path)`
 - `path.extname(path)`
 
+Drive-root forms such as `C:/tmp/nested/file.txt` are handled consistently across hosts for `isAbsolute(...)`, `normalize(...)`, `parse(...)`, `format(...)`, `basename(...)`, `dirname(...)`, and `extname(...)`.
+
 ## Platform Constants
 
 ```javascript

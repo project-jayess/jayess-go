@@ -263,3 +263,278 @@ function main(args) {
 		t.Fatalf("expected parse error")
 	}
 }
+
+func TestParseProgramSupportsDestructuringInForOfBinding(t *testing.T) {
+	source := `
+function main(args) {
+  for (var { value = 1, ...rest } of items) {
+    print(value);
+    print(rest.extra);
+  }
+  return 0;
+}
+`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	if len(program.Functions) != 1 || len(program.Functions[0].Body) == 0 {
+		t.Fatalf("expected parsed function body")
+	}
+	loop, ok := program.Functions[0].Body[0].(*ast.ForOfStatement)
+	if !ok {
+		t.Fatalf("expected first statement to be for...of, got %T", program.Functions[0].Body[0])
+	}
+	if loop.Name == "" {
+		t.Fatalf("expected synthetic loop binding name")
+	}
+	if len(loop.Body) == 0 {
+		t.Fatalf("expected loop body")
+	}
+	binding, ok := loop.Body[0].(*ast.DestructuringDecl)
+	if !ok {
+		t.Fatalf("expected for...of body to begin with destructuring decl, got %T", loop.Body[0])
+	}
+	objectPattern, ok := binding.Pattern.(*ast.ObjectPattern)
+	if !ok {
+		t.Fatalf("expected object destructuring pattern, got %T", binding.Pattern)
+	}
+	if len(objectPattern.Properties) != 1 || objectPattern.Properties[0].Key != "value" || objectPattern.Rest != "rest" {
+		t.Fatalf("unexpected object pattern: %#v", objectPattern)
+	}
+	identifier, ok := binding.Value.(*ast.Identifier)
+	if !ok {
+		t.Fatalf("expected destructuring source identifier, got %T", binding.Value)
+	}
+	if identifier.Name != loop.Name {
+		t.Fatalf("expected destructuring source %q to match loop binding %q", identifier.Name, loop.Name)
+	}
+}
+
+func TestParseProgramRejectsDestructuringInForInBinding(t *testing.T) {
+	source := `
+function main(args) {
+  for (var [key] in obj) {
+    return 0;
+  }
+  return 0;
+}
+`
+
+	p := New(lexer.New(source))
+	if _, err := p.ParseProgram(); err == nil {
+		t.Fatalf("expected parse error")
+	}
+}
+
+func TestParseProgramChoosesNonConflictingForOfDestructuringTempName(t *testing.T) {
+	source := `
+function main(args) {
+  for (var [value] of items) {
+    const __jayess_foreach_0 = 1;
+    print(__jayess_foreach_0);
+    print(value);
+  }
+  return 0;
+}
+`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	loop, ok := program.Functions[0].Body[0].(*ast.ForOfStatement)
+	if !ok {
+		t.Fatalf("expected first statement to be for...of, got %T", program.Functions[0].Body[0])
+	}
+	if loop.Name == "__jayess_foreach_0" {
+		t.Fatalf("expected synthetic loop binding name to avoid body identifier collision")
+	}
+	binding, ok := loop.Body[0].(*ast.DestructuringDecl)
+	if !ok {
+		t.Fatalf("expected for...of body to begin with destructuring decl, got %T", loop.Body[0])
+	}
+	identifier, ok := binding.Value.(*ast.Identifier)
+	if !ok {
+		t.Fatalf("expected destructuring source identifier, got %T", binding.Value)
+	}
+	if identifier.Name != loop.Name {
+		t.Fatalf("expected destructuring source %q to match loop binding %q", identifier.Name, loop.Name)
+	}
+}
+
+func TestParseProgramPreservesForOfDestructuringPatternSourcePosition(t *testing.T) {
+	source := `function main(args) {
+  for (const [value] of items) {
+    print(value);
+  }
+}`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	loop, ok := program.Functions[0].Body[0].(*ast.ForOfStatement)
+	if !ok {
+		t.Fatalf("expected first statement to be for...of, got %T", program.Functions[0].Body[0])
+	}
+	binding, ok := loop.Body[0].(*ast.DestructuringDecl)
+	if !ok {
+		t.Fatalf("expected for...of body to begin with destructuring decl, got %T", loop.Body[0])
+	}
+	if binding.Pos.Line != 2 || binding.Pos.Column != 14 {
+		t.Fatalf("expected destructuring binding position 2:14, got %d:%d", binding.Pos.Line, binding.Pos.Column)
+	}
+	identifier, ok := binding.Value.(*ast.Identifier)
+	if !ok {
+		t.Fatalf("expected destructuring source identifier, got %T", binding.Value)
+	}
+	if identifier.Pos.Line != binding.Pos.Line || identifier.Pos.Column != binding.Pos.Column {
+		t.Fatalf("expected synthetic source identifier to track binding position %d:%d, got %d:%d", binding.Pos.Line, binding.Pos.Column, identifier.Pos.Line, identifier.Pos.Column)
+	}
+}
+
+func TestParseProgramPreservesForVariableInitSourcePosition(t *testing.T) {
+	source := `function main(args) {
+  for (const value = 1; value < 2; value = value + 1) {
+    return value;
+  }
+}`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	loop, ok := program.Functions[0].Body[0].(*ast.ForStatement)
+	if !ok {
+		t.Fatalf("expected first statement to be for loop, got %T", program.Functions[0].Body[0])
+	}
+	init, ok := loop.Init.(*ast.VariableDecl)
+	if !ok {
+		t.Fatalf("expected for init to be variable decl, got %T", loop.Init)
+	}
+	if init.Pos.Line != 2 || init.Pos.Column != 8 {
+		t.Fatalf("expected for-init variable position 2:8, got %d:%d", init.Pos.Line, init.Pos.Column)
+	}
+}
+
+func TestParseProgramPreservesForDestructuringInitSourcePosition(t *testing.T) {
+	source := `function main(args) {
+  for (const [value] = [1]; value < 2; value = value + 1) {
+    return value;
+  }
+}`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	loop, ok := program.Functions[0].Body[0].(*ast.ForStatement)
+	if !ok {
+		t.Fatalf("expected first statement to be for loop, got %T", program.Functions[0].Body[0])
+	}
+	init, ok := loop.Init.(*ast.DestructuringDecl)
+	if !ok {
+		t.Fatalf("expected for init to be destructuring decl, got %T", loop.Init)
+	}
+	if init.Pos.Line != 2 || init.Pos.Column != 8 {
+		t.Fatalf("expected for-init destructuring position 2:8, got %d:%d", init.Pos.Line, init.Pos.Column)
+	}
+}
+
+func TestParseProgramPreservesAssignmentSourcePosition(t *testing.T) {
+	source := `function main(args) {
+  value = 1;
+}`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	stmt, ok := program.Functions[0].Body[0].(*ast.AssignmentStatement)
+	if !ok {
+		t.Fatalf("expected assignment statement, got %T", program.Functions[0].Body[0])
+	}
+	if stmt.Pos.Line != 2 || stmt.Pos.Column != 3 {
+		t.Fatalf("expected assignment position 2:3, got %d:%d", stmt.Pos.Line, stmt.Pos.Column)
+	}
+}
+
+func TestParseProgramPreservesDestructuringAssignmentSourcePosition(t *testing.T) {
+	source := `function main(args) {
+  [value] = [1];
+}`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	stmt, ok := program.Functions[0].Body[0].(*ast.DestructuringAssignment)
+	if !ok {
+		t.Fatalf("expected destructuring assignment, got %T", program.Functions[0].Body[0])
+	}
+	if stmt.Pos.Line != 2 || stmt.Pos.Column != 3 {
+		t.Fatalf("expected destructuring assignment position 2:3, got %d:%d", stmt.Pos.Line, stmt.Pos.Column)
+	}
+}
+
+func TestParseProgramPreservesForUpdateAssignmentSourcePosition(t *testing.T) {
+	source := `function main(args) {
+  for (; value < 2; value = value + 1) {
+    return value;
+  }
+}`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	loop, ok := program.Functions[0].Body[0].(*ast.ForStatement)
+	if !ok {
+		t.Fatalf("expected first statement to be for loop, got %T", program.Functions[0].Body[0])
+	}
+	update, ok := loop.Update.(*ast.AssignmentStatement)
+	if !ok {
+		t.Fatalf("expected for update to be assignment, got %T", loop.Update)
+	}
+	if update.Pos.Line != 2 || update.Pos.Column != 21 {
+		t.Fatalf("expected for-update assignment position 2:21, got %d:%d", update.Pos.Line, update.Pos.Column)
+	}
+	if update.Operator != ast.AssignmentAssign {
+		t.Fatalf("expected for-update assignment operator %q, got %q", ast.AssignmentAssign, update.Operator)
+	}
+}
+
+func TestParseProgramSupportsCompoundAssignmentInForUpdate(t *testing.T) {
+	source := `function main(args) {
+  for (; value < 2; value += 1) {
+    return value;
+  }
+}`
+
+	p := New(lexer.New(source))
+	program, err := p.ParseProgram()
+	if err != nil {
+		t.Fatalf("ParseProgram returned error: %v", err)
+	}
+	loop, ok := program.Functions[0].Body[0].(*ast.ForStatement)
+	if !ok {
+		t.Fatalf("expected first statement to be for loop, got %T", program.Functions[0].Body[0])
+	}
+	update, ok := loop.Update.(*ast.AssignmentStatement)
+	if !ok {
+		t.Fatalf("expected for update to be assignment, got %T", loop.Update)
+	}
+	if update.Operator != ast.AssignmentAddAssign {
+		t.Fatalf("expected for-update assignment operator %q, got %q", ast.AssignmentAddAssign, update.Operator)
+	}
+}

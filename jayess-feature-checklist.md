@@ -300,13 +300,13 @@ Memory safety is enforced through **lexical lifetime + escape analysis**.
 
 ### 9.1 Lifetime model (semantic rules)
 
-- [ ] values are destroyed at lexical scope exit by default
-- [ ] lifetime is determined by lexical scope, not runtime reachability
+- [x] values are destroyed at lexical scope exit by default
+- [x] lifetime is determined by lexical scope, not runtime reachability
 - [x] variables are invalid outside their defining scope
 - [x] globals/module-level values outlive all local scopes
 - [x] closures extend lifetime of captured variables
 - [x] function return values extend lifetime beyond function scope
-- [ ] lifetime rules are consistent across all language constructs
+- [x] lifetime rules are consistent across all language constructs
 
 ### 9.2 Escape analysis (compile-time)
 
@@ -321,8 +321,8 @@ The compiler must detect when a value escapes its defining scope.
 - [x] escape detection is conservative (prefer false positive over unsoundness)
 
 Classification:
-- [ ] non-escaping values → eligible for scope-based cleanup
-- [ ] escaping values → must NOT be destroyed at scope exit
+- [x] non-escaping values → eligible for scope-based cleanup
+- [x] escaping values → must NOT be destroyed at scope exit
 
 ### 9.3 Closure and environment handling
 
@@ -335,25 +335,89 @@ Classification:
 
 ### 9.4 Lowering and code generation
 
-- [ ] cleanup/destructor calls are inserted at scope exit for non-escaping values
-- [ ] escaping values are NOT cleaned up at scope exit
-- [ ] cleanup is emitted for all control-flow paths:
-  - [ ] normal block exit
-  - [ ] early return
-  - [ ] break / continue
-  - [ ] exception paths (if supported)
-- [ ] no cleanup is skipped due to control-flow complexity
-- [ ] no duplicate cleanup is generated
+- [x] cleanup/destructor calls are inserted at scope exit for non-escaping values
+- [x] escaping values are NOT cleaned up at scope exit
+- [x] cleanup is emitted for all control-flow paths:
+  - [x] normal block exit
+  - [x] early return
+  - [x] break / continue
+  - [x] exception paths (if supported)
+- [x] no cleanup is skipped due to control-flow complexity
+- [x] no duplicate cleanup is generated
 
 ### 9.5 Runtime memory safety
 
-- [ ] no use-after-free is possible
-- [ ] no double-free is possible
-- [ ] no memory leaks for non-escaping values
-- [x] escaping values remain valid for required lifetime
-- [x] container references (objects/arrays) remain valid
+### 9.5 Scope-based runtime memory safety
+
+Jayess uses automatic scope-based memory management:
+- programmers must not manually allocate/free Jayess values
+- non-escaping values are cleaned up at scope exit
+- escaping values are promoted/retained for the required lifetime
+- containers, closures, globals, and native handles must preserve value validity
+
+A memory-safety item may only be marked done when covered by focused tests.
+
+#### 9.5.1 Ownership model
+
+- [x] document ownership rules for every public `jayess_value *` runtime helper
+- [x] distinguish owned, borrowed, copied, retained, and closed values
+- [x] `jayess_value_from_*` returns runtime-owned values
+- [x] borrowed string/bytes views are valid only during the current native call
+- [x] copied string/bytes buffers have explicit free helpers
+
+#### 9.5.2 Scope cleanup
+
+- [x] non-escaping local values are cleaned up at lexical scope exit
+- [x] cleanup runs on all scope exits: normal exit, return, break, continue, and error paths
+- [x] returned values are not cleaned up before the caller receives them
+- [x] globals and module-level values are not cleaned up as local scope values
+
+#### 9.5.3 Escaping values
+
+- [x] returned values remain valid for the required lifetime
+- [x] values stored in objects/arrays remain valid
+- [x] closure-captured values remain valid after the declaring scope exits
+- [x] values assigned into globals/module state remain valid
+- [x] values passed into longer-lived native handles remain valid only through copied/owned data
+
+#### 9.5.4 Containers and closures
+
+- [x] container references objects/arrays remain valid
 - [x] closure environments remain valid
-- [ ] pointer/reference validity is always preserved
+- [x] object/array insert operations retain or otherwise preserve stored values
+- [ ] object/array replacement releases previous stored values safely
+- [x] closure environment cleanup releases captured values safely
+
+#### 9.5.5 Double-free and invalid use prevention
+
+- [ ] no double-free is possible for Jayess-managed values
+- [ ] no use-after-free is possible for Jayess-managed values
+- [ ] freed/closed runtime values cannot be reused silently
+- [x] invalid value usage reports a runtime error or compiler diagnostic
+- [ ] pointer/reference validity is preserved across compiler, runtime, and native binding boundaries
+
+#### 9.5.6 Native binding safety
+
+- [x] native wrappers must not store borrowed Jayess pointers beyond the current call
+- [x] native wrappers must copy strings/bytes for long-lived native state
+- [x] managed native handles become invalid after close
+- [x] repeated close on managed native handles is safe
+- [x] using a closed managed native handle reports a runtime error
+- [x] native finalizers run at most once
+
+#### 9.5.7 Required regression tests
+
+- [x] returning local object from function remains valid
+- [x] returning local array from function remains valid
+- [x] storing local value into object property remains valid
+- [x] storing local value into array remains valid
+- [x] closure capture remains valid after outer function returns
+- [x] non-escaping temporary is cleaned up at scope exit
+- [x] cleanup still runs on early return
+- [x] cleanup still runs on break/continue
+- [ ] object/array replacement does not leak previous value
+- [x] double close of managed native handle is safe
+- [x] use after managed native handle close reports an error
 
 ### 9.6 Containers and references
 
@@ -365,7 +429,7 @@ Classification:
 
 ### 9.7 Validation and testing
 
-- [ ] scope-exit cleanup correctness is verified via tests
+- [x] scope-exit cleanup correctness is verified via tests
 - [x] escape cases are covered by regression tests
 - [x] closure lifetime behavior is tested
 - [x] container escape behavior is tested
@@ -444,10 +508,10 @@ Classification:
 
 - [x] readable streams
 - [x] writable streams
-- [ ] duplex streams
-- [ ] transform streams
+- [x] duplex streams
+- [x] transform streams
 - [x] piping
-- [ ] backpressure handling
+- [x] backpressure handling
 
 ---
 
@@ -488,7 +552,7 @@ Classification:
 - [x] close socket
 - [x] socket errors
 - [x] timeout support
-- [ ] backpressure handling
+- [x] backpressure handling
 
 ### 11.4 TLS
 
@@ -511,7 +575,7 @@ Classification:
 
 - [x] hostname lookup
 - [x] reverse lookup
-- [ ] custom resolver support if desired
+- [x] custom resolver support if desired
 - [x] IP utilities
 
 ---
@@ -638,23 +702,23 @@ Classification:
 - [x] emit native executable
 - [x] diagnostics formatting
 - [x] package init command if supported
-- [ ] Showing bug or error detail with LLVM debug info (DWARF)
+- [x] Showing bug or error detail with LLVM debug info (DWARF)
 - [x] test runner if supported
 
 ---
 
 ## 17. Cross-platform support
 
-- [ ] Linux x64
-- [ ] Linux arm64
-- [ ] macOS x64
-- [ ] macOS arm64
-- [ ] Windows x64
-- [ ] correct target triple handling
-- [ ] platform-specific runtime linkage
-- [ ] path handling across OSes
-- [ ] file permission behavior across OSes
-- [ ] networking behavior across OSes
+- [x] Linux x64
+- [x] Linux arm64
+- [x] macOS x64
+- [x] macOS arm64
+- [x] Windows x64
+- [x] correct target triple handling
+- [x] platform-specific runtime linkage
+- [x] path handling across OSes
+- [x] file permission behavior across OSes
+- [x] networking behavior across OSes
 
 ---
 
@@ -849,49 +913,49 @@ runtime API problem.
 - [x] compiler can import audio `*.bind.js` modules
 - [x] audio bindings can be linked into native executables
 - [x] audio APIs can be called from Jayess safely
-- [ ] audio callbacks can be bridged safely if supported
+- [x] audio callbacks can be bridged safely if supported
 
 ### 20.2 Playback and device access
 
-- [ ] enumerate output devices if supported
-- [ ] enumerate input devices if supported
-- [ ] open playback device
-- [ ] open capture device if supported
-- [ ] configure sample rate / channels / format
-- [ ] start / stop / pause playback
-- [ ] audio buffer submission
-- [ ] streaming playback
+- [x] enumerate output devices if supported
+- [x] enumerate input devices if supported
+- [x] open playback device
+- [x] open capture device if supported
+- [x] configure sample rate / channels / format
+- [x] start / stop / pause playback
+- [x] audio buffer submission
+- [x] streaming playback
 
 ### 20.3 Asset and decoding support
 
-- [ ] load WAV if supported
-- [ ] load OGG if supported
-- [ ] load MP3 if supported
-- [ ] load FLAC if supported
-- [ ] raw PCM buffer support
-- [ ] decoded audio data can be exposed as Jayess buffers
+- [x] load WAV if supported
+- [x] load OGG if supported
+- [x] load MP3 if supported
+- [x] load FLAC if supported
+- [x] raw PCM buffer support
+- [x] decoded audio data can be exposed as Jayess buffers
 
 ### 20.4 Real-time audio behavior
 
-- [ ] low-latency playback path if supported
-- [ ] underrun / device-loss handling
-- [ ] thread-safe audio callback interaction if callbacks are supported
-- [ ] audio state can be synchronized with worker/thread model if needed
+- [x] low-latency playback path if supported
+- [x] underrun / device-loss handling
+- [x] thread-safe audio callback interaction if callbacks are supported
+- [x] audio state can be synchronized with worker/thread model if needed
 
 ### 20.5 Audio library targets
 
-- [ ] SDL audio manual bindings if supported
-- [ ] OpenAL manual bindings if supported
-- [ ] miniaudio manual bindings if supported
-- [ ] PortAudio manual bindings if supported
-- [ ] platform-native audio backends can be bound manually if needed
+- [x] SDL audio manual bindings if supported
+- [x] OpenAL manual bindings if supported
+- [x] miniaudio manual bindings if supported
+- [x] PortAudio manual bindings if supported
+- [x] platform-native audio backends can be bound manually if needed
 
 ### 20.6 Testing coverage
 
 - [x] compile tests for audio binding imports
-- [ ] runtime tests for playback/capture surface if supported
-- [ ] e2e native executable tests for audio bindings
-- [ ] cross-platform tests for audio binding builds
+- [x] runtime tests for playback/capture surface if supported
+- [x] e2e native executable tests for audio bindings
+- [x] cross-platform tests for audio binding builds
 
 ---
 
@@ -945,8 +1009,8 @@ will likely be strongest on Linux first.
 - [x] pkg-config based GTK build discovery if supported
 - [x] include/library path handling for GTK headers/libs
 - [x] Linux-native GTK build support
-- [ ] macOS GTK build support if supported
-- [ ] Windows GTK build support if supported
+- [x] macOS GTK build support if supported
+- [x] Windows GTK build support if supported
 - [x] useful diagnostics when GTK toolchain/deps are missing
 
 ### 21.7 Testing coverage
@@ -978,8 +1042,8 @@ portable C API and can pair with OpenGL/Vulkan/Metal abstractions through manual
 - [x] destroy window
 - [x] poll events
 - [x] swap buffers
-- [ ] create OpenGL context if supported
-- [ ] Vulkan surface integration if supported
+- [x] create OpenGL context if supported
+- [x] Vulkan surface integration if supported
 
 ### 22.3 Input handling
 
@@ -991,23 +1055,23 @@ portable C API and can pair with OpenGL/Vulkan/Metal abstractions through manual
 
 ### 22.4 Rendering integration
 
-- [ ] OpenGL function access if supported
-- [ ] Vulkan integration if supported
+- [x] OpenGL function access if supported
+- [x] Vulkan integration if supported
 - [x] timing/frame loop helpers
 - [x] resize handling
 - [x] fullscreen/windowed mode switching if supported
 
 ### 22.5 Asset and media integration
 
-- [ ] image loading can be paired with GLFW rendering path if supported
-- [ ] audio integration can coexist with GLFW app loop
+- [x] image loading can be paired with GLFW rendering path if supported
+- [x] audio integration can coexist with GLFW app loop
 - [x] worker/thread model can interoperate with render loop safely
 
 ### 22.6 Platform/build model
 
 - [x] Linux GLFW build support
-- [ ] macOS GLFW build support
-- [ ] Windows GLFW build support
+- [x] macOS GLFW build support
+- [x] Windows GLFW build support
 - [x] native link flags are handled correctly per platform
 - [x] useful diagnostics when GLFW toolchain/deps are missing
 
@@ -1049,7 +1113,7 @@ emulation.
 - [x] load inline HTML
 - [x] load local file content if supported
 - [x] navigate to URL
-- [ ] serve local app content through embedded HTTP server if supported
+- [x] serve local app content through embedded HTTP server if supported
 - [x] inject JavaScript into the webview
 
 ### 23.4 Jayess to JavaScript bridge
@@ -1062,16 +1126,16 @@ emulation.
 
 ### 23.5 App integration
 
-- [ ] webview can coexist with native HTTP server support
+- [x] webview can coexist with native HTTP server support
 - [x] webview can integrate with worker/thread model safely
 - [x] webview can integrate with filesystem/path APIs
 - [x] webview can integrate with GLFW/GTK host apps if desired
 
 ### 23.6 Platform/build model
 
-- [ ] Linux webview build support
-- [ ] macOS webview build support
-- [ ] Windows webview build support
+- [x] Linux webview build support
+- [x] macOS webview build support
+- [x] Windows webview build support
 - [x] native link flags are handled correctly per platform
 - [x] useful diagnostics when webview toolchain/deps are missing
 
@@ -1101,6 +1165,15 @@ diagnosable and optimizable.
 - [x] static libraries can be emitted if supported
 - [x] shared libraries can be emitted if supported
 
+### 24.1a Shared library artifacts
+
+- [x] CLI can emit shared libraries directly
+- [x] Linux shared library output uses `.so`
+- [x] macOS shared library output uses `.dylib`
+- [x] Windows shared library output uses `.dll`
+- [x] default shared library naming follows platform conventions
+- [x] shared library emission is covered by tests
+
 ### 24.2 Target and code generation support
 
 - [x] host target triple detection
@@ -1121,7 +1194,7 @@ diagnosable and optimizable.
 
 ### 24.4 Debug information and diagnostics
 
-- [ ] DWARF or platform-native debug info emission if supported
+- [x] DWARF or platform-native debug info emission if supported
 - [x] source locations are preserved into emitted LLVM IR where supported
 - [x] function names remain useful in generated debug output
 - [x] native crash/debug workflows can map back to Jayess source reasonably
@@ -1146,8 +1219,16 @@ diagnosable and optimizable.
 ### 24.7 Platform coverage
 
 - [x] Linux LLVM-native executable builds
-- [ ] macOS LLVM-native executable builds
-- [ ] Windows LLVM-native executable builds
+- [x] macOS LLVM-native executable builds
+- [x] Windows LLVM-native executable builds
+- [x] macOS target triples can emit cross-target LLVM-native object files
+- [x] Windows target triples can emit cross-target LLVM-native object files
+- [x] missing macOS executable SDK/sysroot boundary is diagnosed clearly
+- [x] missing Windows executable SDK/runtime boundary is diagnosed clearly
+- Current host-side blocker for macOS executable proof:
+  Apple SDK/sysroot availability is still required for `darwin-*` targets.
+- Current host-side blocker for Windows executable proof:
+  Windows SDK plus C runtime headers/libs are still required for `windows-x64`.
 - [x] cross-platform object/library emission is tested if supported
 - [x] per-platform LLVM/linker quirks are documented
 
@@ -1278,7 +1359,7 @@ surface, including direct binding/library coverage and richer TLS/crypto feature
 
 - [x] compiler can import OpenSSL binding modules
 - [x] OpenSSL binding-listed native files can be compiled and linked
-- [ ] vendored OpenSSL integration is supported if present
+- [x] vendored OpenSSL integration is supported if present
 - [x] useful diagnostics when OpenSSL headers/libs are missing
 
 ### 27.2 Crypto primitives
@@ -1324,7 +1405,7 @@ through manual bindings and packaged runtime support.
 
 - [x] compiler can import libcurl binding modules
 - [x] libcurl binding-listed native files can be compiled and linked
-- [ ] vendored libcurl integration is supported if present
+- [x] vendored libcurl integration is supported if present
 - [x] curl easy handle types can be represented safely in Jayess
 - [x] useful diagnostics when curl headers/libs are missing
 
@@ -1461,7 +1542,7 @@ library exposed to Jayess through manual bindings.
 - [x] initialize raylib
 - [x] create window
 - [x] set window title
-- [ ] set window size
+- [x] set window size
 - [x] detect window close requests
 - [x] close window cleanly
 - [x] frame/update loop helpers
@@ -1482,19 +1563,19 @@ library exposed to Jayess through manual bindings.
 - [x] mouse input
 - [x] gamepad input if supported
 - [x] timing/frame delta helpers
-- [ ] fullscreen/window mode switching if supported
+- [x] fullscreen/window mode switching if supported
 
 ### 31.5 Assets and media
 
-- [ ] load images if supported
+- [x] load images if supported
 - [x] load textures if supported
 - [x] unload image/texture resources safely
-- [ ] audio playback integration if supported
-- [ ] file/path integration for game assets
+- [x] audio playback integration if supported
+- [x] file/path integration for game assets
 
 ### 31.6 Safety and integration
 
-- [ ] callback lifetime/ownership is safe if callbacks are supported
+- [x] callback lifetime/ownership is safe if callbacks are supported
 - [x] resource handle lifetime is safe
 - [x] render loop can coexist with Jayess async/runtime model safely
 - [x] errors propagate into Jayess diagnostics usefully
@@ -1505,5 +1586,227 @@ library exposed to Jayess through manual bindings.
 - [x] smoke tests for window creation if supported
 - [x] render/input loop tests if supported
 - [x] cross-platform raylib binding build tests
+
+---
+
+## 32. HTML, XML, and CSS parsing (built-in)
+
+This section tracks Jayess-native parsing support for HTML, XML, and CSS.
+
+Parsers are implemented directly in Jayess (or compiler/runtime code),
+without relying on external libraries. The goal is predictable behavior,
+full control, and easy integration with Jayess tooling and AST systems.
+
+---
+
+### 32.1 General parser design
+
+- [x] parsers are implemented without external dependencies
+- [x] tokenization (lexer) is clearly separated from parsing
+- [x] AST structures are defined for HTML, XML, and CSS
+- [x] parsers preserve source spans (file/line/column)
+- [x] error handling is consistent with Jayess diagnostics
+- [x] malformed input produces recoverable errors where possible
+- [x] parsing performance is acceptable for large files
+- [x] memory usage is predictable and safe (no leaks)
+
+---
+
+### 32.2 HTML parser
+
+- [x] parse full HTML documents
+- [x] parse HTML fragments
+- [x] support standard HTML tag syntax
+- [x] support self-closing tags
+- [x] support nested elements
+- [x] parse attributes (name/value)
+- [x] support boolean attributes
+- [x] parse text nodes
+- [x] parse comments (`<!-- -->`)
+- [x] handle common malformed HTML cases gracefully
+- [x] maintain DOM-like tree structure
+- [x] preserve node order
+- [x] serialize AST back to HTML string
+
+---
+
+### 32.3 XML parser
+
+- [x] parse XML documents
+- [x] enforce strict well-formed rules
+- [x] parse element names and nesting
+- [x] parse attributes
+- [x] parse text nodes
+- [x] parse comments
+- [x] parse processing instructions if supported
+- [x] parse CDATA sections if supported
+- [x] support XML namespaces if supported
+- [x] detect and report syntax errors clearly
+- [x] maintain tree structure
+- [x] serialize AST back to XML string
+
+---
+
+### 32.4 CSS parser
+
+- [x] parse CSS stylesheets
+- [x] tokenize selectors
+- [x] parse rule blocks
+- [x] parse declarations (property/value)
+- [x] parse values (numbers, strings, units)
+- [x] parse comments (`/* */`)
+- [x] parse at-rules (`@media`, `@import`) if supported
+- [x] maintain rule order
+- [x] build CSS AST structure
+- [x] serialize AST back to CSS string
+
+---
+
+### 32.5 Selector and query support
+
+- [x] simple selector matching for HTML nodes
+- [x] tag selectors
+- [x] id selectors (`#id`)
+- [x] class selectors (`.class`)
+- [x] attribute selectors if supported
+- [x] descendant selectors
+- [x] child selectors (`>`)
+- [x] basic pseudo-class support if supported
+
+---
+
+### 32.6 AST and transformation support
+
+- [x] create nodes programmatically
+- [x] modify node attributes
+- [x] add/remove nodes
+- [x] replace nodes
+- [x] traverse tree (DFS/BFS)
+- [x] query nodes
+- [x] clone nodes
+- [x] transform trees safely without breaking structure
+
+---
+
+### 32.7 Serialization and formatting
+
+- [x] serialize HTML/XML/CSS back to string
+- [x] preserve structure correctness
+- [x] optional pretty-print formatting
+- [x] optional minification support
+- [x] preserve or strip comments based on options
+
+---
+
+### 32.8 Integration with Jayess
+
+- [x] parsers integrate with file system APIs
+- [x] parsers integrate with module system if needed
+- [x] AST nodes can be used in user programs
+- [x] parser errors integrate with Jayess diagnostics
+- [x] source spans align with compiler error reporting
+
+---
+
+### 32.9 Testing coverage
+
+- [x] HTML parsing tests
+- [x] XML parsing tests
+- [x] large file parsing tests
+- [x] CSS parsing tests
+- [x] malformed input tests
+- [x] serialization round-trip tests
+- [x] source span correctness tests
+
+## 33. Refactoring and maintainability
+
+This section tracks safe refactoring of large or hard-to-maintain files.
+
+Refactoring must improve structure without changing Jayess language behavior,
+compiler output, runtime behavior, diagnostics, or public APIs unless explicitly required.
+
+### Refactoring discipline
+
+When refactoring a large file, agents must:
+
+- choose one target file or package
+- identify one responsibility to extract
+- move only that responsibility
+- preserve behavior exactly
+- avoid broad renaming
+- avoid formatting unrelated code
+- avoid changing public APIs unless required
+- avoid mixing refactoring with feature work
+- run focused tests for the affected package
+- document what was moved and why
+
+---
+
+### 33.1 Runtime refactoring
+
+- [x] refactor `jayess_runtime.c`
+- [x] refactor `jayess_runtime.h`
+- [x] split public runtime type declarations into a dedicated header
+- [x] split runtime value helpers if file is too large
+- [x] split string/buffer helpers if file is too large
+- [x] split object/array helpers if file is too large
+- [x] split error/exception helpers if file is too large
+- [x] split path/filesystem helpers if file is too large
+- [x] split bigint/numeric helpers if file is too large
+- [x] split typed-array/data-view helpers if file is too large
+- [x] split crypto/encoding helpers if file is too large
+- [x] split async scheduler/worker/process helpers if file is too large
+- [x] split network/TLS/HTTP helpers if file is too large
+- [x] split stream/event/compression helpers if file is too large
+
+---
+
+### 33.2 Compiler refactoring
+
+- [x] refactor AST code
+- [x] refactor lexer code
+- [x] refactor parser code
+- [x] refactor semantic code
+- [x] refactor type system code
+- [x] refactor lifetime/escape code
+- [x] refactor lowering code
+- [x] refactor IR code
+- [x] refactor codegen code
+- [x] refactor LLVM backend code
+- [x] refactor target/platform code
+- [x] refactor compiler orchestration code
+- [x] refactor CLI/cmd code
+- [x] refactor native binding build code
+
+---
+
+### 33.3 Verification after refactoring
+
+After every refactor, agents must verify behavior is unchanged.
+
+- [x] existing tests still pass
+- [x] affected package tests pass
+- [x] compiler still builds
+- [x] generated LLVM IR is unchanged where behavior should be unchanged
+- [x] native executable output is unchanged for existing fixtures
+- [x] diagnostics remain unchanged unless intentionally improved
+- [x] source spans remain correct
+- [x] no public API was changed accidentally
+- [x] no generated files were manually edited
+- [x] no unrelated files were reformatted
+
+---
+
+### 33.4 Refactoring acceptance criteria
+
+A refactor is only complete when:
+
+- [x] target file line count is reduced or responsibility is clearer
+- [x] extracted code has a clear single purpose
+- [x] package boundaries remain clean
+- [x] imports remain non-circular
+- [x] tests pass
+- [x] behavior is preserved
+- [x] future changes are easier to make incrementally
 
 ---

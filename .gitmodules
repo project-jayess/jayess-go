@@ -70,6 +70,10 @@
 	path = refs/portaudio
 	url = git@github.com:PortAudio/portaudio.git
 	branch = master
+[submodule "refs/quickjs"]
+	path = refs/quickjs
+	url = git@github.com:bellard/quickjs.git
+	branch = master
 [submodule "refs/picohttpparser"]
 	path = refs/picohttpparser
 	url = git@github.com:h2o/picohttpparser.git
