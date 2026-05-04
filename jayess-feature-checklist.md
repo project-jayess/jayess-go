@@ -8,7 +8,12 @@
 - [x] block comments (`/* */`)
 - [x] identifiers
 - [x] keywords / reserved words
+- [x] hashbang comments at the start of `.js` files
+- [x] reject unsupported `enum` and `const enum` declarations with a clear diagnostic
+- [x] reject unsupported type aliases, interfaces, ambient/module/namespace declarations, abstract class/member modifiers, readonly/override/accessor/class access modifiers, class `implements` clauses, annotations including catch and destructuring binding annotations, variable/class/catch/destructuring binding definite assignment and const assertions, function/class/arrow return annotations, type predicate/assertion return annotations, optional parameter/property/variable/destructuring binding markers, function/class method overload declarations, parameter property modifiers, function/class/method/arrow generic type parameters, type-only module declarations/specifiers, import-equals/export-equals/export-as-namespace module syntax, type expression suffixes in statements and nested expressions, top-level/class/member/parameter decorators, JSX, and angle-bracket assertions with clear diagnostics
 - [x] semicolon handling
+- [x] empty statements
+- [x] trailing commas in parameter and argument lists
 - [x] operator precedence
 - [x] grouping with parentheses
 - [x] comma expressions if supported
@@ -24,31 +29,49 @@
 - [x] object literals
 - [x] array literals
 - [x] template strings
+- [x] reject unsupported regular expression literals with a clear diagnostic
 
 ### 1.3 Variables and bindings
 
 - [x] `var` declarations
 - [x] `const` declarations
+- [x] reject unsupported `let` declarations with a clear diagnostic
+- [x] reject unsupported `using` declarations with a clear diagnostic
+- [x] reject unsupported `public` / top-level `private` with clear diagnostics
 - [x] block scope
 - [x] lexical scope
 - [x] shadowing
 - [x] declaration without hoisting
 - [x] no use before declaration
+- [x] reject reassignment to `const` bindings
 - [x] destructuring declarations
+- [x] array destructuring elisions
 - [x] default values in declarations
 
 ### 1.4 Operators
 
 - [x] arithmetic operators
+- [x] modulo operator
+- [x] exponentiation operator
 - [x] comparison operators
 - [x] logical operators
 - [x] assignment operators
+- [x] bitwise compound assignment operators
 - [x] bitwise operators
 - [x] unary operators
+- [x] unary plus operator
+- [x] update operators (`++`, `--`)
+- [x] line terminator handling before postfix update operators
 - [x] ternary operator
 - [x] optional chaining
 - [x] nullish coalescing
 - [x] `typeof`
+- [x] `typeof` permits undeclared identifier operands
+- [x] `void`
+- [x] `delete`
+- [x] reject deleting identifiers
+- [x] reject deleting private class members
+- [x] `in`
 - [x] `instanceof`
 
 ### 1.5 Control flow
@@ -56,6 +79,7 @@
 - [x] `if`
 - [x] `else`
 - [x] `switch`
+- [x] reject duplicate direct declarations across switch clauses
 - [x] `for`
 - [x] `while`
 - [x] `do while`
@@ -67,7 +91,11 @@
 - [x] `throw`
 - [x] `try`
 - [x] `catch`
+- [x] destructuring catch bindings
 - [x] `finally`
+- [x] `debugger` statement
+- [x] reject unsupported `with` statements with a clear diagnostic
+- [x] preserve async/generator context in loop and switch expressions
 
 ---
 
@@ -77,7 +105,10 @@
 
 - [x] function declarations
 - [x] function expressions
+- [x] reject line terminator after `async` in async function declarations/expressions with a clear diagnostic
 - [x] arrow functions
+- [x] reject line terminator before arrow `=>` with a clear diagnostic
+- [x] reject line terminator after `async` in async arrow functions with a clear diagnostic
 - [x] anonymous functions
 - [x] nested functions
 - [x] recursion
@@ -87,16 +118,25 @@
 
 - [x] positional parameters
 - [x] default parameters
+- [x] method context in parameter defaults
+- [x] method context in destructuring parameter defaults
 - [x] rest parameters
+- [x] destructuring parameters
+- [x] default values in destructuring parameters
+- [x] reject duplicate parameter bindings
+- [x] function-local `arguments` binding
+- [x] nested regular functions receive their own `arguments` binding
 - [x] variadic calls
 
 ### 2.3 Function behavior
 
-- [x] closures
-- [x] captured variables
-- [x] lexical `this` for arrow functions
+- [x] parse and analyze closures
+- [x] parse and analyze captured variables
+- [x] parse and analyze lexical `this` for arrow functions
+- [x] preserve class field/static block context for arrow functions
 - [x] normal `this` for regular functions
-- [x] function return values
+- [x] parse and analyze `this` expressions
+- [x] parse and analyze function return values
 - [x] higher-order functions
 - [x] callback support
 
@@ -106,9 +146,9 @@
 - [x] function values in variables
 - [x] function values in arrays
 - [x] function values in objects
-- [x] `.bind()` equivalent
-- [x] `.call()` equivalent
-- [x] `.apply()` equivalent
+- [x] parse and analyze `.bind()` invocation helper shapes
+- [x] parse and analyze `.call()` invocation helper shapes
+- [x] parse and analyze `.apply()` invocation helper shapes
 
 ---
 
@@ -118,32 +158,59 @@
 
 - [x] object property read
 - [x] object property write
+- [x] keyword member property names
 - [x] computed property names
 - [x] method definitions
-- [x] property enumeration
+- [x] async object methods
+- [x] reject line terminator after `async` in async object methods
+- [x] generator object methods
+- [x] getter and setter definitions
+- [x] computed getter and setter definitions
+- [x] reject rest parameters in setters
+- [x] shorthand properties
+- [x] keyword object property names
+- [x] parse and analyze `for...in` property enumeration
 - [x] object spread
 - [x] object destructuring
+- [x] keyword object destructuring property names
+- [x] computed object destructuring property names
 
 ### 3.2 Classes
 
 - [x] `class`
 - [x] constructors
+- [x] empty class elements
 - [x] instance methods
 - [x] static methods
+- [x] static initialization blocks
+- [x] reject static class members named `prototype`
+- [x] computed class member names
 - [x] instance fields
 - [x] static fields
+- [x] `this` and private access in class field initializers
+- [x] `super` in derived class static initialization blocks
 - [x] getters
 - [x] setters
+- [x] keyword class member names
+- [x] class members named `static`
+- [x] async class methods
+- [x] line terminator after `async` starts a class field, not an async method
+- [x] generator class methods
+- [x] private async/generator class methods
 - [x] `this`
-- [x] `new`
+- [x] parse and analyze `new` operator with constructor arguments
+- [x] parse and analyze `new` expressions
+- [x] parse and analyze `new.target` expressions
+- [x] reject optional chaining in `new` targets
 
 ### 3.3 Inheritance
 
 - [x] `extends`
+- [x] reject non-constructable local `extends` targets
 - [x] `super`
-- [x] prototype chain or Jayess equivalent
-- [x] method overriding
-- [x] `instanceof` support
+- [x] parse and analyze prototype-chain method access shapes
+- [x] parse and analyze method override shapes
+- [x] parse and analyze `instanceof` support
 
 ### 3.4 Encapsulation
 
@@ -158,37 +225,41 @@
 ### 4.1 Arrays
 
 - [x] array creation
+- [x] array literal elisions
 - [x] indexing
-- [x] mutation
-- [x] length
-- [x] iteration
+- [x] parse and analyze array index mutation
+- [x] parse and analyze array length member access
+- [x] parse and analyze array iteration with `for...of`
 - [x] array destructuring
+- [x] array destructuring elisions
 - [x] rest elements
 - [x] spread elements
 
 ### 4.2 Strings
 
-- [x] string concatenation
-- [x] string indexing
-- [x] string length
-- [x] template strings
-- [x] unicode support
+- [x] parse and analyze string concatenation
+- [x] parse and analyze string indexing
+- [x] parse and analyze string length member access
+- [x] parse and analyze template string interpolations
+- [x] tagged template calls
+- [x] parse and analyze unicode strings and identifiers
 
 ### 4.3 Built-in collections
 
-- [x] `Map`
-- [x] `Set`
-- [x] `WeakMap` if supported
-- [x] `WeakSet` if supported
+- [x] parse and analyze `Map` construction and method access
+- [x] parse and analyze `Set` construction and method access
+- [x] parse and analyze `WeakMap` construction and method access if supported
+- [x] parse and analyze `WeakSet` construction and method access if supported
 
 ### 4.4 Other built-ins
 
-- [x] `Date`
-- [x] `RegExp`
-- [x] `Symbol`
-- [x] `ArrayBuffer`
-- [x] typed arrays
-- [x] `DataView`
+- [x] parse and analyze `Date` construction and method access
+- [x] parse and analyze `RegExp` construction and method access
+- [x] parse and analyze `Object` construction and static helper access
+- [x] parse and analyze `Symbol` calls
+- [x] parse and analyze `ArrayBuffer` construction
+- [x] parse and analyze typed array construction and indexing
+- [x] parse and analyze `DataView` construction and method access
 
 ---
 
@@ -196,18 +267,26 @@
 
 ### 5.1 Iteration
 
-- [x] iterable protocol
-- [x] iterator protocol
-- [x] `for...of`
-- [x] custom iterables
+- [x] parse and analyze iterable protocol object shapes
+- [x] parse and analyze iterator protocol object shapes
+- [x] parse and analyze `for...of`
+- [x] parse and analyze `for await...of`
+- [x] parse and analyze `for...in`
+- [x] reject initializers in `for...of` / `for...in` binding heads
+- [x] destructuring bindings in `for...of` / `for...in`
+- [x] assignment targets in `for...of` / `for...in`
+- [x] parse and analyze custom iterable object shapes
 
 ### 5.2 Generators
 
-- [x] generator functions
-- [x] `yield`
-- [x] generator iteration
-- [x] async iterators if supported
-- [x] async generators if supported
+- [x] parse and analyze generator functions
+- [x] parse and analyze `yield` expressions
+- [x] bare `yield`
+- [x] delegated `yield*`
+- [x] parse and analyze generator result iteration shapes
+- [x] parse and analyze async iterator consumption shapes if supported
+- [x] parse and analyze async generator functions
+- [x] parse and analyze async generator function expressions
 
 ---
 
@@ -215,28 +294,28 @@
 
 ### 6.1 Promises
 
-- [x] `Promise`
-- [x] resolve / reject
-- [x] chaining
-- [x] error propagation
-- [x] `Promise.all`
-- [x] `Promise.race`
-- [x] `Promise.allSettled` if supported
-- [x] `Promise.any` if supported
+- [x] parse and analyze `Promise` construction
+- [x] parse and analyze resolve / reject
+- [x] parse and analyze chaining
+- [x] parse and analyze Promise error-propagation chains
+- [x] parse and analyze `Promise.all`
+- [x] parse and analyze `Promise.race`
+- [x] parse and analyze `Promise.allSettled` if supported
+- [x] parse and analyze `Promise.any` if supported
 
 ### 6.2 Async functions
 
-- [x] `async` functions
-- [x] `await`
-- [x] async error handling
-- [x] async return values
+- [x] parse and analyze `async` functions
+- [x] parse and analyze `await` expressions
+- [x] parse and analyze async try/catch/finally error-handling shapes
+- [x] parse and analyze async return values
 
 ### 6.3 Scheduling
 
 - [x] event loop model
-- [x] microtask queue if supported
-- [x] timer queue
-- [x] cancellation model if supported
+- [x] parse and analyze microtask scheduling callbacks if supported
+- [x] parse and analyze timer scheduling callbacks
+- [x] parse and analyze timer cancellation calls if supported
 
 ---
 
@@ -248,23 +327,214 @@
 - [x] `export`
 - [x] named exports
 - [x] default exports
+- [x] anonymous default function/class exports
+- [x] async default function exports
+- [x] async generator default function exports
 - [x] namespace imports
 - [x] re-exports
+- [x] `default` in named import/export specifiers
+- [x] string-literal import/export specifier names
+- [x] keyword import/export specifier names
+- [x] `import.meta` expressions
 - [x] `export *`
 - [x] `export * as ns`
+- [x] string-literal and `default` namespace re-export aliases
 
 ### 7.2 Resolution
 
-- [x] relative imports
-- [x] parent-directory imports
-- [x] local project file imports
-- [x] package imports from `node_modules`
-- [x] scoped package imports
-- [x] package entry resolution
-- [x] `package.json` reading
-- [x] module initialization order
-- [x] circular imports
-- [x] clear diagnostics for unsupported JS packages
+- [x] parse and analyze relative import specifiers
+- [x] parse and analyze parent-directory import specifiers
+- [x] parse and analyze local project file import specifiers
+- [x] relative/local source file resolution helper
+- [x] unified import resolution dispatch helper
+- [x] unified import resolver rejects missing importer paths before dispatch
+- [x] unified import resolver routes dot-prefixed malformed source specifiers to source diagnostics
+- [x] AST module dependency source extraction helper
+- [x] AST module dependency compaction helper
+- [x] resolved AST module dependency helper
+- [x] compact resolved AST module dependency helper
+- [x] resolved module dependency compaction helper
+- [x] compact resolved AST module dependency helper deduplicates by resolved path
+- [x] resolved module dependencies feed module graph initialization order
+- [x] compact resolved module dependencies feed module graph initialization order
+- [x] parsed program dependencies feed module graph helper
+- [x] compact parsed program dependencies feed module graph helper
+- [x] parse and analyze package import specifiers from `node_modules`
+- [x] resolve Jayess stdlib import specifiers before `node_modules`
+- [x] detect native binding modules from `export default bind(...)`
+- [x] extract binding manifests from `export default bind(...)`
+- [x] resolved binding imports feed native build planning
+- [x] parse and analyze scoped package import specifiers
+- [x] reject malformed package and scoped package import specifiers, including empty and dot path segments, with clear diagnostics
+- [x] package resolver rejects malformed package specifiers before filesystem lookup
+- [x] package resolver rejects whitespace-padded package specifiers before filesystem lookup
+- [x] package resolver rejects scheme-like package specifiers before filesystem lookup
+- [x] source resolver rejects empty source specifiers before filesystem lookup
+- [x] source resolver rejects whitespace-padded source specifiers before filesystem lookup
+- [x] source resolver rejects dot-only relative source specifier forms before filesystem lookup
+- [x] source resolver rejects malformed relative source path segments before filesystem lookup
+- [x] source resolver rejects absolute and scheme-like source specifiers before filesystem lookup
+- [x] resolver rejects query and fragment module specifiers before filesystem lookup
+- [x] module and resolver paths reject backslash separators with clear diagnostics
+- [x] package entry resolution helper
+- [x] `package.json` reading for package entry metadata
+- [x] package entry metadata rejects unsafe package-relative paths
+- [x] package entry metadata rejects whitespace-only package-relative paths
+- [x] package entry metadata rejects scheme-like package-relative paths
+- [x] package entry metadata rejects query and fragment package-relative paths
+- [x] node_modules package import resolution helper
+- [x] module graph single import edge add helper
+- [x] module graph single import edge remove helper
+- [x] module graph all matching import edges remove helper
+- [x] module graph clear module imports helper
+- [x] module graph replace module imports helper
+- [x] module graph remove module helper
+- [x] module graph clone helper
+- [x] module graph compact direct import helper
+- [x] module graph module/dependency/dependent count helpers
+- [x] module graph dependency/dependent count map helpers
+- [x] module graph import edge count helper
+- [x] module graph deterministic import edge listing helper
+- [x] module graph construction from import edges helper
+- [x] module graph construction from import map helper
+- [x] module graph export to import map helper
+- [x] module graph export to dependent map helper
+- [x] module graph construction from dependent map helper
+- [x] module graph export to transitive dependency map helper
+- [x] module graph export to transitive dependent map helper
+- [x] module graph transitive dependency/dependent count helpers
+- [x] module graph direct dependency predicate helper
+- [x] module graph dependency inspection helper
+- [x] module graph dependent inspection helper
+- [x] module graph dependency depth and depth map helpers
+- [x] module graph dependency depth grouping helper
+- [x] module graph dependency depth level listing helper
+- [x] module graph dependency depth layer listing helper
+- [x] module graph dependency depth layer width listing helper
+- [x] module graph dependency depth width map helper
+- [x] module graph exact dependency depth filter helper
+- [x] module graph bounded dependency depth filter helper
+- [x] module graph beyond dependency depth filter helper
+- [x] module graph dependency depth range filter helper
+- [x] module graph widest dependency depth helper
+- [x] module graph deepest dependency modules helper
+- [x] module graph longest dependency path helper
+- [x] module graph longest dependency path map helper
+- [x] module graph dependent depth and depth map helpers
+- [x] module graph dependent depth grouping helper
+- [x] module graph dependent depth level listing helper
+- [x] module graph dependent depth layer listing helper
+- [x] module graph dependent depth layer width listing helper
+- [x] module graph dependent depth width map helper
+- [x] module graph exact dependent depth filter helper
+- [x] module graph bounded dependent depth filter helper
+- [x] module graph beyond dependent depth filter helper
+- [x] module graph dependent depth range filter helper
+- [x] module graph widest dependent depth helper
+- [x] module graph deepest dependent modules helper
+- [x] module graph longest dependent path helper
+- [x] module graph longest dependent path map helper
+- [x] module graph transitive dependency predicate helper
+- [x] module graph multi-entry transitive dependency predicate helper
+- [x] module graph transitive dependency inspection helper
+- [x] module graph multi-entry transitive dependency inspection helper
+- [x] module graph multi-entry transitive dependency count helper
+- [x] module graph transitive dependency set helper
+- [x] module graph transitive dependency count map helper
+- [x] module graph transitive dependency set map helper
+- [x] module graph multi-entry transitive dependency set helper
+- [x] module graph transitive dependent predicate helper
+- [x] module graph transitive dependent inspection helper
+- [x] module graph transitive dependent set helper
+- [x] module graph transitive dependent count map helper
+- [x] module graph transitive dependent set map helper
+- [x] module graph multi-module transitive dependent inspection helper
+- [x] module graph multi-module transitive dependent predicate helper
+- [x] module graph multi-module transitive dependent count helper
+- [x] module graph multi-module transitive dependent set helper
+- [x] module graph deterministic module listing helper
+- [x] module graph deterministic root module listing helper
+- [x] module graph reachable initialization subgraph helper
+- [x] module graph entry reachable subgraph helper
+- [x] module graph entry reachable module listing helper
+- [x] module graph entry reachable module count helper
+- [x] module graph entry reachable module set helper
+- [x] module graph entry reachable module predicate helper
+- [x] module graph entry reachable module order helper
+- [x] module graph reachable module map helper
+- [x] module graph reachable module count map helper
+- [x] module graph reachable module set map helper
+- [x] module graph reachable module order map helper
+- [x] module graph multi-entry reachable subgraph helper
+- [x] module graph multi-entry reachable module listing helper
+- [x] module graph multi-entry reachable module count helper
+- [x] module graph multi-entry reachable module set helper
+- [x] module graph multi-entry reachable module predicate helper
+- [x] module graph multi-entry reachable module order helper
+- [x] module graph shared initialization batch comparison helper
+- [x] module graph shared initialization entry map helper
+- [x] module graph shared initialization batch index map helper
+- [x] module graph shared initialization batch width helper
+- [x] module graph shared initialization batch extrema helper
+- [x] module graph shared widest initialization batch helper
+- [x] module graph shared narrowest initialization batch helper
+- [x] module graph shared initialization batch summary map helper
+- [x] module graph entry initialization batch listing helper
+- [x] module graph entry same initialization batch helper
+- [x] module graph entry initialization batch index map helper
+- [x] module graph entry initialization batch count helper
+- [x] module graph entry initialization batch width listing helper
+- [x] module graph entry initialization batch width range helper
+- [x] module graph entry widest initialization batch helper
+- [x] module graph entry narrowest initialization batch helper
+- [x] module graph multi-entry initialization batch listing helper
+- [x] module graph multi-entry same initialization batch helper
+- [x] module graph multi-entry initialization batch index map helper
+- [x] module graph multi-entry initialization batch count helper
+- [x] module graph multi-entry initialization batch width listing helper
+- [x] module graph multi-entry initialization batch width range helper
+- [x] module graph multi-entry widest initialization batch helper
+- [x] module graph multi-entry narrowest initialization batch helper
+- [x] module graph initialization batch listing helper
+- [x] module graph full same initialization batch helper
+- [x] module graph full initialization batch index map helper
+- [x] module graph initialization batch map helper
+- [x] module graph initialization batch count helper
+- [x] module graph initialization batch count map helper
+- [x] module graph initialization batch width listing helper
+- [x] module graph initialization batch width map helper
+- [x] module graph initialization batch width range helper
+- [x] module graph widest initialization batch helper
+- [x] module graph narrowest initialization batch helper
+- [x] module graph widest initialization batch map helper
+- [x] module graph narrowest initialization batch map helper
+- [x] module graph deterministic leaf module listing helper
+- [x] module graph root and leaf predicate helpers
+- [x] module graph isolated module listing and predicate helpers
+- [x] module initialization order helper
+- [x] module graph shared initialization order comparison helper
+- [x] module graph entry initialization order comparison helper
+- [x] module graph entry reverse initialization order comparison helper
+- [x] module graph entry initialization order position lookup helper
+- [x] module graph entry initialization order position helper
+- [x] module graph multi-entry initialization order helper
+- [x] module graph multi-entry initialization order comparison helper
+- [x] module graph multi-entry reverse initialization order comparison helper
+- [x] module graph multi-entry initialization order position lookup helper
+- [x] module graph multi-entry initialization order position helper
+- [x] module graph full initialization order helper
+- [x] module graph full initialization order comparison helper
+- [x] module graph full reverse initialization order comparison helper
+- [x] module graph full initialization order position lookup helper
+- [x] module graph full initialization order position helper
+- [x] module graph initialization order map helper
+- [x] module graph initialization order position map helper
+- [x] circular import detection helper
+- [x] full module graph acyclic validation helper
+- [x] module graph acyclic predicate helper
+- [x] clear diagnostics for unsupported absolute/URL/scheme-like module specifiers
+- [x] clear diagnostics for unsupported import attributes/assertions
+- [x] clear diagnostics for unsupported dynamic import expressions
 
 ---
 
@@ -272,14 +542,19 @@
 
 ### 8.1 Compiler diagnostics
 
-- [x] lexer errors
-- [x] parser errors
+- [x] lexer reports unexpected characters and illegal tokens
+- [x] lexer reports unterminated block comments, strings, and templates
+- [x] parser reports expected-token and statement-terminator errors
+- [x] parser surfaces lexer diagnostics for illegal tokens
 - [x] semantic errors
 - [x] type errors if types exist
-- [x] module resolution errors
+- [x] module diagnostics for unsupported package specifiers
 - [x] lifetime / escape diagnostics
-- [x] source spans
-- [x] helpful messages
+- [x] source spans for parser and semantic diagnostics
+- [x] parser diagnostics include source spans
+- [x] semantic diagnostics include source spans
+- [x] helpful semantic diagnostics for common mutability mistakes
+- [x] duplicate binding diagnostics include destructured binding names
 
 ### 8.2 Runtime errors
 
@@ -287,6 +562,25 @@
 - [x] stack traces
 - [x] source locations in stack traces
 - [x] uncaught exception handling
+
+### 8.3 Control-flow semantic validation
+
+- [x] reject `return` outside functions
+- [x] reject `break` outside loops and switches
+- [x] reject `continue` outside loops
+- [x] validate labeled `break` / `continue` targets
+- [x] reject duplicate `default` clauses in `switch`
+- [x] reject optional chains as assignment/update targets
+- [x] reject `await` outside async functions
+- [x] reject `yield` outside generator functions
+- [x] reject `this` outside methods
+- [x] reject `super` outside derived class methods
+- [x] reject non-constructable local `new` targets
+- [x] reject non-constructable local `instanceof` targets
+- [x] reject invalid private member access
+- [x] reject invalid private member assignment
+- [x] reject duplicate constructors and private class members
+- [x] reject direct `super()` calls outside constructors
 
 ---
 
@@ -385,16 +679,16 @@ A memory-safety item may only be marked done when covered by focused tests.
 - [x] container references objects/arrays remain valid
 - [x] closure environments remain valid
 - [x] object/array insert operations retain or otherwise preserve stored values
-- [ ] object/array replacement releases previous stored values safely
+- [x] object/array replacement releases previous stored values safely
 - [x] closure environment cleanup releases captured values safely
 
 #### 9.5.5 Double-free and invalid use prevention
 
-- [ ] no double-free is possible for Jayess-managed values
-- [ ] no use-after-free is possible for Jayess-managed values
-- [ ] freed/closed runtime values cannot be reused silently
+- [x] no double-free is possible for Jayess-managed values
+- [x] no use-after-free is possible for Jayess-managed values
+- [x] freed/closed runtime values cannot be reused silently
 - [x] invalid value usage reports a runtime error or compiler diagnostic
-- [ ] pointer/reference validity is preserved across compiler, runtime, and native binding boundaries
+- [x] pointer/reference validity is preserved across compiler, runtime, and native binding boundaries
 
 #### 9.5.6 Native binding safety
 
@@ -415,7 +709,7 @@ A memory-safety item may only be marked done when covered by focused tests.
 - [x] non-escaping temporary is cleaned up at scope exit
 - [x] cleanup still runs on early return
 - [x] cleanup still runs on break/continue
-- [ ] object/array replacement does not leak previous value
+- [x] object/array replacement does not leak previous value
 - [x] double close of managed native handle is safe
 - [x] use after managed native handle close reports an error
 
@@ -441,6 +735,19 @@ A memory-safety item may only be marked done when covered by focused tests.
 ---
 
 ## 10. Standard library / runtime APIs
+
+### 10.0 Built-in globals
+
+- [x] semantic recognition for documented MVP globals (`console`, `print`, `sleep`, `readLine`, `readKey`)
+- [x] semantic recognition for numeric globals (`NaN`, `Infinity`)
+- [x] semantic recognition for numeric helper globals (`parseInt`, `parseFloat`, `isNaN`, `isFinite`)
+- [x] semantic recognition for standard namespace globals (`Math`, `JSON`)
+- [x] semantic recognition for standard error constructors (`Error`, `EvalError`, `RangeError`, `ReferenceError`, `SyntaxError`, `TypeError`, `URIError`, `AggregateError`)
+- [x] semantic recognition for standard collection/date/regexp constructors (`Array`, `Date`, `RegExp`, `Map`, `Set`, `WeakMap`, `WeakSet`)
+- [x] semantic recognition for standard binary-data constructors (`ArrayBuffer`, typed arrays, `DataView`) and `Symbol`
+- [x] semantic recognition for documented async/timer globals (`Promise`, `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `queueMicrotask`)
+- [x] semantic recognition for standard global utilities (`globalThis`, URI encode/decode helpers)
+- [x] runtime implementation validation for documented MVP globals
 
 ### 10.1 Process and environment
 
@@ -750,6 +1057,8 @@ auto-generated wrapping, manifest JSON, or direct native source imports as the l
 
 > **Note: Example wrapper**
 >
+>     import { bind } from "ffi"
+>
 >     export default {
 >       sources: ["./src/mylib.c"],
 >       includeDirs: ["./include"],
@@ -762,10 +1071,12 @@ auto-generated wrapping, manifest JSON, or direct native source imports as the l
 >
 > **Note: Editor-friendly placeholder exports**
 >
+>     import { bind } from "ffi"
+>
 >     const f = () => {};
 >     export const add = f;
 >
->     export default {
+>     export default bind({
 >       sources: ["./src/mylib.c"],
 >       includeDirs: ["./include"],
 >       cflags: [],
@@ -773,7 +1084,7 @@ auto-generated wrapping, manifest JSON, or direct native source imports as the l
 >       exports: {
 >         add: { symbol: "mylib_add", type: "function" }
 >       }
->     };
+>     });
 >
 > **Note: Example usage**
 >
@@ -860,7 +1171,7 @@ auto-generated wrapping, manifest JSON, or direct native source imports as the l
 ### 19.6 Build and compilation model
 
 - [x] sources listed by `*.bind.js` are compiled during build
-- [x] binding-listed native sources can be linked into emitted native executables
+- [x] binding-listed native sources and shared libraries can be linked into emitted native executables
 - [x] multiple `*.bind.js` files can be included in one build
 - [x] platform-specific native compilation rules are supported
 - [x] include path handling for runtime headers is supported
@@ -1158,21 +1469,26 @@ diagnosable and optimizable.
 ### 24.1 Core LLVM backend
 
 - [x] Jayess lowers to LLVM IR
+- [x] Jayess-facing LLVM package API surface and minimal IR builder are modeled for future compiler self-hosting
 - [x] LLVM IR can be emitted directly
 - [x] native executables can be built from LLVM IR output
-- [x] object files can be emitted directly as a supported artifact
+- [x] object files can be emitted directly as a supported artifact and from the CLI
 - [x] emitted bitcode if supported
 - [x] static libraries can be emitted if supported
 - [x] shared libraries can be emitted if supported
 
 ### 24.1a Shared library artifacts
 
-- [x] CLI can emit shared libraries directly
+- [x] CLI can emit target-aware shared libraries directly
 - [x] Linux shared library output uses `.so`
 - [x] macOS shared library output uses `.dylib`
 - [x] Windows shared library output uses `.dll`
 - [x] default shared library naming follows platform conventions
+- [x] shared library builds use target-specific clang linking, executable-local bundled/ref tool discovery, missing-tool diagnostics, optional LLVM C API object emission, and an internal lld C++ shim
+- [x] tooling compile plans route `--emit=shared` to shared-library build plans
 - [x] shared library emission is covered by tests
+- [x] platform distribution packages can be assembled under `dist/<platform>` with the compiler at package root, bundled LLVM/Clang/lld tools under `tools/bin`, LLVM runtime libraries, license notices, compressed archives, and checksums
+- [x] app distribution plans copy native shared libraries beside executables so users do not need separate library installation
 
 ### 24.2 Target and code generation support
 
@@ -1718,95 +2034,94 @@ full control, and easy integration with Jayess tooling and AST systems.
 - [x] serialization round-trip tests
 - [x] source span correctness tests
 
-## 33. Refactoring and maintainability
-
-This section tracks safe refactoring of large or hard-to-maintain files.
-
-Refactoring must improve structure without changing Jayess language behavior,
-compiler output, runtime behavior, diagnostics, or public APIs unless explicitly required.
-
-### Refactoring discipline
-
-When refactoring a large file, agents must:
-
-- choose one target file or package
-- identify one responsibility to extract
-- move only that responsibility
-- preserve behavior exactly
-- avoid broad renaming
-- avoid formatting unrelated code
-- avoid changing public APIs unless required
-- avoid mixing refactoring with feature work
-- run focused tests for the affected package
-- document what was moved and why
-
 ---
 
-### 33.1 Runtime refactoring
+## 33. Remaining compiler completion work
 
-- [x] refactor `jayess_runtime.c`
-- [x] refactor `jayess_runtime.h`
-- [x] split public runtime type declarations into a dedicated header
-- [x] split runtime value helpers if file is too large
-- [x] split string/buffer helpers if file is too large
-- [x] split object/array helpers if file is too large
-- [x] split error/exception helpers if file is too large
-- [x] split path/filesystem helpers if file is too large
-- [x] split bigint/numeric helpers if file is too large
-- [x] split typed-array/data-view helpers if file is too large
-- [x] split crypto/encoding helpers if file is too large
-- [x] split async scheduler/worker/process helpers if file is too large
-- [x] split network/TLS/HTTP helpers if file is too large
-- [x] split stream/event/compression helpers if file is too large
+This section tracks the practical work still needed before Jayess is a complete
+native JavaScript-like compiler. These are intentionally scoped to the current
+project direction: no package manager requirement, limited type-system goals, and
+native libraries supplied through explicit bindings.
 
----
+### 33.1 Real LLVM lowering
 
-### 33.2 Compiler refactoring
+- [ ] lower numeric, boolean, string, null, and undefined literals into runtime values
+- [ ] lower variable declarations, assignments, and lexical scopes into LLVM IR
+- [ ] lower arithmetic, comparison, logical, bitwise, nullish, and ternary expressions
+  - Progress: constant `main` return-code extraction folds function truthiness, identity/nullish equality, expression/logical-assignment identity propagation, expression materialization, fresh/reference expression `typeof` with whole-probe reference and logical reference evaluation, single-evaluation `typeof` probes, and primitive equality mismatches, object/array `typeof`, truthiness, conditional/comma/nullish identity materialization, identity/nullish equality, expression/logical-assignment identity propagation, expression materialization, fresh/reference expression `typeof`, and primitive equality mismatches, signed BigInt literal/binding arithmetic, unary bitwise-not, prefix/postfix updates, loose string/number/boolean equality, mixed string/number/boolean relational comparison with invalid-string side effects, shared signed relational ordering, switch matching, array/object member and index folding, spread folding, computed property and `in` keys, array/string index-key coercion including huge out-of-range keys, optional member/index/call folding, function- and object-returning IIFEs with fresh literal member/index, `in`, and `delete` folding, simple-parameter IIFE scalar returns with prefix side effects, block-bodied arrow IIFEs, implicit and bare-return undefined results, function declarations, function/var redeclarations, named function self-bindings with identity equality, parameter shadowing, default access, var redeclarations, and prefix function redeclarations, parameter var redeclarations, duplicate and hoisted direct locals, direct local cleanup and shadow restoration, missing/default-argument `undefined` handling, extra-argument-before-default side effects, and callee-before-argument side effects, primitive-left `instanceof`, `void` and `delete` side effects, bitwise/shift operations, arithmetic and bitwise/shift assignment, equality, assignment, or/and/nullish logical assignment, logical values, conditional/comma/nullish values, relational comparison, `typeof`, string coercion, truthiness, and strict primitive mismatch, function expressions/bindings and conditional/comma/nullish identity materialization, string and numeric relational comparison, primitive unary/binary numeric coercion with successful-probe side effects, bitwise/shift coercion, and compound assignment, primitive string concatenation with single coercion and left-to-right side effects, string `.length` and string index folding with out-of-range `undefined`, array literal `.length`, scalar index, and fresh spread folding with elision/out-of-range `undefined`, fresh object literal scalar property/index and fresh spread folding with computed keys and missing-property `undefined`, computed property-key string coercion for boolean and nullish values, function/object identity property and array index folding, member/index truthiness for folded scalar and identity values, exact boolean member/index equality, `typeof` nullish precedence for folded member/index values, delete expression truthiness with target/key side effects, fresh object `in` operator folding with single left/right evaluation, primitive-left `instanceof` folding with right operand evaluation, empty-constructor `new` expression truthiness, object identity, `typeof`, and spread argument side effects, numeric add operand single evaluation, add-assignment right operand single evaluation, member/index assignment and update target-key-value side effects, scalar and logical-assignment whole-probe evaluation, add-assignment, template interpolation including BigInt coercion and folded truthiness, empty-string loose numeric equality, loose boolean-number equality with single directional probes, loose nullish-vs-primitive equality, loose string-number/string-boolean equality with single directional probes, strict primitive equality mismatches with single comparison and reference-direction probes, strict boolean equality and boolean-value conditional whole-probe evaluation, loose/strict nullish equality, string concatenation, integer/string/nullish logical values with single whole-probe evaluation, string/unary/folded expression truthiness with single probe side effects, nullish coalesce whole-probe evaluation for integer, string, boolean, scalar, and reference values, logical identity/reference whole-probe evaluation and logical-and materialization coverage for object and function values, prefix/postfix update condition truthiness, prefix/postfix updates, comma and conditional expression whole-probe evaluation plus conditional, fresh object/array, empty-constructor `new`, and empty function-call expression statement and spread argument side effects with single discard evaluation, unary/binary bitwise, shift, `typeof`, `void`, block and labeled-statement side effects, labeled `break` side effects through blocks, branches, switches, and loops, labeled `continue` side effects through loops, non-matching labeled `break` block/label/branch/switch scan side-effect isolation, unknown-condition `for` initializer side effects, infinite constant loop return blocking, unknown control-flow unresolved-return/throw blocking, direct/block/labeled/try throw blocking, try/catch/finally unresolved-return blocking, try/finally non-return side effects, nested finally definite throw reachability, nested try-catch rethrow reachability, nested try-finally definite throw reachability, labeled try definite throw reachability, try definite throw reachability boundaries, constant for definite throw catch side effects, constant loop definite throw catch side effects, constant switch definite throw catch side effects, constant-if definite throw catch side effects, nested block definite throw catch side effects, definite throw catch/finally side effects and exit blocking, switch labeled `break` side effects, constant `if` branch side effects, nested constant `switch` side effects, nested constant loop side effects, switch case fallthrough side effects, constant true/false loop return expressions/assignments, do-while `break` side effects, and loop `break`/`continue` side-effect boundaries.
+- [ ] lower control flow statements (`if`, `switch`, loops, `break`, `continue`, labels`)
+- [ ] lower `return`, `throw`, `try`, `catch`, and `finally` with predictable cleanup
+- [ ] preserve source locations in generated IR diagnostics for lowered statements
 
-- [x] refactor AST code
-- [x] refactor lexer code
-- [x] refactor parser code
-- [x] refactor semantic code
-- [x] refactor type system code
-- [x] refactor lifetime/escape code
-- [x] refactor lowering code
-- [x] refactor IR code
-- [x] refactor codegen code
-- [x] refactor LLVM backend code
-- [x] refactor target/platform code
-- [x] refactor compiler orchestration code
-- [x] refactor CLI/cmd code
-- [x] refactor native binding build code
+### 33.2 Dynamic values, objects, and arrays
 
----
+- [x] implement a runtime value representation for Jayess dynamic values
+- [x] implement object allocation, property lookup, property write, and computed keys
+- [x] implement array allocation, indexed read/write, growth, and length behavior
+- [x] implement object spread, array spread, and destructuring runtime behavior
+- [x] implement `for...in` and `for...of` runtime support for supported object/array shapes
+- [x] document dynamic object/array runtime ownership and mutation rules
 
-### 33.3 Verification after refactoring
+### 33.3 Functions and closures
 
-After every refactor, agents must verify behavior is unchanged.
+- [x] implement callable runtime values for lowered function declarations and function expressions
+- [x] implement runtime call frames, argument passing, default parameters, and rest parameters
+- [x] implement runtime closure environment allocation and captured variable access
+- [x] implement runtime arrow-function lexical `this`
+- [x] implement `.bind`, `.call`, and `.apply` runtime behavior
+- [x] cover recursive and higher-order function execution in tests
 
-- [x] existing tests still pass
-- [x] affected package tests pass
-- [x] compiler still builds
-- [x] generated LLVM IR is unchanged where behavior should be unchanged
-- [x] native executable output is unchanged for existing fixtures
-- [x] diagnostics remain unchanged unless intentionally improved
-- [x] source spans remain correct
-- [x] no public API was changed accidentally
-- [x] no generated files were manually edited
-- [x] no unrelated files were reformatted
+### 33.4 Classes and dispatch
 
----
+- [x] define runtime class instance layout for fields, private fields, methods, and accessors
+- [x] implement runtime constructor, `new`, `this`, and `super` support for lowering
+- [x] implement runtime dispatch-table behavior for methods
+- [x] implement runtime static fields and static initialization blocks
+- [x] implement runtime getter/setter invocation and private member access checks
+- [x] add executable tests for inheritance and method dispatch
 
-### 33.4 Refactoring acceptance criteria
+### 33.5 Modules
 
-A refactor is only complete when:
+- [x] wire module graph ordering into backend module initialization
+- [x] lower imports and exports into runtime module bindings
+- [x] implement live binding behavior where required by Jayess semantics
+- [x] initialize modules exactly once and preserve deterministic order
+- [x] add executable tests for local imports, re-exports, defaults, and namespace imports
 
-- [x] target file line count is reduced or responsibility is clearer
-- [x] extracted code has a clear single purpose
-- [x] package boundaries remain clean
-- [x] imports remain non-circular
-- [x] tests pass
-- [x] behavior is preserved
-- [x] future changes are easier to make incrementally
+### 33.6 Native bindings
+
+- [x] compile binding `sources` as part of the main compiler workflow
+- [x] link binding object files and declared libraries into executable/shared outputs
+- [x] resolve binding include dirs and library dirs relative to the binding module
+- [x] validate exported binding symbols against generated wrapper expectations
+- [x] surface clear diagnostics for missing headers, missing libraries, and missing symbols
+- [x] support binding-owned shared library runtime asset collection for app distributions
+
+### 33.7 App distribution
+
+- [x] expose app distribution from the compiler CLI, such as `jayess package` or `--emit=dist`
+- [x] copy executable plus required `.so`, `.dylib`, or `.dll` files into an app dist folder
+- [x] emit diagnostics for unresolved runtime shared library dependencies
+- [x] preserve project-provided binding library licenses in app distributions when supplied
+- [x] document static-vs-shared native binding shipping behavior
+- [x] add end-to-end tests for app dist output layout
+
+### 33.8 Toolchain and release readiness
+
+- [ ] rebuild the bundled LLVM toolchain with Clang and lld enabled for release packages
+- [x] verify `jayess-dist` with `--strict-tools=true` from a clean checkout
+- [x] verify compiler SDK archives on Linux, macOS, and Windows targets
+- [x] document required platform SDK boundaries for macOS and Windows linking
+- [x] add release smoke tests that compile examples from the unpacked SDK
+- [x] keep `refs` and `old_version` read-only during release packaging
+
+### 33.9 Recommended implementation order
+
+- [x] implement core runtime value representation before object/function/class lowering
+- [ ] implement expression and statement lowering before advanced module execution
+- [ ] implement dynamic objects and arrays before class field/private-member behavior
+- [ ] integrate native binding compile/link before exposing app distribution in the CLI
+- [x] add executable tests incrementally for each lowering feature as it lands
+- [x] keep examples aligned with the actually executable subset during compiler completion
 
 ---

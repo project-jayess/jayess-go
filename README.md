@@ -66,9 +66,10 @@ Current class scope is intentionally small:
 - `super.property` access for inherited properties
 
 Manual native binding interop is available:
-- `import { add } from "./native/math.bind.js";`
-- `*.bind.js` binding files declare native sources, include dirs, flags, and exported symbols
-- `*.bind.js` can also apply per-platform source/include/flag overrides through `platforms.linux`, `platforms.darwin`, and `platforms.windows`
+- `import { add } from "./native/math.js";`
+- binding files are normal `.js` files that import `bind` from `"ffi"` and `export default bind(...)`
+- binding files declare native sources, include dirs, flags, and exported symbols
+- binding files can also apply per-platform source/include/flag overrides through `platforms.linux`, `platforms.darwin`, and `platforms.windows`
 - imported native binding calls receive boxed Jayess runtime values and return boxed Jayess runtime values
 - binding implementations should include [jayess_runtime.h](/C:/Users/ncksd/Documents/it/jayess/jayess-go/runtime/jayess_runtime.h)
 - C++ wrappers should export C ABI entrypoints with `extern "C"`
@@ -79,27 +80,35 @@ The repo now also ships a native package example surface through `node_modules`:
 - `parseRequest(...)` is backed by PicoHTTPParser through a Jayess native wrapper module
 - `formatResponse(...)` currently forwards to the built-in HTTP response formatter
 
-Manual bindings are declared in `*.bind.js`:
+Manual bindings are declared in normal `.js` files by exporting `bind(...)` as
+the default export:
 
 ```js
+import { bind } from "ffi"
+
 const f = () => {};
 export const add = f;
 
-export default {
+export default bind({
   sources: ["./math.c", "./helper.c"],
   includeDirs: ["./include"],
+  libraryDirs: ["./vendor/lib"],
+  sharedLibraries: ["mylib", "./vendor/libhelper.so"],
+  licenseFiles: ["./vendor/LICENSE.helper"],
   cflags: ["-DMY_BINDING=1"],
   ldflags: [],
   exports: {
     add: { symbol: "mylib_add", type: "function" }
   }
-};
+});
 ```
 
 Platform-specific native flags can be expressed directly in the same binding:
 
 ```js
-export default {
+import { bind } from "ffi";
+
+export default bind({
   sources: ["./webview.cpp"],
   ldflags: [],
   platforms: {
@@ -110,19 +119,29 @@ export default {
   exports: {
     createWindowNative: { symbol: "jayess_webview_create_window", type: "function" }
   }
-};
+});
 ```
 
 The named placeholder export keeps editors/formatters/linting happy for imports like:
 
 ```js
-import { add } from "./math.bind.js";
+import { add } from "./math.js";
 ```
 
-while the compiler still treats `export default` as the source of truth for the native binding metadata.
-`*.bind.js` files are native binding modules, not normal Jayess source modules,
-so Jayess only supports named imports from them. Bare, default, and namespace
-imports are rejected.
+while the compiler treats `export default bind(...)` as the source of truth for
+native binding metadata. A `.js` file without that default export remains a
+normal Jayess source module. Binding modules support named imports for exported
+native symbols; bare, default, and namespace imports are rejected.
+The object passed to `bind(...)` is extracted as a literal binding manifest:
+`sources`, `includeDirs`, `libraryDirs`, `sharedLibraries`, `cflags`,
+`ldflags`, `licenseFiles`, `platforms`, and `exports` must be declared with
+object, array, and string literals. `sharedLibraries` can name a library such as
+`"sqlite3"` (linked as `-lsqlite3`) or point at a prebuilt shared library file
+such as `"./vendor/lib/libsqlite3.so"`. `licenseFiles` lists project-provided
+license or notice files that should be copied into app distributions.
+When a module imports one of these `.js` binding files, the resolver parses the
+target file, validates the requested named imports against `exports`, and feeds
+the extracted manifest into native build planning.
 
 Bindings can also expose imported module values with `type: "value"`. Those are
 initialized by calling a zero-argument native getter during module startup.
@@ -157,9 +176,6 @@ Ownership rules for wrapper authors:
 
 CLI commands currently available:
 - `jayess <input.js>` or `jayess compile <input.js>`
-- `jayess run <input.js> [args...]`
-- `jayess test [path|file.test.js]`
-- `jayess init [directory]`
 
 Useful compiler/backend flags:
 - `--emit=llvm|bc|obj|lib|shared|exe`
@@ -170,14 +186,108 @@ Useful compiler/backend flags:
 - `--code-model=small|medium|large|kernel`
 
 Examples:
-- `jayess --emit=bc --target=linux-x64 main.js`
+- `jayess --emit=llvm --target=linux-x64 main.js`
 - `jayess --emit=obj --target=linux-x64 main.js`
-- `jayess --emit=lib --target=linux-x64 main.js`
 - `jayess --emit=shared --target=linux-x64 main.js`
-- `jayess --emit=exe --opt=O2 --cpu=native main.js`
-- `jayess --emit=obj --feature=+sse2 --feature=-avx --reloc=pic --code-model=small main.js`
 
-`jayess test` discovers `*.test.js` files, compiles each test for the host target, runs the resulting native executable, and treats exit code `0` as pass.
+Current backend support includes LLVM IR, object-file, and shared-library
+emission from LLVM IR.
+Jayess also reserves `import ... from "llvm"` as the Jayess-facing compiler
+construction package. Its current model exposes API groups for contexts,
+modules, builders, types, values, targets, object emission, and linking, backed
+by the internal LLVM C API and lld shim work. The Go package now includes a
+minimal IR builder model for modules, functions, basic blocks, `i32`/`void`
+types, integer constants, and return instructions. This is the public surface
+intended to let future Jayess code build compiler pieces without importing Go
+internals.
+The CLI maps `--emit=obj` to LLVM C API object emission when the compiler is
+built with `-tags jayess_llvmc`; otherwise it writes temporary IR under
+`temp/jayess-build` and invokes a target-specific `clang -c` command.
+The selected target controls default shared-library naming and linker mode:
+Linux emits `.so` with `-shared`, macOS emits `.dylib` with `-dynamiclib`,
+and Windows emits `.dll` with `-shared`. The CLI maps `--emit=shared` to a
+target-specific `clang` command unless both internal LLVM object emission and
+internal lld linking are enabled. External tools are resolved from
+`JAYESS_TOOLCHAIN`, `tools/<target>/bin` beside the `jayess` executable,
+working-directory `tools/<target>/bin`, built LLVM directories under
+`refs/llvm-project`, then `PATH`.
+Missing tools are reported before temporary build files are written.
+Builds made with `-tags jayess_llvmc` can use the LLVM C API through cgo to emit
+the object file internally for `--emit=obj` and `--emit=shared`. When an `lld`
+C++ shim is linked in with `-tags jayess_lld` as well, Jayess
+routes final shared-library linking through `lld::lldMain` in process instead of
+an external `clang` driver. That build mode expects lld/LLVM libraries from a
+built `refs/llvm-project` tree or equivalent linker/library paths. A cloned
+LLVM source tree alone is not enough because LLVM generates headers such as
+`llvm/Config/abi-breaking.h` during its CMake configure step.
+
+Distribution packages are built with the separate `jayess-dist` helper:
+
+```bash
+go run ./cmd/jayess-dist --platform=linux-x64 --version=0.1.0
+```
+
+The package is written under `dist/<platform>/jayess-<version>-<platform>/`.
+Its layout keeps `jayess` at the package root and copies bundled LLVM tools into
+`tools/bin`, which is one of the compiler's automatic toolchain search
+locations. By default the package builder tries to include `clang`,
+`clang++`, `lld`, `ld.lld`, `llvm-as`, and `llc` from
+`refs/llvm-project/build/bin`, plus runtime LLVM libraries such as `libLLVM`
+from `refs/llvm-project/build/lib`. LLVM, Clang, lld, and LLVM third-party
+notice files are copied into `licenses/`. Missing tools are reported as packaging
+errors by default so release packages do not accidentally ship without Clang or
+lld. Use `--strict-tools=false` only for local partial-package checks. Release
+packages should be produced after LLVM has been configured with Clang and lld
+and built with the needed tool targets.
+
+Bundled LLVM, Clang, and lld cover Jayess IR assembly, object emission, and
+linking mechanics, but they do not replace every vendor platform SDK:
+
+- Linux targets expect the target sysroot, C runtime startup files, system
+  libraries, and native package headers/libraries to come from the build
+  machine, a configured cross sysroot, or explicit binding paths.
+- macOS targets require Apple's SDK and platform libraries from Xcode or the
+  Command Line Tools for real system-framework linking. Jayess can select the
+  macOS target and produce `.dylib` link commands, but it does not redistribute
+  the Apple SDK.
+- Windows targets require a Windows C runtime/import-library environment, such
+  as MSVC/Windows SDK libraries or a MinGW-w64 sysroot, for final executable or
+  DLL links. Jayess packages may include LLVM tools, but they do not bundle
+  Microsoft SDK files.
+- Native binding manifests should declare project-owned include/library paths
+  through `includeDirs`, `libraryDirs`, `sharedLibraries`, and `licenseFiles`.
+  Platform SDK files should remain external unless the license explicitly allows
+  redistribution in the app distribution.
+
+The compiler SDK does not bundle SDL, GLFW, raylib, curl, GTK, or other native
+package refs by default. Developers bind those libraries from their own project
+or installed SDKs. When an application is packaged, Jayess can copy the bound
+runtime shared libraries into that application's distribution folder.
+
+Binding-owned distribution inputs should stay with the project, for example:
+
+```text
+my-app/
+  native/
+    mylib.js
+    include/
+    lib/
+      libmylib.so
+```
+
+For a full local toolchain package, configure LLVM with both Clang and lld:
+
+```bash
+cmake -S refs/llvm-project/llvm -B refs/llvm-project/build \
+  -DLLVM_ENABLE_PROJECTS="clang;lld" \
+  -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build refs/llvm-project/build --target clang clang++ lld llvm-as llc
+```
+
+The dist helper also writes a compressed artifact beside the package directory:
+Linux/macOS packages use `.tar.gz`, Windows packages use `.zip`, and each
+archive gets a `.sha256` checksum file.
 
 Local relative imports are also supported in MVP form:
 
@@ -241,7 +351,7 @@ Current export support is limited to:
 Native binding import example:
 
 ```javascript
-import { add, greet } from "./native/math.bind.js";
+import { add, greet } from "./native/math.js";
 
 function main(args) {
   console.log(add(3, 4));
@@ -250,14 +360,16 @@ function main(args) {
 }
 ```
 
-Example `math.bind.js`:
+Example `math.js` native binding module:
 
 ```javascript
+import { bind } from "ffi";
+
 const f = () => {};
 export const add = f;
 export const greet = f;
 
-export default {
+export default bind({
   sources: ["./math.c"],
   includeDirs: ["./include"],
   cflags: [],
@@ -266,7 +378,7 @@ export default {
     add: { symbol: "jayess_add", type: "function" },
     greet: { symbol: "jayess_greet", type: "function" }
   }
-};
+});
 ```
 
 Example C binding implementation:
@@ -287,49 +399,93 @@ $env:GOFLAGS="-buildvcs=false"
 go build -o build\windows\jayess.exe .\cmd\jayess
 ```
 
+## Build distributable Jayess SDK
+
+Build the compiler and package it with the bundled toolchain under `dist/`:
+
+```bash
+go run ./cmd/jayess-dist --platform=linux-x64 --version=0.1.0
+```
+
+The output is:
+
+```text
+dist/linux-x64/jayess-0.1.0-linux-x64/
+  jayess
+  README.txt
+  licenses/
+  tools/
+    bin/
+    lib/
+dist/linux-x64/jayess-0.1.0-linux-x64.tar.gz
+dist/linux-x64/jayess-0.1.0-linux-x64.tar.gz.sha256
+```
+
+Use this command for release packages so Jayess ships as one SDK containing the
+compiler, bundled LLVM/Clang/lld tools, LLVM runtime libraries, and license
+notices.
+
+## Build distributable Jayess apps
+
+Applications that use native binding packages may need runtime shared libraries
+beside the executable. Jayess models this as an app distribution step: static
+libraries are linked into the executable, while `.so`, `.dylib`, and `.dll`
+runtime libraries are copied into the app output directory. Build an app
+distribution from an already-built executable with either CLI form:
+
+```bash
+go run ./cmd/jayess compile --target=linux-x64 --emit=dist --executable build/my-app -o dist/my-app src/main.js
+go run ./cmd/jayess package --target=linux-x64 --executable build/my-app -o dist/my-app src/main.js
+```
+
+The app distribution layout is:
+
+```text
+dist/my-app/
+  my-app
+  libglfw.so
+  libcurl.so
+  licenses/
+    LICENSE.glfw
+    LICENSE.curl
+```
+
+On Windows, required DLLs are copied beside `my-app.exe`. This keeps the built
+app runnable without asking users to install the native package libraries
+separately. The runtime asset resolver uses the native binding build plan:
+`libraryDirs` tells Jayess where to search, and `sharedLibraries` tells it which
+shared libraries must be shipped with the executable. Static libraries passed
+through `ldflags` or non-shared archive paths are treated as link-time inputs and
+are not copied into the app distribution. Path-style shared library entries such
+as `"./vendor/lib/libhelper.so"` are resolved relative to the binding module and
+copied directly. Named shared libraries such as `"glfw"` are searched in
+`libraryDirs` using the target platform's shared-library names. Missing runtime
+shared libraries are reported as diagnostics and the app distribution is not
+created. Files listed in `licenseFiles` are copied into `licenses/` beside the
+packaged app.
+This is how projects that bind SDL, GLFW, raylib, curl, GTK, or other native
+libraries ship everything needed by the end user without requiring separate
+library installation.
+
 ## Run
 
 ```bash
 go run ./cmd/jayess --target=host --emit=llvm -o build/hello.ll examples/hello.js
-go run ./cmd/jayess --target=host --emit=obj -o build/hello.o examples/hello.js
-go run ./cmd/jayess --target=host --emit=lib -o build/libhello.a examples/hello.js
 go run ./cmd/jayess --target=host --emit=shared -o build/libhello.so examples/hello.js
 go run ./cmd/jayess --target=host --emit=llvm -o build/import.ll examples/import.js
 ```
 
-This emits LLVM IR text to `build/hello.ll`.
-Use `--opt=O0`, `O1`, `O2`, `O3`, or `Oz` to control clang optimization for object and executable builds. `O0` is the default.
+`--emit=llvm` emits LLVM IR text to `build/hello.ll`.
+`--emit=shared` builds the shared library at `build/libhello.so`.
+Use `--opt=O0`, `O1`, `O2`, `O3`, or `Oz` to carry optimization intent through the command surface. `O0` is the default.
 
-To build a native executable once `clang` is installed and on `PATH`:
+The CLI parses `bc`, `obj`, `lib`, and `exe` emit modes for compatibility with
+the older command surface, but this Go backend currently executes only `llvm`
+and shared-library emission.
 
-```bash
-go run ./cmd/jayess --target=host --emit=exe -o build/hello.exe examples/hello.js
-go run ./cmd/jayess --target=host --emit=exe --opt=O2 -o build/hello-opt.exe examples/hello.js
-```
-
-Warnings are shown by default. Use `--warnings=none` to suppress them temporarily, or `--warnings=error` to fail the build when warnings are emitted:
-
-```bash
-go run ./cmd/jayess --warnings=error --target=host --emit=llvm -o build/hello.ll examples/hello.js
-```
-
-When treating warnings as errors, specific warning categories can be allowed during migrations:
-
-```bash
-go run ./cmd/jayess --warnings=error --allow-warning=deprecation --target=host --emit=llvm -o build/hello.ll examples/hello.js
-```
-
-On Windows, the default is now native executable output, so this also works:
-
-```bash
-.\build\windows\jayess.exe -o .\examples\build\hello.exe .\examples\hello.js
-```
-
-That defaults to `build/hello.exe`.
-
-The current executable path is:
+The current CLI path is:
 
 1. Jayess source
-2. Jayess LLVM IR text
-3. `clang`
-4. native executable
+2. parser validation
+3. MVP LLVM IR lowering
+4. LLVM IR output or shared-library toolchain execution

@@ -1,0 +1,7 @@
+package resolver
+
+func narrowestInitializationBatchIndexes(widths []int) ([]int, int) {
+	return initializationBatchExtremaIndexes(widths, func(width int, selectedWidth int) bool {
+		return width < selectedWidth
+	})
+}

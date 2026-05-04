@@ -18,254 +18,65 @@ type State struct {
 	Column int
 }
 
-type DiagnosticError struct {
-	Line    int
-	Column  int
-	Message string
-}
-
-func (e *DiagnosticError) Error() string {
-	if e == nil {
-		return ""
-	}
-	if e.Line > 0 {
-		return fmt.Sprintf("%d:%d: %s", e.Line, e.Column, e.Message)
-	}
-	return e.Message
-}
-
 func New(input string) *Lexer {
 	return &Lexer{input: []rune(input), line: 1, column: 1}
 }
 
 func (l *Lexer) NextToken() Token {
-	l.skipWhitespace()
-
-	startLine := l.line
-	startColumn := l.column
-	ch := l.current()
-	if ch == 0 {
-		return Token{Type: TokenEOF, Line: startLine, Column: startColumn}
+	if illegal := l.skipIgnored(); illegal != nil {
+		return *illegal
 	}
 
-	switch ch {
-	case '`':
-		l.advance()
-		literal, ok := l.readTemplate()
-		if !ok {
-			return Token{Type: TokenIllegal, Literal: "unterminated template", Line: startLine, Column: startColumn}
-		}
-		return Token{Type: TokenTemplate, Literal: literal, Line: startLine, Column: startColumn}
-	case '(':
-		l.advance()
-		return Token{Type: TokenLParen, Literal: "(", Line: startLine, Column: startColumn}
-	case ')':
-		l.advance()
-		return Token{Type: TokenRParen, Literal: ")", Line: startLine, Column: startColumn}
-	case '{':
-		l.advance()
-		return Token{Type: TokenLBrace, Literal: "{", Line: startLine, Column: startColumn}
-	case '}':
-		l.advance()
-		return Token{Type: TokenRBrace, Literal: "}", Line: startLine, Column: startColumn}
-	case '[':
-		l.advance()
-		return Token{Type: TokenLBracket, Literal: "[", Line: startLine, Column: startColumn}
-	case ']':
-		l.advance()
-		return Token{Type: TokenRBracket, Literal: "]", Line: startLine, Column: startColumn}
-	case ';':
-		l.advance()
-		return Token{Type: TokenSemicolon, Literal: ";", Line: startLine, Column: startColumn}
-	case '=':
-		if l.peek() == '=' && l.peekSecond() == '=' {
-			l.advance()
-			l.advance()
-			l.advance()
-			return Token{Type: TokenStrictEq, Literal: "===", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '=' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenEq, Literal: "==", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '>' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenArrow, Literal: "=>", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenAssign, Literal: "=", Line: startLine, Column: startColumn}
-	case '!':
-		if l.peek() == '=' && l.peekSecond() == '=' {
-			l.advance()
-			l.advance()
-			l.advance()
-			return Token{Type: TokenStrictNe, Literal: "!==", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '=' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenNe, Literal: "!=", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenBang, Literal: "!", Line: startLine, Column: startColumn}
-	case '?':
-		if l.peek() == '?' && l.peekSecond() == '=' {
-			l.advance()
-			l.advance()
-			l.advance()
-			return Token{Type: TokenNullishAssign, Literal: "??=", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '.' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenQuestionDot, Literal: "?.", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '?' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenNullish, Literal: "??", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenQuestion, Literal: "?", Line: startLine, Column: startColumn}
-	case '&':
-		if l.peek() == '&' && l.peekSecond() == '=' {
-			l.advance()
-			l.advance()
-			l.advance()
-			return Token{Type: TokenAndAssign, Literal: "&&=", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '&' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenAnd, Literal: "&&", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenBitAnd, Literal: "&", Line: startLine, Column: startColumn}
-	case '|':
-		if l.peek() == '|' && l.peekSecond() == '=' {
-			l.advance()
-			l.advance()
-			l.advance()
-			return Token{Type: TokenOrAssign, Literal: "||=", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '|' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenOr, Literal: "||", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenBitOr, Literal: "|", Line: startLine, Column: startColumn}
-	case '^':
-		l.advance()
-		return Token{Type: TokenBitXor, Literal: "^", Line: startLine, Column: startColumn}
-	case '~':
-		l.advance()
-		return Token{Type: TokenBitNot, Literal: "~", Line: startLine, Column: startColumn}
-	case '<':
-		if l.peek() == '<' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenShiftLeft, Literal: "<<", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '=' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenLte, Literal: "<=", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenLt, Literal: "<", Line: startLine, Column: startColumn}
-	case '>':
-		if l.peek() == '>' && l.peekSecond() == '>' {
-			l.advance()
-			l.advance()
-			l.advance()
-			return Token{Type: TokenUnsignedShift, Literal: ">>>", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '>' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenShiftRight, Literal: ">>", Line: startLine, Column: startColumn}
-		}
-		if l.peek() == '=' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenGte, Literal: ">=", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenGt, Literal: ">", Line: startLine, Column: startColumn}
-	case ',':
-		l.advance()
-		return Token{Type: TokenComma, Literal: ",", Line: startLine, Column: startColumn}
-	case ':':
-		l.advance()
-		return Token{Type: TokenColon, Literal: ":", Line: startLine, Column: startColumn}
-	case '.':
-		if l.peek() == '.' && l.peekSecond() == '.' {
-			l.advance()
-			l.advance()
-			l.advance()
-			return Token{Type: TokenEllipsis, Literal: "...", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenDot, Literal: ".", Line: startLine, Column: startColumn}
-	case '#':
-		l.advance()
-		return Token{Type: TokenHash, Literal: "#", Line: startLine, Column: startColumn}
-	case '+':
-		if l.peek() == '=' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenAddAssign, Literal: "+=", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenPlus, Literal: "+", Line: startLine, Column: startColumn}
-	case '-':
-		if l.peek() == '=' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenSubAssign, Literal: "-=", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenMinus, Literal: "-", Line: startLine, Column: startColumn}
-	case '*':
-		if l.peek() == '=' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenMulAssign, Literal: "*=", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenStar, Literal: "*", Line: startLine, Column: startColumn}
-	case '/':
-		if l.peek() == '=' {
-			l.advance()
-			l.advance()
-			return Token{Type: TokenDivAssign, Literal: "/=", Line: startLine, Column: startColumn}
-		}
-		l.advance()
-		return Token{Type: TokenSlash, Literal: "/", Line: startLine, Column: startColumn}
-	case '"':
-		l.advance()
-		literal, ok := l.readString()
-		if !ok {
-			return Token{Type: TokenIllegal, Literal: "unterminated string", Line: startLine, Column: startColumn}
-		}
-		return Token{Type: TokenString, Literal: literal, Line: startLine, Column: startColumn}
+	line, column := l.line, l.column
+	ch := l.current()
+	if ch == 0 {
+		return Token{Type: TokenEOF, Line: line, Column: column}
 	}
 
 	if isIdentifierStart(ch) {
 		literal := l.readIdentifier()
-		return Token{Type: lookupIdent(literal), Literal: literal, Line: startLine, Column: startColumn}
+		return Token{Type: lookupIdent(literal), Literal: literal, Line: line, Column: column}
 	}
 	if unicode.IsDigit(ch) {
-		literal, isBigInt := l.readNumber()
-		if isBigInt {
-			return Token{Type: TokenBigInt, Literal: literal, Line: startLine, Column: startColumn}
+		literal, big := l.readNumber()
+		if big {
+			return Token{Type: TokenBigInt, Literal: literal, Line: line, Column: column}
 		}
-		return Token{Type: TokenNumber, Literal: literal, Line: startLine, Column: startColumn}
+		return Token{Type: TokenNumber, Literal: literal, Line: line, Column: column}
+	}
+
+	switch ch {
+	case '"', '\'':
+		quote := ch
+		l.advance()
+		literal, ok := l.readString(quote)
+		if !ok {
+			return Token{Type: TokenIllegal, Literal: "unterminated string", Line: line, Column: column}
+		}
+		return Token{Type: TokenString, Literal: literal, Line: line, Column: column}
+	case '`':
+		l.advance()
+		literal, ok := l.readTemplate()
+		if !ok {
+			return Token{Type: TokenIllegal, Literal: "unterminated template", Line: line, Column: column}
+		}
+		return Token{Type: TokenTemplate, Literal: literal, Line: line, Column: column}
+	}
+
+	if token, ok := l.readPunctuation(line, column); ok {
+		return token
 	}
 
 	l.advance()
-	return Token{Type: TokenIllegal, Literal: string(ch), Line: startLine, Column: startColumn}
+	return Token{Type: TokenIllegal, Literal: fmt.Sprintf("unexpected character %q", ch), Line: line, Column: column}
+}
+
+func (l *Lexer) Snapshot() State {
+	return State{Pos: l.pos, Line: l.line, Column: l.column}
+}
+
+func (l *Lexer) Restore(state State) {
+	l.pos = state.Pos
+	l.line = state.Line
+	l.column = state.Column
 }
