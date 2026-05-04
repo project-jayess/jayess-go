@@ -36,3 +36,4 @@ build/
 .gocache/
 examples/build/
 Agents.MD
+temp
