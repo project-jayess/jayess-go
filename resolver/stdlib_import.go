@@ -20,6 +20,7 @@ var stdlibImportPaths = map[string]struct{}{
 	"process":       {},
 	"stream":        {},
 	"tcp":           {},
+	"terminal":      {},
 	"tls":           {},
 	"udp":           {},
 	"url":           {},

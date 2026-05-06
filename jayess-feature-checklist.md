@@ -820,6 +820,18 @@ A memory-safety item may only be marked done when covered by focused tests.
 - [x] piping
 - [x] backpressure handling
 
+### 10.7 OS and CLI runtime implementation
+
+- [x] Go-side stdin/stdout/stderr stream services are implemented
+- [x] Go-side process exit code state is implemented
+- [x] Go-side child process spawn/exec helpers are implemented
+- [x] Go-side filesystem operation helpers are implemented
+- [x] Go-side file read/write stream helpers are implemented
+- [x] Go-side terminal detection helpers are implemented
+- [x] Terminal standard-library surface is declared
+- [x] OS/CLI runtime services are documented in `docs/os_cli_runtime.md`
+- [x] OS/CLI runtime service tests are covered under `test/`
+
 ---
 
 ## 11. Networking

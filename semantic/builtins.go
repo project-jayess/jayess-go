@@ -36,6 +36,7 @@ var builtinGlobals = []string{
 	"stream",
 	"Symbol",
 	"tcp",
+	"terminal",
 	"tls",
 	"udp",
 	"url",
