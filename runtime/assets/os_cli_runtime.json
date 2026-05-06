@@ -1,0 +1,6 @@
+{
+  "name": "jayess-os-cli-runtime",
+  "description": "Runtime manifest for Jayess OS and CLI standard-library services.",
+  "modules": ["child_process", "fs", "process", "stream", "terminal"],
+  "packaging": "included when OS/CLI standard-library modules are imported"
+}

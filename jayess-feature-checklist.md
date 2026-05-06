@@ -832,6 +832,15 @@ A memory-safety item may only be marked done when covered by focused tests.
 - [x] OS/CLI runtime services are documented in `docs/os_cli_runtime.md`
 - [x] OS/CLI runtime service tests are covered under `test/`
 
+### 10.8 OS and CLI runtime integration
+
+- [x] OS/CLI stdlib calls lower to direct runtime symbols in LLVM IR
+- [x] process stdin/stdout/stderr stream operations lower to runtime symbols
+- [x] OS/CLI stdlib imports trigger automatic app distribution runtime assets
+- [x] CLI OS/runtime example exists under `examples/`
+- [x] CLI OS/runtime example compiles to LLVM in smoke tests
+- [x] OS/CLI runtime service smoke test runs filesystem, stream, process, child process, and terminal helpers
+
 ---
 
 ## 11. Networking

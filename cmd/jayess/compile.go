@@ -63,7 +63,14 @@ func compile(cfg cliConfig) error {
 		if len(bindingPlan.Diagnostics) != 0 {
 			return fmt.Errorf("binding plan is not packageable: %v", bindingPlanDiagnosticMessages(bindingPlan.Diagnostics))
 		}
-		plan := appdist.PlanApplication(cfg.executablePath, out, bindingPlan, target.Name)
+		plan := appdist.PlanApplicationWithStdlibImports(
+			cfg.executablePath,
+			out,
+			bindingPlan,
+			target.Name,
+			stdlibImportsFromProgram(input.Program),
+			"runtime/assets",
+		)
 		if len(plan.Diagnostics) != 0 {
 			return fmt.Errorf("app distribution plan has diagnostics: %v", plan.Diagnostics)
 		}

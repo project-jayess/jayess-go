@@ -30,6 +30,36 @@ func TestCLIEmitsAppDistributionFromExecutable(t *testing.T) {
 	requireFile(t, filepath.Join(output, "demo"))
 }
 
+func TestCLIAppDistributionIncludesOSCLIRuntimeAssetForImports(t *testing.T) {
+	root := cliRepoRoot(t)
+	dir := cliTempDir(t, root, "cli-dist-os-cli-*")
+	input := filepath.Join(dir, "main.js")
+	executable := filepath.Join(dir, "build", "demo")
+	output := filepath.Join(dir, "dist", "demo")
+	if err := os.WriteFile(input, []byte(`
+		import "fs";
+		import "process";
+		import "terminal";
+		function main() {
+			fs.writeFile("out.txt", "hello");
+			process.stdout.write("done");
+			return terminal.supportsColor(process.stdout) ? 0 : 0;
+		}
+	`), 0o644); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(executable), 0o755); err != nil {
+		t.Fatalf("create executable dir: %v", err)
+	}
+	if err := os.WriteFile(executable, []byte("fake executable"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	runJayessCLI(t, root, "compile", "--target=linux-x64", "--emit=dist", "--executable", executable, "-o", output, input)
+	requireFile(t, filepath.Join(output, "demo"))
+	requireFile(t, filepath.Join(output, "runtime", "os_cli_runtime.json"))
+}
+
 func TestCLIPackageCommandUsesDistEmit(t *testing.T) {
 	root := cliRepoRoot(t)
 	dir := cliTempDir(t, root, "cli-package-*")

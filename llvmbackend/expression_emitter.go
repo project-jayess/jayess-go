@@ -14,13 +14,15 @@ type ExpressionEmitter struct {
 	slotIndex   int
 	blockIndex  int
 
-	locals       map[string]localSlot
-	declarations []Declaration
-	declared     map[string]struct{}
-	globals      []Global
-	body         []string
-	scopes       []map[string]scopedLocal
-	lifetimePlan *lifetime.Plan
+	locals           map[string]localSlot
+	stdlibBindings   map[string]stdlibBinding
+	stdlibNamespaces map[string]string
+	declarations     []Declaration
+	declared         map[string]struct{}
+	globals          []Global
+	body             []string
+	scopes           []map[string]scopedLocal
+	lifetimePlan     *lifetime.Plan
 }
 
 func NewExpressionEmitter() *ExpressionEmitter {

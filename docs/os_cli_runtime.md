@@ -69,3 +69,28 @@ function main() {
 These services are declaration-driven at the compiler surface and backed by
 focused Go runtime helpers so tests can validate behavior independently from
 backend code generation.
+
+## Compiler Integration
+
+The LLVM backend lowers direct OS/CLI standard-library calls to runtime symbols
+instead of treating every operation as a dynamic property call. For example,
+`fs.writeFile(path, text)` emits a call to `jayess_fs_write_file`, while
+`process.stdout.write(text)` emits `jayess_process_stdout_write`.
+
+Applications that import OS/CLI standard-library modules cause app distribution
+planning to include the Jayess OS/CLI runtime manifest automatically:
+
+```js
+import "fs";
+import "process";
+import "terminal";
+
+function main() {
+  fs.writeFile("out.txt", "hello\n");
+  process.stdout.write("done\n");
+  return terminal.supportsColor(process.stdout) ? 0 : 0;
+}
+```
+
+The example in `examples/16-cli-os-runtime.js` covers filesystem work, file
+streams, process output, child process execution, and terminal detection.

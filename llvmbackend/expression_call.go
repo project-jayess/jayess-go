@@ -17,6 +17,9 @@ func (emitter *ExpressionEmitter) emitCallExpression(expression *ast.CallExpress
 	if expression == nil {
 		return "", fmt.Errorf("call expression must not be nil")
 	}
+	if value, handled, err := emitter.emitStdlibLocalCall(expression.Callee, expression.Arguments); handled || err != nil {
+		return value, err
+	}
 	callee, err := emitter.LoadLocal(expression.Callee)
 	if err != nil {
 		return "", err
@@ -82,6 +85,12 @@ func (emitter *ExpressionEmitter) emitMemberInvoke(member *ast.MemberExpression,
 	}
 	if member.Private {
 		return "", fmt.Errorf("unsupported runtime private member call lowering")
+	}
+	if value, handled, err := emitter.emitProcessStreamInvoke(member, arguments); handled || err != nil {
+		return value, err
+	}
+	if value, handled, err := emitter.emitStdlibMemberInvoke(member, arguments); handled || err != nil {
+		return value, err
 	}
 	switch member.Property {
 	case "bind":

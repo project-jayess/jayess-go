@@ -32,6 +32,14 @@ func (emitter *StatementEmitter) emitImportDeclaration(statement *ast.ImportDecl
 		return nil
 	}
 	for _, specifier := range statement.Specifiers {
+		if binding, ok := stdlibBindingForImport(statement.Source, specifier); ok {
+			local := importedLocalName(specifier)
+			if specifier.Namespace {
+				emitter.expressions.RegisterStdlibNamespace(local, binding.Module)
+			} else {
+				emitter.expressions.RegisterStdlibBinding(local, binding.Module, binding.Member)
+			}
+		}
 		value, err := emitter.emitImportedBinding(statement.Source, specifier)
 		if err != nil {
 			return err
