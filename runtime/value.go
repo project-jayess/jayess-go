@@ -4,6 +4,7 @@ type Value struct {
 	kind    ValueKind
 	boolean bool
 	number  float64
+	bigint  string
 	text    string
 	object  *Object
 	array   *Array
@@ -25,6 +26,10 @@ func NewBoolean(value bool) Value {
 
 func NewNumber(value float64) Value {
 	return Value{kind: NumberValue, number: value}
+}
+
+func NewBigInt(value string) Value {
+	return Value{kind: BigIntValue, bigint: value}
 }
 
 func NewString(value string) Value {
@@ -66,6 +71,10 @@ func (value Value) Bool() bool {
 
 func (value Value) Number() float64 {
 	return value.number
+}
+
+func (value Value) BigInt() string {
+	return value.bigint
 }
 
 func (value Value) Text() string {

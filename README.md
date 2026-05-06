@@ -259,10 +259,14 @@ linking mechanics, but they do not replace every vendor platform SDK:
   Platform SDK files should remain external unless the license explicitly allows
   redistribution in the app distribution.
 
-The compiler SDK does not bundle SDL, GLFW, raylib, curl, GTK, or other native
-package refs by default. Developers bind those libraries from their own project
-or installed SDKs. When an application is packaged, Jayess can copy the bound
-runtime shared libraries into that application's distribution folder.
+Jayess distributions should not assume the end user has SDL, GLFW, raylib, curl,
+GTK, or other native package libraries installed separately. Imported packages
+and bindings are the source of truth for end-user dependencies: if Jayess code
+imports a package or native binding, the compiler/distribution flow must build,
+collect, and package every redistributable runtime asset required by that import.
+The end user should only need the app package produced by Jayess. Matching
+license and notice files should be listed in `licenseFiles` and copied into the
+app distribution.
 
 Binding-owned distribution inputs should stay with the project, for example:
 
@@ -275,14 +279,28 @@ my-app/
       libmylib.so
 ```
 
-For a full local toolchain package, configure LLVM with both Clang and lld:
+For a full local toolchain package, configure LLVM with both Clang and lld.
+Keep generated build files under `temp/` so the checked-in `refs/llvm-project`
+source tree stays read-only:
 
 ```bash
-cmake -S refs/llvm-project/llvm -B refs/llvm-project/build \
+cmake -S refs/llvm-project/llvm -B temp/llvm-toolchain-build \
   -DLLVM_ENABLE_PROJECTS="clang;lld" \
   -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build refs/llvm-project/build --target clang clang++ lld llvm-as llc
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_INCLUDE_TESTS=OFF \
+  -DLLVM_INCLUDE_EXAMPLES=OFF \
+  -DLLVM_INCLUDE_BENCHMARKS=OFF \
+  -DCLANG_ENABLE_STATIC_ANALYZER=OFF \
+  -DCLANG_ENABLE_OBJC_REWRITER=OFF
+cmake --build temp/llvm-toolchain-build --target clang lld llvm-as llc
+go run ./cmd/jayess-dist \
+  --platform=linux-x64 \
+  --version=<version> \
+  --llvm-build-dir=temp/llvm-toolchain-build \
+  --out=dist \
+  --archive=true \
+  --strict-tools=true
 ```
 
 The dist helper also writes a compressed artifact beside the package directory:
@@ -427,10 +445,14 @@ notices.
 
 ## Build distributable Jayess apps
 
-Applications that use native binding packages may need runtime shared libraries
-beside the executable. Jayess models this as an app distribution step: static
-libraries are linked into the executable, while `.so`, `.dylib`, and `.dll`
-runtime libraries are copied into the app output directory. Build an app
+Applications that import native binding packages must be distributed with the
+native runtime libraries and supporting assets those imports require. Do not
+assume the end user will install native libraries or supporting software
+separately; the compiled Jayess app package should be enough to run the app.
+Jayess models this as an app distribution step: binding sources are built as
+part of the compiler workflow where declared, static libraries are linked into
+the executable, and redistributable `.so`, `.dylib`, `.dll`, data, and helper
+runtime files are copied into the app output directory. Build an app
 distribution from an already-built executable with either CLI form:
 
 ```bash
@@ -465,7 +487,10 @@ created. Files listed in `licenseFiles` are copied into `licenses/` beside the
 packaged app.
 This is how projects that bind SDL, GLFW, raylib, curl, GTK, or other native
 libraries ship everything needed by the end user without requiring separate
-library installation.
+library installation. If a platform SDK or system framework cannot legally be
+redistributed, keep it as a build-machine requirement and document that
+requirement; do not make the end user install it separately after receiving the
+app distribution.
 
 ## Run
 

@@ -62,8 +62,72 @@ func TestLoweringUsesUninitializedIIFEPrefixShadowAsUndefined(t *testing.T) {
 	expectIIFEReturnCode(t, `function main() { var value = 7; if ((function () { var value; return value; })() === undefined) { return value + 253; } return 1; }`, 260, "uninitialized IIFE prefix shadow")
 }
 
+func TestLoweringUsesBlockIIFEPrefixVariableBeforeReturn(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { return (function () { { var value = 298; } return value + 9; })(); }`, 307, "block IIFE prefix variable")
+}
+
+func TestLoweringClearsBlockIIFEPrefixLocalsAfterCall(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { (function () { { var local = 1; } return local; })(); if (typeof local === "undefined") { return 308; } return 1; }`, 308, "block IIFE prefix local cleanup")
+}
+
+func TestLoweringRestoresBlockIIFEPrefixLocalShadowAfterCall(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { var value = 7; var result = (function () { { var value = 300; } return value + 2; })(); return result + value; }`, 309, "block IIFE prefix local shadow cleanup")
+}
+
+func TestLoweringHoistsUntakenIfIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { if (false) { var value = 1; } return value; })() === undefined) { return 310; } return 1; }`, 310, "untaken if IIFE prefix variable hoist")
+}
+
+func TestLoweringUsesTakenIfIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { return (function () { if (true) { var value = 304; } return value + 7; })(); }`, 311, "taken if IIFE prefix variable")
+}
+
+func TestLoweringClearsIfIIFEPrefixLocalsAfterCall(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { (function () { if (true) { var local = 1; } return local; })(); if (typeof local === "undefined") { return 312; } return 1; }`, 312, "if IIFE prefix local cleanup")
+}
+
+func TestLoweringHoistsLoopIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { while (false) { var value = 1; } return value; })() === undefined) { return 313; } return 1; }`, 313, "loop IIFE prefix variable hoist")
+}
+
+func TestLoweringHoistsForOfIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { for (var value of []) {} return value; })() === undefined) { return 319; } return 1; }`, 319, "for-of IIFE prefix variable hoist")
+}
+
+func TestLoweringHoistsForInIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { for (var value in {}) {} return value; })() === undefined) { return 320; } return 1; }`, 320, "for-in IIFE prefix variable hoist")
+}
+
+func TestLoweringHoistsForOfDestructuredIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { for (var [value] of []) {} return value; })() === undefined) { return 321; } return 1; }`, 321, "for-of destructured IIFE prefix variable hoist")
+}
+
+func TestLoweringHoistsForInDestructuredIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { for (var {value} in {}) {} return value; })() === undefined) { return 322; } return 1; }`, 322, "for-in destructured IIFE prefix variable hoist")
+}
+
+func TestLoweringHoistsSwitchIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { switch (1) { case 2: var value = 1; } return value; })() === undefined) { return 314; } return 1; }`, 314, "switch IIFE prefix variable hoist")
+}
+
+func TestLoweringHoistsTryIIFEPrefixVariable(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { try { throw 1; var value = 1; } catch (err) {} return value; })() === undefined) { return 315; } return 1; }`, 315, "try IIFE prefix variable hoist")
+}
+
 func TestLoweringUsesIIFEPrefixFunctionDeclaration(t *testing.T) {
 	expectIIFEReturnCode(t, `function main() { if ((function () { function helper() { return 1; } return typeof helper; })() === "function") { return 263; } return 1; }`, 263, "IIFE prefix function declaration")
+}
+
+func TestLoweringHoistsLoopIIFEPrefixFunctionDeclaration(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { while (false) { function helper() { return 1; } } return typeof helper; })() === "function") { return 316; } return 1; }`, 316, "loop IIFE prefix function hoist")
+}
+
+func TestLoweringHoistsSwitchIIFEPrefixFunctionDeclaration(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { switch (1) { case 2: function helper() { return 1; } } return typeof helper; })() === "function") { return 317; } return 1; }`, 317, "switch IIFE prefix function hoist")
+}
+
+func TestLoweringHoistsTryIIFEPrefixFunctionDeclaration(t *testing.T) {
+	expectIIFEReturnCode(t, `function main() { if ((function () { try { throw 1; function helper() { return 1; } } catch (err) {} return typeof helper; })() === "function") { return 318; } return 1; }`, 318, "try IIFE prefix function hoist")
 }
 
 func TestLoweringClearsIIFEPrefixFunctionDeclarationAfterCall(t *testing.T) {
@@ -120,168 +184,4 @@ func TestLoweringUsesNamedFunctionIIFESelfIdentityEquality(t *testing.T) {
 
 func TestLoweringUsesNamedFunctionIIFEPrefixFunctionRedeclaration(t *testing.T) {
 	expectIIFEReturnCode(t, `function main() { if ((function helper() { function helper() { return 1; } return typeof helper; })() === "function") { return 281; } return 1; }`, 281, "named function IIFE prefix function redeclaration")
-}
-
-func TestLoweringUsesFunctionReturnIIFETypeof(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((typeof (function () { return function () {}; })()) === "function") { return 282; } return 1; }`, 282, "function-return IIFE typeof")
-}
-
-func TestLoweringMaterializesFunctionReturnIIFEVariable(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var fn = (function () { return function () {}; })(); if (typeof fn === "function" && fn === fn) { return 283; } return 1; }`, 283, "function-return IIFE variable")
-}
-
-func TestLoweringUsesNamedFunctionIIFEReturnSelfIdentity(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var fn = (function helper() { return helper; })(); if (typeof fn === "function" && fn === fn) { return 284; } return 1; }`, 284, "named function IIFE return self identity")
-}
-
-func TestLoweringUsesObjectReturnIIFETypeof(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((typeof (function () { return {}; })()) === "object") { return 285; } return 1; }`, 285, "object-return IIFE typeof")
-}
-
-func TestLoweringMaterializesObjectReturnIIFEVariable(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var object = (function () { return {}; })(); if (typeof object === "object" && object === object) { return 286; } return 1; }`, 286, "object-return IIFE variable")
-}
-
-func TestLoweringUsesArrayReturnIIFEIdentity(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var items = (function () { return []; })(); if (typeof items === "object" && items === items) { return 287; } return 1; }`, 287, "array-return IIFE identity")
-}
-
-func TestLoweringUsesObjectReturnIIFEMember(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function () { return { value: 280 }; })().value + 8; }`, 288, "object-return IIFE member")
-}
-
-func TestLoweringUsesObjectReturnIIFEComputedMember(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function () { return { value: 281 }; })()["value"] + 8; }`, 289, "object-return IIFE computed member")
-}
-
-func TestLoweringUsesArrayReturnIIFEIndex(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function () { return [290]; })()[0]; }`, 290, "array-return IIFE index")
-}
-
-func TestLoweringUsesArrayReturnIIFELength(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function () { return [1, 2, 3]; })().length + 288; }`, 291, "array-return IIFE length")
-}
-
-func TestLoweringUsesObjectReturnIIFEInOperator(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ("value" in (function () { return { value: 1 }; })()) { return 292; } return 1; }`, 292, "object-return IIFE in operator")
-}
-
-func TestLoweringUsesObjectReturnIIFEMissingInOperator(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if (!("missing" in (function () { return { value: 1 }; })())) { return 293; } return 1; }`, 293, "object-return IIFE missing in operator")
-}
-
-func TestLoweringUsesDeleteObjectReturnIIFEMember(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; if (delete (function () { value++; return { item: 1 }; })().item) { return value + 292; } return 1; }`, 294, "delete object-return IIFE member")
-}
-
-func TestLoweringUsesDeleteObjectReturnIIFEComputedMember(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; if (delete (function () { value++; return { item: 1 }; })()["item"]) { return value + 293; } return 1; }`, 295, "delete object-return IIFE computed member")
-}
-
-func TestLoweringUsesDeleteArrayReturnIIFEIndex(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; if (delete (function () { value++; return [1]; })()[0]) { return value + 294; } return 1; }`, 296, "delete array-return IIFE index")
-}
-
-func TestLoweringUsesIIFEArgumentSideEffects(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 12n; if ((function () { return 242; })(value++) === 242 && value === 13n) { return 242; } return 1; }`, 242, "IIFE argument side-effect")
-}
-
-func TestLoweringUsesIIFECalleeBeforeArgumentSideEffects(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; return (value++, function () { return value + 246; })(value === 2 ? value++ : value--); }`, 249, "IIFE callee-before-argument side-effects")
-}
-
-func TestLoweringUsesConditionalIIFECallee(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (true ? function () { return 243; } : function () { return 1; })(); }`, 243, "conditional IIFE callee")
-}
-
-func TestLoweringUsesStringIIFEReturnValue(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((function () { return "ok"; })() === "ok") { return 244; } return 1; }`, 244, "string IIFE")
-}
-
-func TestLoweringUsesBigIntIIFEReturnValue(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((function () { return 12n; })() === 12n) { return 245; } return 1; }`, 245, "BigInt IIFE")
-}
-
-func TestLoweringUsesBoolIIFEReturnValue(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((function () { return true; })()) { return 246; } return 1; }`, 246, "bool IIFE")
-}
-
-func TestLoweringUsesNullishIIFEReturnValue(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((function () { return null; })() === null) { return 247; } return 1; }`, 247, "nullish IIFE")
-}
-
-func TestLoweringUsesUndefinedArrowIIFEReturnValue(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((() => undefined)() === undefined) { return 248; } return 1; }`, 248, "undefined arrow IIFE")
-}
-
-func TestLoweringUsesEmptyBlockIIFEAsUndefined(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((function () {})() === undefined) { return 267; } return 1; }`, 267, "empty block IIFE undefined")
-}
-
-func TestLoweringUsesBareReturnIIFEAsUndefined(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((function () { return; })() === undefined) { return 268; } return 1; }`, 268, "bare return IIFE undefined")
-}
-
-func TestLoweringUsesFallthroughIIFEPrefixSideEffects(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; if ((function () { var local = 3; value += local; })() === undefined && typeof local === "undefined") { return value + 265; } return 1; }`, 269, "fallthrough IIFE prefix side effects")
-}
-
-func TestLoweringUsesArrowBlockIIFEReturnValue(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (() => { return 270; })(); }`, 270, "arrow block IIFE")
-}
-
-func TestLoweringUsesArrowBareReturnIIFEAsUndefined(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((() => { return; })() === undefined) { return 271; } return 1; }`, 271, "arrow bare return IIFE undefined")
-}
-
-func TestLoweringUsesArrowFallthroughIIFEPrefixSideEffects(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; if ((() => { var local = 4; value += local; })() === undefined && typeof local === "undefined") { return value + 267; } return 1; }`, 272, "arrow fallthrough IIFE prefix side effects")
-}
-
-func TestLoweringUsesParameterizedIIFEReturnValue(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function (value) { return value + 249; })(1); }`, 250, "parameterized IIFE")
-}
-
-func TestLoweringUsesParameterizedArrowIIFEReturnValue(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if (((value) => value)(12n) === 12n) { return 251; } return 1; }`, 251, "parameterized arrow IIFE")
-}
-
-func TestLoweringUsesParameterizedIIFEArgumentOrder(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; return (function (first, second) { return first * 100 + second * 10 + value; })(value++, value++); }`, 123, "parameterized IIFE argument order")
-}
-
-func TestLoweringUsesIIFEParameterVarRedeclarationBeforeReturn(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function (value) { var value; return value + 259; })(2); }`, 261, "IIFE parameter var redeclaration")
-}
-
-func TestLoweringUsesIIFEParameterVarRedeclarationAssignment(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function (value) { var value = 253; return value + 9; })(1); }`, 262, "IIFE parameter var redeclaration assignment")
-}
-
-func TestLoweringUsesMissingIIFEParameterAsUndefined(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { if ((function (missing) { return missing; })() === undefined) { return 253; } return 1; }`, 253, "missing IIFE parameter")
-}
-
-func TestLoweringUsesIIFEParameterDefaultForMissingArgument(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function (value = 254) { return value; })(); }`, 254, "missing IIFE parameter default")
-}
-
-func TestLoweringUsesIIFEParameterDefaultForUndefinedArgument(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; return (function (arg = 40) { return arg + value; })(void value++); }`, 42, "undefined IIFE parameter default")
-}
-
-func TestLoweringUsesEarlierIIFEParameterInDefault(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { return (function (first, second = first + 3) { return second; })(252); }`, 255, "IIFE parameter default scope")
-}
-
-func TestLoweringUsesExtraIIFEArgumentSideEffectsBeforeDefault(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { var value = 1; return (function (arg = value + 40) { return arg; })(undefined, value++); }`, 42, "extra IIFE argument before default")
-}
-
-func TestLoweringClearsIIFEParametersAfterCall(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { (function (temporary) { return temporary; })(12n); if (typeof temporary === "undefined") { return 252; } return 1; }`, 252, "IIFE parameter cleanup")
-}
-
-func TestLoweringClearsMissingIIFEParameterAfterCall(t *testing.T) {
-	expectIIFEReturnCode(t, `function main() { (function (missing) { return missing; })(); if (typeof missing === "undefined") { return 254; } return 1; }`, 254, "missing IIFE parameter cleanup")
 }

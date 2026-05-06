@@ -24,6 +24,7 @@ func DynamicValueLayouts() []ValueLayout {
 		{Kind: NullValue, TagName: "JAYESS_VALUE_NULL", Payload: NoPayload},
 		{Kind: BooleanValue, TagName: "JAYESS_VALUE_BOOLEAN", Payload: BoolPayload},
 		{Kind: NumberValue, TagName: "JAYESS_VALUE_NUMBER", Payload: Float64Payload},
+		{Kind: BigIntValue, TagName: "JAYESS_VALUE_BIGINT", Payload: PointerPayload, HeapAllocated: true, Managed: true},
 		{Kind: StringValue, TagName: "JAYESS_VALUE_STRING", Payload: PointerPayload, HeapAllocated: true, Managed: true},
 		{Kind: ObjectValue, TagName: "JAYESS_VALUE_OBJECT", Payload: PointerPayload, HeapAllocated: true, Managed: true},
 		{Kind: ArrayValue, TagName: "JAYESS_VALUE_ARRAY", Payload: PointerPayload, HeapAllocated: true, Managed: true},

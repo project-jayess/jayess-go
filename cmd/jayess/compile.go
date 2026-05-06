@@ -5,6 +5,7 @@ import (
 
 	"jayess-go/appdist"
 	"jayess-go/binding"
+	"jayess-go/llvmbackend"
 	"jayess-go/resolver"
 	"jayess-go/tooling"
 )
@@ -31,7 +32,8 @@ func compile(cfg cliConfig) error {
 	case tooling.EmitLLVMIR:
 		return writeFile(out, []byte(input.IR))
 	case tooling.EmitObject:
-		return compileObjectFile(input.IR, target, out)
+		folded := lowerFoldedReturnCodeProgram(cfg.inputPath, target, input.Program)
+		return compileObjectFile(llvmbackend.EmitLLVMIR(folded), target, out)
 	case tooling.EmitShared:
 		bindingModules, bindingDiagnostics, err := resolver.ResolveBindingModules(cfg.inputPath, input.Program)
 		if err != nil {

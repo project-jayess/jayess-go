@@ -1,11 +1,6 @@
 package test
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"compress/gzip"
-	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -76,11 +71,40 @@ func TestDistCreateCanRequireBundledLLVMTools(t *testing.T) {
 	}
 }
 
+func TestDistCreateCopiesBundledLLVMToolsFromExplicitBuildDir(t *testing.T) {
+	root := t.TempDir()
+	llvmBuildDir := filepath.Join(root, "temp", "llvm-toolchain-build")
+	for _, tool := range dist.DefaultTools() {
+		writeFile(t, filepath.Join(llvmBuildDir, "bin", tool), "fake "+tool)
+	}
+	writeFile(t, filepath.Join(llvmBuildDir, "lib", "libclang-cpp.so.23"), "fake clang cpp")
+	writeFakeLLVMLicenses(t, root)
+
+	result, err := dist.Create(dist.Config{
+		Platform:      "linux-x64",
+		Version:       "test",
+		OutDir:        filepath.Join(root, "dist"),
+		SourceRoot:    root,
+		LLVMBuildDir:  llvmBuildDir,
+		Archive:       false,
+		BuildCompiler: false,
+		StrictTools:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range dist.DefaultTools() {
+		requireFile(t, filepath.Join(result.Plan.Root, "tools", "bin", tool))
+	}
+	requireFile(t, filepath.Join(result.Plan.Root, "tools", "lib", "libclang-cpp.so.23"))
+}
+
 func TestJayessDistStrictToolsSucceedsFromCleanCheckout(t *testing.T) {
 	root := cliRepoRoot(t)
 	sourceRoot := cliTempDir(t, root, "dist-clean-source-*")
+	llvmBuildDir := filepath.Join(cliTempDir(t, root, "dist-clean-llvm-*"), "build")
 	outDir := filepath.Join(cliTempDir(t, root, "dist-clean-out-*"), "dist")
-	writeFakeLLVMTools(t, sourceRoot, dist.DefaultTools())
+	writeFakeLLVMBuildTools(t, llvmBuildDir, dist.DefaultTools())
 	writeFakeLLVMLicenses(t, sourceRoot)
 
 	command := exec.Command(
@@ -88,6 +112,7 @@ func TestJayessDistStrictToolsSucceedsFromCleanCheckout(t *testing.T) {
 		"--platform=linux-x64",
 		"--version=strict",
 		"--source-root", sourceRoot,
+		"--llvm-build-dir", llvmBuildDir,
 		"--out", outDir,
 		"--archive=false",
 		"--build-compiler=false",
@@ -216,102 +241,4 @@ func TestDistCreatePackagedCompilerCompilesExample(t *testing.T) {
 	if !strings.Contains(content, "define i32 @main()") {
 		t.Fatalf("expected main function in smoke output, got:\n%s", content)
 	}
-}
-
-func writeFakeLLVMLicenses(t *testing.T, root string) {
-	t.Helper()
-	writeFile(t, filepath.Join(root, "refs", "llvm-project", "LICENSE.TXT"), "llvm project license")
-	writeFile(t, filepath.Join(root, "refs", "llvm-project", "llvm", "LICENSE.TXT"), "llvm license")
-	writeFile(t, filepath.Join(root, "refs", "llvm-project", "clang", "LICENSE.TXT"), "clang license")
-	writeFile(t, filepath.Join(root, "refs", "llvm-project", "lld", "LICENSE.TXT"), "lld license")
-	writeFile(t, filepath.Join(root, "refs", "llvm-project", "third-party", "README.md"), "third party notices")
-}
-
-func writeFakeLLVMTools(t *testing.T, root string, tools []string) {
-	t.Helper()
-	for _, tool := range tools {
-		writeFile(t, filepath.Join(root, "refs", "llvm-project", "build", "bin", tool), "fake "+tool)
-	}
-}
-
-func writeFile(t *testing.T, path string, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(content)
-}
-
-func requireFile(t *testing.T, path string) {
-	t.Helper()
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected file %s: %v", path, err)
-	}
-}
-
-func tarGzEntries(t *testing.T, path string) map[string]struct{} {
-	t.Helper()
-	file, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	gzipReader, err := gzip.NewReader(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gzipReader.Close()
-	reader := tar.NewReader(gzipReader)
-	entries := map[string]struct{}{}
-	for {
-		header, err := reader.Next()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			t.Fatal(err)
-		}
-		entries[header.Name] = struct{}{}
-	}
-	return entries
-}
-
-func requireArchiveEntry(t *testing.T, entries map[string]struct{}, name string) {
-	t.Helper()
-	if _, ok := entries[name]; !ok {
-		t.Fatalf("expected archive entry %q, got %#v", name, entries)
-	}
-}
-
-func archiveEntries(t *testing.T, path string) map[string]struct{} {
-	t.Helper()
-	if strings.HasSuffix(path, ".zip") {
-		return zipEntries(t, path)
-	}
-	return tarGzEntries(t, path)
-}
-
-func zipEntries(t *testing.T, path string) map[string]struct{} {
-	t.Helper()
-	reader, err := zip.OpenReader(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close()
-	entries := map[string]struct{}{}
-	for _, file := range reader.File {
-		entries[file.Name] = struct{}{}
-	}
-	return entries
 }

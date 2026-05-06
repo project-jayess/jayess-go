@@ -78,29 +78,9 @@ func analyzeStatement(scope *scope, context controlContext, statement ast.Statem
 	case *ast.SwitchStatement:
 		return analyzeSwitchStatement(scope, context, stmt)
 	case *ast.BreakStatement:
-		if stmt.Label != "" {
-			if _, ok := context.findLabel(stmt.Label); !ok {
-				return errorAt(stmt, "unknown label %s", stmt.Label)
-			}
-			return nil
-		}
-		if !context.inLoop && !context.inSwitch {
-			return errorAt(stmt, "break outside loop or switch")
-		}
+		return analyzeBreakStatement(context, stmt)
 	case *ast.ContinueStatement:
-		if stmt.Label != "" {
-			label, ok := context.findLabel(stmt.Label)
-			if !ok {
-				return errorAt(stmt, "unknown label %s", stmt.Label)
-			}
-			if !label.allowsContinue {
-				return errorAt(stmt, "continue target %s is not a loop", stmt.Label)
-			}
-			return nil
-		}
-		if !context.inLoop {
-			return errorAt(stmt, "continue outside loop")
-		}
+		return analyzeContinueStatement(context, stmt)
 	case *ast.ThrowStatement:
 		return analyzeExpressionWithContext(scope, context, stmt.Value)
 	case *ast.TryStatement:

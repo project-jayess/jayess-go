@@ -40,6 +40,13 @@ func ResolveRuntimeAssets(plan binding.BuildPlan, targetName string) ([]RuntimeA
 		}
 		assets = appendLicenseAsset(assets, seen, license)
 	}
+	for _, asset := range append([]string{}, append(plan.RuntimeAssets, plan.HelperAssets...)...) {
+		if _, err := os.Stat(asset); err != nil {
+			diagnostics = append(diagnostics, "missing binding runtime asset: "+asset)
+			continue
+		}
+		assets = appendRuntimeAsset(assets, seen, asset)
+	}
 	return assets, diagnostics
 }
 

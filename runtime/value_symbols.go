@@ -12,6 +12,7 @@ func ValueRuntimeSymbols() []ValueRuntimeSymbol {
 		{Name: "jayess_value_null", Kind: NullValue, Result: NullValue},
 		{Name: "jayess_value_from_boolean", Kind: BooleanValue, Result: BooleanValue},
 		{Name: "jayess_value_from_number", Kind: NumberValue, Result: NumberValue},
+		{Name: "jayess_value_from_bigint_string", Kind: BigIntValue, Result: BigIntValue},
 		{Name: "jayess_value_from_string_copy", Kind: StringValue, Result: StringValue},
 		{Name: "jayess_object_new", Kind: ObjectValue, Result: ObjectValue},
 		{Name: "jayess_array_new", Kind: ArrayValue, Result: ArrayValue},

@@ -39,7 +39,7 @@ func Create(config Config) (Result, error) {
 		}
 		result.CompilerBuilt = true
 	}
-	tools, diagnostics, err := copyLLVMTools(normalized.SourceRoot, plan.ToolBinDir, normalized.Tools)
+	tools, diagnostics, err := copyLLVMTools(normalized.LLVMBuildDir, plan.ToolBinDir, normalized.Tools)
 	if err != nil {
 		return result, err
 	}
@@ -48,7 +48,7 @@ func Create(config Config) (Result, error) {
 	if normalized.StrictTools && len(diagnostics) > 0 {
 		return result, fmt.Errorf("required bundled tools are missing")
 	}
-	libs, err := copyLLVMLibraries(normalized.SourceRoot, plan.ToolLibDir)
+	libs, err := copyLLVMLibraries(normalized.LLVMBuildDir, plan.ToolLibDir)
 	if err != nil {
 		return result, err
 	}
@@ -73,10 +73,10 @@ func Create(config Config) (Result, error) {
 	return result, nil
 }
 
-func llvmBuildBinDir(sourceRoot string) string {
-	return filepath.Join(sourceRoot, "refs", "llvm-project", "build", "bin")
+func llvmBuildBinDir(buildDir string) string {
+	return filepath.Join(buildDir, "bin")
 }
 
-func llvmBuildLibDir(sourceRoot string) string {
-	return filepath.Join(sourceRoot, "refs", "llvm-project", "build", "lib")
+func llvmBuildLibDir(buildDir string) string {
+	return filepath.Join(buildDir, "lib")
 }

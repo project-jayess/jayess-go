@@ -13,6 +13,8 @@ func TestBindingManifestSupportsSchemaAndSymbolMapping(t *testing.T) {
 		LibraryDirs:        []string{"./vendor/lib"},
 		SharedLibraries:    []string{"mylib"},
 		LicenseFiles:       []string{"./vendor/LICENSE"},
+		RuntimeAssets:      []string{"./data/schema.json"},
+		HelperAssets:       []string{"./bin/helper"},
 		CFlags:             []string{"-DMATH_BINDING=1"},
 		LDFlags:            []string{"-lm"},
 		PlaceholderExports: []string{"add"},
@@ -45,6 +47,8 @@ func TestBindingManifestMergesPlatformOverrides(t *testing.T) {
 		LibraryDirs:     []string{"./lib"},
 		SharedLibraries: []string{"base"},
 		LicenseFiles:    []string{"./LICENSE.base"},
+		RuntimeAssets:   []string{"./data/base.dat"},
+		HelperAssets:    []string{"./bin/base-helper"},
 		CFlags:          []string{"-DBASE=1"},
 		LDFlags:         []string{"-lbase"},
 		Platforms: map[string]binding.PlatformOptions{
@@ -54,6 +58,8 @@ func TestBindingManifestMergesPlatformOverrides(t *testing.T) {
 				LibraryDirs:     []string{"./linux/lib"},
 				SharedLibraries: []string{"gtk-3"},
 				LicenseFiles:    []string{"./LICENSE.gtk"},
+				RuntimeAssets:   []string{"./data/linux.dat"},
+				HelperAssets:    []string{"./bin/linux-helper"},
 				CFlags:          []string{"-DLINUX=1"},
 				LDFlags:         []string{"-ldl"},
 			},
@@ -67,6 +73,8 @@ func TestBindingManifestMergesPlatformOverrides(t *testing.T) {
 	requireStringSlice(t, inputs.LibraryDirs, []string{"./lib", "./linux/lib"})
 	requireStringSlice(t, inputs.SharedLibraries, []string{"base", "gtk-3"})
 	requireStringSlice(t, inputs.LicenseFiles, []string{"./LICENSE.base", "./LICENSE.gtk"})
+	requireStringSlice(t, inputs.RuntimeAssets, []string{"./data/base.dat", "./data/linux.dat"})
+	requireStringSlice(t, inputs.HelperAssets, []string{"./bin/base-helper", "./bin/linux-helper"})
 	requireStringSlice(t, inputs.CFlags, []string{"-DBASE=1", "-DLINUX=1"})
 	requireStringSlice(t, inputs.LDFlags, []string{"-lbase", "-ldl"})
 }

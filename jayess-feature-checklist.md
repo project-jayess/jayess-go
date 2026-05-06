@@ -10,7 +10,7 @@
 - [x] keywords / reserved words
 - [x] hashbang comments at the start of `.js` files
 - [x] reject unsupported `enum` and `const enum` declarations with a clear diagnostic
-- [x] reject unsupported type aliases, interfaces, ambient/module/namespace declarations, abstract class/member modifiers, readonly/override/accessor/class access modifiers, class `implements` clauses, annotations including catch and destructuring binding annotations, variable/class/catch/destructuring binding definite assignment and const assertions, function/class/arrow return annotations, type predicate/assertion return annotations, optional parameter/property/variable/destructuring binding markers, function/class method overload declarations, parameter property modifiers, function/class/method/arrow generic type parameters, type-only module declarations/specifiers, import-equals/export-equals/export-as-namespace module syntax, type expression suffixes in statements and nested expressions, top-level/class/member/parameter decorators, JSX, and angle-bracket assertions with clear diagnostics
+- [x] reject unsupported type aliases, interfaces, ambient/module/namespace declarations, abstract class/member modifiers, readonly/override/accessor/class access modifiers, class `implements` clauses with organized computed class member parsing, annotations including catch and destructuring binding annotations, variable/class/catch/destructuring binding definite assignment and const assertions, function/class/arrow return annotations with organized arrow unsupported probes with organized unsupported type tests, type predicate/assertion return annotations, optional parameter/property/variable/destructuring binding markers, function/class method overload declarations, parameter property modifiers, function/class/method/arrow generic type parameters, type-only module declarations/specifiers with organized import specifier parsing with organized export specifier parsing, import-equals/export-equals/export-as-namespace module syntax, type expression suffixes in statements and nested expressions, top-level/class/member/parameter decorators, JSX, and angle-bracket assertions with clear diagnostics and organized diagnostic, declaration probe, and modifier probe helpers
 - [x] semicolon handling
 - [x] empty statements
 - [x] trailing commas in parameter and argument lists
@@ -26,7 +26,7 @@
 - [x] `null`
 - [x] `undefined` or Jayess equivalent
 - [x] bigint literals
-- [x] object literals
+- [x] object literals with organized method/accessor parsing helpers
 - [x] array literals
 - [x] template strings
 - [x] reject unsupported regular expression literals with a clear diagnostic
@@ -44,8 +44,8 @@
 - [x] declaration without hoisting
 - [x] no use before declaration
 - [x] reject reassignment to `const` bindings
-- [x] destructuring declarations
-- [x] array destructuring elisions
+- [x] destructuring declarations with organized binding-pattern parser files
+- [x] array destructuring elisions with organized array binding parsing
 - [x] default values in declarations
 
 ### 1.4 Operators
@@ -124,7 +124,7 @@
 - [x] destructuring parameters
 - [x] default values in destructuring parameters
 - [x] reject duplicate parameter bindings
-- [x] function-local `arguments` binding
+- [x] function-local `arguments` binding and organized closure capture construction
 - [x] nested regular functions receive their own `arguments` binding
 - [x] variadic calls
 
@@ -161,7 +161,7 @@
 - [x] keyword member property names
 - [x] computed property names
 - [x] method definitions
-- [x] async object methods
+- [x] async object methods with organized async modifier lookahead
 - [x] reject line terminator after `async` in async object methods
 - [x] generator object methods
 - [x] getter and setter definitions
@@ -171,7 +171,7 @@
 - [x] keyword object property names
 - [x] parse and analyze `for...in` property enumeration
 - [x] object spread
-- [x] object destructuring
+- [x] object destructuring with organized object binding parsing
 - [x] keyword object destructuring property names
 - [x] computed object destructuring property names
 
@@ -182,15 +182,15 @@
 - [x] empty class elements
 - [x] instance methods
 - [x] static methods
-- [x] static initialization blocks
+- [x] static initialization blocks with organized class modifier lookahead helpers
 - [x] reject static class members named `prototype`
 - [x] computed class member names
-- [x] instance fields
-- [x] static fields
+- [x] instance fields with organized class field parsing
+- [x] static fields with organized class field parsing
 - [x] `this` and private access in class field initializers
 - [x] `super` in derived class static initialization blocks
-- [x] getters
-- [x] setters
+- [x] getters with organized class accessor parsing
+- [x] setters with organized class accessor parsing
 - [x] keyword class member names
 - [x] class members named `static`
 - [x] async class methods
@@ -269,9 +269,9 @@
 
 - [x] parse and analyze iterable protocol object shapes
 - [x] parse and analyze iterator protocol object shapes
-- [x] parse and analyze `for...of`
+- [x] parse and analyze `for...of` with organized for-each parser helpers
 - [x] parse and analyze `for await...of`
-- [x] parse and analyze `for...in`
+- [x] parse and analyze `for...in` with organized for-each parser helpers
 - [x] reject initializers in `for...of` / `for...in` binding heads
 - [x] destructuring bindings in `for...of` / `for...in`
 - [x] assignment targets in `for...of` / `for...in`
@@ -363,7 +363,7 @@
 - [x] resolve Jayess stdlib import specifiers before `node_modules`
 - [x] detect native binding modules from `export default bind(...)`
 - [x] extract binding manifests from `export default bind(...)`
-- [x] resolved binding imports feed native build planning
+- [x] resolved binding imports feed native build planning with organized build path helpers and organized module export binding lowering
 - [x] parse and analyze scoped package import specifiers
 - [x] reject malformed package and scoped package import specifiers, including empty and dot path segments, with clear diagnostics
 - [x] package resolver rejects malformed package specifiers before filesystem lookup
@@ -550,7 +550,7 @@
 - [x] type errors if types exist
 - [x] module diagnostics for unsupported package specifiers
 - [x] lifetime / escape diagnostics
-- [x] source spans for parser and semantic diagnostics
+- [x] source spans for parser statement dispatch organization and parser and semantic diagnostics
 - [x] parser diagnostics include source spans
 - [x] semantic diagnostics include source spans
 - [x] helpful semantic diagnostics for common mutability mistakes
@@ -568,16 +568,16 @@
 - [x] reject `return` outside functions
 - [x] reject `break` outside loops and switches
 - [x] reject `continue` outside loops
-- [x] validate labeled `break` / `continue` targets
+- [x] validate labeled `break` / `continue` targets with organized control-jump validation
 - [x] reject duplicate `default` clauses in `switch`
-- [x] reject optional chains as assignment/update targets
+- [x] reject optional chains as assignment/update targets with organized assignment-target validation
 - [x] reject `await` outside async functions
 - [x] reject `yield` outside generator functions
 - [x] reject `this` outside methods
 - [x] reject `super` outside derived class methods
 - [x] reject non-constructable local `new` targets
-- [x] reject non-constructable local `instanceof` targets
-- [x] reject invalid private member access
+- [x] reject non-constructable local `instanceof` targets with organized constructability analysis helpers
+- [x] reject invalid private member access with organized private member analysis helpers
 - [x] reject invalid private member assignment
 - [x] reject duplicate constructors and private class members
 - [x] reject direct `super()` calls outside constructors
@@ -629,7 +629,7 @@ Classification:
 
 ### 9.4 Lowering and code generation
 
-- [x] cleanup/destructor calls are inserted at scope exit for non-escaping values
+- [x] cleanup/destructor calls are inserted at scope exit for non-escaping values with organized cleanup binding extraction and cleanup op emission helpers
 - [x] escaping values are NOT cleaned up at scope exit
 - [x] cleanup is emitted for all control-flow paths:
   - [x] normal block exit
@@ -1033,8 +1033,8 @@ A memory-safety item may only be marked done when covered by focused tests.
 
 - [x] lexer tests
 - [x] parser tests
-- [x] AST tests
-- [x] semantic tests
+- [x] AST tests with organized control statement nodes
+- [x] semantic tests with organized object literal analysis and organized function expression analysis
 - [x] type-checking tests
 - [x] lifetime / escape tests
 - [x] codegen tests
@@ -1114,7 +1114,7 @@ auto-generated wrapping, manifest JSON, or direct native source imports as the l
 - [x] `includeDirs` field is supported
 - [x] `cflags` field is supported
 - [x] `ldflags` field is supported
-- [x] `platforms` field is supported for target-specific source/include/flag overrides
+- [x] `platforms` field is supported for target-specific source/include/flag overrides with organized platform manifest parsing
 - [x] `exports` field is supported
 - [x] named placeholder JS exports can coexist with binding metadata
 - [x] placeholder exports can be reused through shared stubs like `const f = () => {}; export const add = f;`
@@ -1487,7 +1487,7 @@ diagnosable and optimizable.
 - [x] shared library builds use target-specific clang linking, executable-local bundled/ref tool discovery, missing-tool diagnostics, optional LLVM C API object emission, and an internal lld C++ shim
 - [x] tooling compile plans route `--emit=shared` to shared-library build plans
 - [x] shared library emission is covered by tests
-- [x] platform distribution packages can be assembled under `dist/<platform>` with the compiler at package root, bundled LLVM/Clang/lld tools under `tools/bin`, LLVM runtime libraries, license notices, compressed archives, and checksums
+- [x] platform distribution packages can be assembled under `dist/<platform>` with the compiler at package root, bundled LLVM/Clang/lld tools under `tools/bin`, LLVM runtime libraries, license notices, compressed archives, checksums, and organized dist test helpers
 - [x] app distribution plans copy native shared libraries beside executables so users do not need separate library installation
 
 ### 24.2 Target and code generation support
@@ -1604,7 +1604,7 @@ surface for Jayess-compiled applications rather than a JS-only abstraction layer
 
 ### 25.5 Safety and correctness
 
-- [x] statement lifetime is safe
+- [x] statement lifetime is safe with organized returned-expression escape marking
 - [x] database handle lifetime is safe
 - [x] blob/string ownership across boundary is safe
 - [x] SQLite errors propagate into Jayess diagnostics usefully
@@ -2045,13 +2045,53 @@ native libraries supplied through explicit bindings.
 
 ### 33.1 Real LLVM lowering
 
-- [ ] lower numeric, boolean, string, null, and undefined literals into runtime values
-- [ ] lower variable declarations, assignments, and lexical scopes into LLVM IR
-- [ ] lower arithmetic, comparison, logical, bitwise, nullish, and ternary expressions
-  - Progress: constant `main` return-code extraction folds function truthiness, identity/nullish equality, expression/logical-assignment identity propagation, expression materialization, fresh/reference expression `typeof` with whole-probe reference and logical reference evaluation, single-evaluation `typeof` probes, and primitive equality mismatches, object/array `typeof`, truthiness, conditional/comma/nullish identity materialization, identity/nullish equality, expression/logical-assignment identity propagation, expression materialization, fresh/reference expression `typeof`, and primitive equality mismatches, signed BigInt literal/binding arithmetic, unary bitwise-not, prefix/postfix updates, loose string/number/boolean equality, mixed string/number/boolean relational comparison with invalid-string side effects, shared signed relational ordering, switch matching, array/object member and index folding, spread folding, computed property and `in` keys, array/string index-key coercion including huge out-of-range keys, optional member/index/call folding, function- and object-returning IIFEs with fresh literal member/index, `in`, and `delete` folding, simple-parameter IIFE scalar returns with prefix side effects, block-bodied arrow IIFEs, implicit and bare-return undefined results, function declarations, function/var redeclarations, named function self-bindings with identity equality, parameter shadowing, default access, var redeclarations, and prefix function redeclarations, parameter var redeclarations, duplicate and hoisted direct locals, direct local cleanup and shadow restoration, missing/default-argument `undefined` handling, extra-argument-before-default side effects, and callee-before-argument side effects, primitive-left `instanceof`, `void` and `delete` side effects, bitwise/shift operations, arithmetic and bitwise/shift assignment, equality, assignment, or/and/nullish logical assignment, logical values, conditional/comma/nullish values, relational comparison, `typeof`, string coercion, truthiness, and strict primitive mismatch, function expressions/bindings and conditional/comma/nullish identity materialization, string and numeric relational comparison, primitive unary/binary numeric coercion with successful-probe side effects, bitwise/shift coercion, and compound assignment, primitive string concatenation with single coercion and left-to-right side effects, string `.length` and string index folding with out-of-range `undefined`, array literal `.length`, scalar index, and fresh spread folding with elision/out-of-range `undefined`, fresh object literal scalar property/index and fresh spread folding with computed keys and missing-property `undefined`, computed property-key string coercion for boolean and nullish values, function/object identity property and array index folding, member/index truthiness for folded scalar and identity values, exact boolean member/index equality, `typeof` nullish precedence for folded member/index values, delete expression truthiness with target/key side effects, fresh object `in` operator folding with single left/right evaluation, primitive-left `instanceof` folding with right operand evaluation, empty-constructor `new` expression truthiness, object identity, `typeof`, and spread argument side effects, numeric add operand single evaluation, add-assignment right operand single evaluation, member/index assignment and update target-key-value side effects, scalar and logical-assignment whole-probe evaluation, add-assignment, template interpolation including BigInt coercion and folded truthiness, empty-string loose numeric equality, loose boolean-number equality with single directional probes, loose nullish-vs-primitive equality, loose string-number/string-boolean equality with single directional probes, strict primitive equality mismatches with single comparison and reference-direction probes, strict boolean equality and boolean-value conditional whole-probe evaluation, loose/strict nullish equality, string concatenation, integer/string/nullish logical values with single whole-probe evaluation, string/unary/folded expression truthiness with single probe side effects, nullish coalesce whole-probe evaluation for integer, string, boolean, scalar, and reference values, logical identity/reference whole-probe evaluation and logical-and materialization coverage for object and function values, prefix/postfix update condition truthiness, prefix/postfix updates, comma and conditional expression whole-probe evaluation plus conditional, fresh object/array, empty-constructor `new`, and empty function-call expression statement and spread argument side effects with single discard evaluation, unary/binary bitwise, shift, `typeof`, `void`, block and labeled-statement side effects, labeled `break` side effects through blocks, branches, switches, and loops, labeled `continue` side effects through loops, non-matching labeled `break` block/label/branch/switch scan side-effect isolation, unknown-condition `for` initializer side effects, infinite constant loop return blocking, unknown control-flow unresolved-return/throw blocking, direct/block/labeled/try throw blocking, try/catch/finally unresolved-return blocking, try/finally non-return side effects, nested finally definite throw reachability, nested try-catch rethrow reachability, nested try-finally definite throw reachability, labeled try definite throw reachability, try definite throw reachability boundaries, constant for definite throw catch side effects, constant loop definite throw catch side effects, constant switch definite throw catch side effects, constant-if definite throw catch side effects, nested block definite throw catch side effects, definite throw catch/finally side effects and exit blocking, switch labeled `break` side effects, constant `if` branch side effects, nested constant `switch` side effects, nested constant loop side effects, switch case fallthrough side effects, constant true/false loop return expressions/assignments, do-while `break` side effects, and loop `break`/`continue` side-effect boundaries.
-- [ ] lower control flow statements (`if`, `switch`, loops, `break`, `continue`, labels`)
-- [ ] lower `return`, `throw`, `try`, `catch`, and `finally` with predictable cleanup
-- [ ] preserve source locations in generated IR diagnostics for lowered statements
+These tasks track generalized lowering mechanisms only. Do not add one-off
+literal/operator cases here; add support by wiring AST families through shared
+emitters, runtime calls, and control-flow builders.
+
+- [x] create a central LLVM expression emitter entry point
+- [x] create a central LLVM statement emitter entry point
+- [x] create shared runtime value-constructor emission helpers
+- [x] preserve source positions in backend diagnostics
+- [x] keep emitted local scope restoration isolated behind scope helpers
+- [x] add focused tests for completed lowering mechanisms
+- [x] replace constant `main` return-code folding with the general expression/statement emitter
+- [x] represent mutable locals as LLVM slots with `alloca`, `load`, and `store`
+- [x] lower lexical environments through one scope stack used by variables, blocks, functions, and catch bindings
+- [x] lower assignment targets through one target-address/value abstraction for identifiers, members, and indexes
+- [x] lower expression evaluation through a reusable left-to-right sequencing helper
+- [x] add one runtime-call emission helper for lowered operators and value APIs
+- [x] lower unary operators through a shared operator dispatcher
+- [x] lower binary arithmetic and bitwise operators through a shared operator dispatcher
+- [x] lower equality and relational operators through a shared comparison dispatcher
+- [x] lower logical, nullish, ternary, and comma expressions through the sequencing and basic-block helpers
+- [x] lower update expressions through the assignment-target abstraction
+- [x] lower `typeof`, `void`, `delete`, `in`, and `instanceof` through operator dispatchers and runtime calls
+- [x] lower object construction through runtime allocation APIs, including computed keys and spread
+- [x] lower array construction through runtime allocation APIs, including elisions and spread
+- [x] lower member access through runtime property APIs
+- [x] lower index access through runtime index APIs
+- [x] lower destructuring through the same target abstraction used by assignment
+- [x] add an LLVM basic-block builder for branches, loops, exits, and fallthrough
+- [x] lower `if` through the basic-block builder
+- [x] lower `switch` through the basic-block builder
+- [x] lower `while` as the primitive loop form in the backend
+- [x] lower `do...while`, `for`, `for...in`, and `for...of` by translating them to the primitive `while` lowering path
+- [x] lower `break` and `continue` through structured loop/switch exit stacks
+- [x] lower labels through the same structured exit stacks
+- [x] lower `return` through the shared abrupt-completion and cleanup path
+- [x] lower `throw` through the shared abrupt-completion and cleanup path
+- [x] lower `try`, `catch`, and `finally` through the shared abrupt-completion and cleanup path
+- [x] connect lifetime/escape analysis to retain/release/destructor cleanup emission
+- [x] lower function declarations and function expressions through the callable runtime ABI
+- [x] lower closures and captured variables through the lexical environment lowering
+- [x] lower calls, default/rest parameters, `arguments`, `.bind`, `.call`, and `.apply` through the callable runtime ABI
+- [x] lower class constructors, `this`, `super`, `new`, and `new.target` through object/function lowering primitives
+- [x] lower class fields, methods, accessors, private members, and static blocks through object/function lowering primitives
+- [x] lower module initialization and imports through runtime module bindings
+- [x] lower exports, re-exports, defaults, namespace objects, and live bindings through runtime module bindings
+- [x] lower native binding wrapper calls through the runtime ABI
+- [x] add executable lowering tests for each generalized mechanism before marking it done
 
 ### 33.2 Dynamic values, objects, and arrays
 
@@ -2106,9 +2146,51 @@ native libraries supplied through explicit bindings.
 - [x] document static-vs-shared native binding shipping behavior
 - [x] add end-to-end tests for app dist output layout
 
+### 33.7.1 Imported dependency packaging policy
+
+- [x] use the resolved import graph as the source of truth for app distribution dependency collection
+- [x] distinguish source modules, Jayess packages, native binding modules, built-in packages, and external package imports in the dependency graph
+- [x] attach package/binding distribution metadata to each imported dependency during resolver or build planning
+- [x] fail app distribution when an imported dependency requires runtime assets that are not declared or cannot be resolved
+- [x] keep non-redistributable platform SDKs as documented build-machine requirements, not end-user installation steps
+
+### 33.7.2 Native dependency build inputs
+
+- [x] build declared binding-owned native `sources` before executable/package creation when they are imported by the program
+- [x] include imported binding object files and static libraries in the executable link plan
+- [x] collect imported binding `sharedLibraries` as runtime assets for the app distribution
+- [x] collect imported binding helper data/assets when the binding/package declares them
+- [x] support platform-specific dependency inputs from binding `platforms.<target>` overrides during app distribution
+- [x] emit actionable diagnostics for missing headers, source files, libraries, assets, or unsupported platform dependency declarations
+
+### 33.7.3 Package dependency metadata
+
+- [x] define a small package distribution metadata format for imported Jayess packages that need runtime assets
+- [x] support package-declared runtime assets such as shared libraries, data files, helper executables, config templates, and license files
+- [x] resolve package runtime assets relative to the imported package root, not the caller's working directory
+- [x] deduplicate assets that are required by multiple imported packages or bindings
+- [x] preserve deterministic output paths for copied package assets
+
+### 33.7.4 License and redistribution enforcement
+
+- [x] require license/notice metadata for imported third-party runtime libraries copied into app distributions
+- [x] copy imported dependency license/notice files into a stable `licenses/` layout
+- [x] report diagnostics when a redistributable imported dependency lacks required license metadata
+- [x] allow package metadata to mark platform SDK/system-framework dependencies as build-only or system-provided when redistribution is not allowed
+- [x] document the difference between redistributable runtime assets and non-redistributable SDK inputs in `docs/app_distribution.md`
+
+### 33.7.5 Self-contained app distribution verification
+
+- [x] add tests where importing a native binding causes its shared library and license file to appear in the app distribution
+- [x] add tests where importing a package causes package-declared data/helper assets to appear in the app distribution
+- [x] add tests where unused packages do not add runtime assets to the app distribution
+- [x] add tests for duplicate imported dependencies producing one copied runtime asset
+- [x] add tests for missing imported runtime assets failing package creation with diagnostics
+- [x] add smoke tests that run a packaged app from the Jayess-produced distribution without separate end-user dependency installation
+
 ### 33.8 Toolchain and release readiness
 
-- [ ] rebuild the bundled LLVM toolchain with Clang and lld enabled for release packages
+- [x] rebuild the bundled LLVM toolchain with Clang and lld enabled for release packages
 - [x] verify `jayess-dist` with `--strict-tools=true` from a clean checkout
 - [x] verify compiler SDK archives on Linux, macOS, and Windows targets
 - [x] document required platform SDK boundaries for macOS and Windows linking
@@ -2118,10 +2200,157 @@ native libraries supplied through explicit bindings.
 ### 33.9 Recommended implementation order
 
 - [x] implement core runtime value representation before object/function/class lowering
-- [ ] implement expression and statement lowering before advanced module execution
-- [ ] implement dynamic objects and arrays before class field/private-member behavior
-- [ ] integrate native binding compile/link before exposing app distribution in the CLI
+- [x] implement dynamic objects and arrays before class field/private-member behavior
+- [x] integrate native binding compile/link before exposing app distribution in the CLI
+- [x] finish generalized LLVM lowering mechanisms before marking compiler completion
 - [x] add executable tests incrementally for each lowering feature as it lands
 - [x] keep examples aligned with the actually executable subset during compiler completion
+
+---
+
+## 34. Self-hosting readiness
+
+### 34.1 Large-program parsing and modules
+
+- [x] parse larger multi-file Jayess programs without excessive memory use or parser recursion failures
+- [x] preserve stable module graph ordering for compiler-sized projects
+- [x] report module import/export errors with file, line, and symbol context
+- [x] add compiler-scale parser fixtures under `test/`
+
+### 34.2 Compiler data structures
+
+- [x] provide Jayess-native list/vector support suitable for tokens, AST children, and diagnostics
+- [x] provide Jayess-native map/table support suitable for scopes, symbols, and module registries
+- [x] provide Jayess-native structured records suitable for tokens, AST nodes, and type metadata
+- [x] document ownership and mutation rules for compiler data structures
+
+### 34.3 File, path, and source input APIs
+
+- [x] expose file read/write APIs needed by a compiler frontend
+- [x] expose directory traversal and path normalization APIs for module resolution
+- [x] support deterministic source loading across Linux, macOS, and Windows paths
+- [x] add tests for missing files, invalid paths, and relative import resolution
+
+### 34.4 String and text processing
+
+- [x] support efficient string indexing, slicing, concatenation, and comparison for lexer work
+- [x] support Unicode-aware source positions where the language requires them
+- [x] support stable byte-offset, line, and column tracking for diagnostics
+- [x] add lexer-sized string processing benchmarks or stress tests
+
+### 34.5 Diagnostics and recovery
+
+- [x] define a Jayess-native diagnostic structure with severity, span, message, and notes
+- [x] support recoverable parser and semantic diagnostics without stopping at the first error
+- [x] support deterministic diagnostic ordering for multi-file projects
+- [x] add tests for multiple syntax and semantic errors in one compile
+
+### 34.6 Backend and toolchain APIs
+
+- [x] expose a Jayess-callable LLVM API package for modules, types, functions, blocks, and instructions
+- [x] expose a Jayess-callable object emission API backed by the bundled LLVM toolchain
+- [x] expose a Jayess-callable lld/link API or stable compiler backend API for executable output
+- [x] add examples that build a small object file or executable through the exposed backend API
+
+### 34.7 Runtime independence
+
+- [x] ensure Jayess-compiled tools can run without depending on Go-only compiler internals
+- [x] expose runtime services needed by compiler tools through Jayess packages
+- [x] support packaging Jayess-built compiler utilities with their runtime assets
+- [x] add smoke tests for Jayess-built command-line tools
+
+### 34.8 Compiler-scale performance
+
+- [x] measure parse, semantic, lowering, and backend time on large Jayess source inputs
+- [x] avoid quadratic behavior in module resolution, symbol lookup, and diagnostic collection
+- [x] keep memory usage bounded for compiler-sized ASTs and module graphs
+- [x] add performance baselines under `test/` or `temp/` generated fixtures
+
+### 34.9 Self-hosting milestones
+
+- [x] compile a Jayess-written lexer utility with the Go-hosted Jayess compiler
+- [x] compile a Jayess-written parser utility with the Go-hosted Jayess compiler
+- [x] compile a Jayess-written semantic checker utility with the Go-hosted Jayess compiler
+- [x] compile a Jayess-written backend/toolchain utility with the Go-hosted Jayess compiler
+- [x] compile a small Jayess-written compiler prototype using previously compiled Jayess utilities
+
+---
+
+## 35. Documentation completion checklist
+
+All project documentation for this section should live under `docs/`. Keep each
+document small and focused; use `README.md` only as the top-level entry point.
+
+### 35.1 Language basics
+
+- [x] document Jayess goals, supported JavaScript-like syntax, and deliberate non-goals in `docs/language_overview.md`
+- [x] document project layout, compiler pipeline, and where each Go package fits in `docs/compiler_overview.md`
+- [x] document source files, comments, literals, variables, constants, and scope rules in `docs/language_basics.md`
+- [x] document primitive types, runtime value representation, truthiness, and equality behavior in `docs/types_and_values.md`
+- [x] document expressions, operators, precedence, assignment, update, and type conversion behavior in `docs/expressions.md`
+- [x] document statements, blocks, conditionals, loops, switch, labels, break, and continue in `docs/statements.md`
+
+### 35.2 Functions, modules, and objects
+
+- [x] document functions, closures, returns, parameters, call behavior, and lifetime rules in `docs/functions.md`
+- [x] document arrays, objects, properties, indexing, member access, and mutation behavior in `docs/objects_and_arrays.md`
+- [x] document destructuring, spread-like supported forms, and unsupported patterns in `docs/destructuring.md`
+- [x] document classes, constructors, fields, methods, accessors, inheritance, and current limits in `docs/classes.md`
+- [x] document imports, exports, module resolution, project loading, and diagnostic behavior in `docs/modules.md`
+- [x] document unsupported JavaScript features with clear alternatives or expected errors in `docs/unsupported_features.md`
+
+### 35.3 Compiler stages
+
+- [x] document lexer output, token model, source positions, and text handling in `docs/lexer.md`
+- [x] document parser AST nodes, parser recovery, and syntax diagnostic conventions in `docs/parser.md`
+- [x] document semantic checks, symbol tables, type/value assumptions, and module checks in `docs/semantic_analysis.md`
+- [x] document generalized lowering strategy and which high-level constructs lower to core forms in `docs/lowering.md`
+- [x] document LLVM backend responsibilities, runtime calls, emitted IR shape, and link flow in `docs/llvm_backend.md`
+- [x] document diagnostics format, severity rules, note handling, and deterministic ordering in `docs/diagnostics.md`
+
+### 35.4 Runtime and standard packages
+
+- [x] document runtime value APIs, object/array helpers, string helpers, and memory/lifetime expectations in `docs/runtime_values.md`
+- [x] document file, path, source text, and compiler data-structure runtime APIs in `docs/runtime_services.md`
+- [x] document built-in HTML, XML, and CSS parsing packages with examples in `docs/parsing_packages.md`
+- [x] document SQLite package setup, linking expectations, and examples in `docs/sqlite.md`
+- [x] document crypto/TLS package setup, OpenSSL expectations, and examples in `docs/crypto_tls.md`
+- [x] document async/runtime integration expectations where libuv support is available in `docs/async_runtime.md`
+
+### 35.5 Native binding and external libraries
+
+- [x] document native binding manifest format, bind file structure, platform fields, and validation rules in `docs/native_bindings.md`
+- [x] document how developers install external native libraries locally before binding them in `docs/native_library_setup.md`
+- [x] document include paths, library paths, link flags, runtime library placement, and distribution layout in `docs/native_linking.md`
+- [x] document how app distribution collects native runtime assets needed by built executables in `docs/app_distribution.md`
+- [x] document licensing responsibilities for third-party native libraries included by developers in `docs/third_party_licenses.md`
+- [x] document examples for binding a small C library and shipping its runtime files in `docs/native_binding_examples.md`
+
+### 35.6 Networking and embedded services
+
+- [x] document libcurl networking package setup, supported transfer APIs, and error handling in `docs/network_curl.md`
+- [x] document Mongoose embedded web server setup, lifecycle, routing model, and shutdown behavior in `docs/network_mongoose.md`
+- [x] document picohttpparser package purpose, low-level HTTP parsing API, and ownership rules in `docs/network_http_parser.md`
+- [x] document TLS/networking integration boundaries between curl, OpenSSL, and embedded server packages in `docs/network_tls.md`
+- [x] document network package distribution requirements for native libraries and licenses in `docs/network_distribution.md`
+- [x] document minimal HTTP client and embedded HTTP server examples in `docs/network_examples.md`
+
+### 35.7 Graphics, UI, and app distribution
+
+- [x] document raylib setup, native library requirements, asset placement, and graphics examples in `docs/graphics_raylib.md`
+- [x] document GLFW/SDL-style binding expectations if developers provide those bindings themselves in `docs/graphics_native_bindings.md`
+- [x] document webview native app support, platform dependencies, and packaging behavior in `docs/webview_apps.md`
+- [x] document app distribution command usage, output layout, runtime assets, and troubleshooting in `docs/app_distribution.md`
+- [x] document compiler/toolchain distribution command usage, LLVM/Clang/lld expectations, and licenses in `docs/toolchain_distribution.md`
+- [x] document cross-platform release notes for Linux, macOS, and Windows differences in `docs/platform_notes.md`
+
+### 35.8 Self-hosting and contributor documentation
+
+- [x] document self-hosting readiness, milestones, remaining risks, and how to run milestone tests in `docs/self_hosting.md`
+- [x] document compiler data structures intended for future Jayess-written compiler components in `docs/compiler_data_structures.md`
+- [x] document performance baselines, benchmark commands, and expected large-program behavior in `docs/performance.md`
+- [x] document testing strategy, test package layout, smoke tests, and release verification commands in `docs/testing.md`
+- [x] document contributor rules for keeping files small, avoiding protected directories, and using `temp/` in `docs/contributing.md`
+- [x] document release checklist from clean checkout through distributable smoke test in `docs/release.md`
 
 ---

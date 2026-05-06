@@ -2,6 +2,7 @@ package dist
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 
 	"jayess-go/target"
@@ -18,6 +19,7 @@ type Config struct {
 	Version       string
 	OutDir        string
 	SourceRoot    string
+	LLVMBuildDir  string
 	Archive       bool
 	BuildCompiler bool
 	StrictTools   bool
@@ -52,6 +54,9 @@ func NormalizeConfig(config Config) (Config, Platform, error) {
 	if config.SourceRoot == "" {
 		config.SourceRoot = DefaultSourceRoot
 	}
+	if config.LLVMBuildDir == "" {
+		config.LLVMBuildDir = defaultLLVMBuildDir(config.SourceRoot)
+	}
 	if len(config.Tools) == 0 {
 		config.Tools = DefaultTools()
 	}
@@ -60,4 +65,8 @@ func NormalizeConfig(config Config) (Config, Platform, error) {
 
 func DefaultTools() []string {
 	return []string{"clang", "clang++", "lld", "ld.lld", "llvm-as", "llc"}
+}
+
+func defaultLLVMBuildDir(sourceRoot string) string {
+	return filepath.Join(sourceRoot, "refs", "llvm-project", "build")
 }

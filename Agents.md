@@ -26,6 +26,15 @@ Jayess is a **JavaScript-like native programming language** implemented in **Go*
 - **Do not edit generated output** unless the task explicitly requires it.
 - If a file is produced by code generation, tests, snapshots, fixture generation, LLVM IR emission, or packaging, treat it as generated unless the task clearly says otherwise.
 
+### Native dependency distribution policy
+
+- Do **not** assume end users have native libraries, command-line tools, or supporting software installed separately.
+- Imported packages and bindings are the source of truth for end-user dependencies: if Jayess code imports a package or native binding, the compiler/distribution flow must build, collect, and package every redistributable runtime asset required for that import.
+- App distributions should include every redistributable `.so`, `.dylib`, `.dll`, data file, helper asset, and supporting runtime file required by imported dependencies, plus the matching license and notice files.
+- The end user should only need the package produced by the Jayess compiler/distribution flow to run the compiled app.
+- Compiler/toolchain distributions should include the compiler-owned tools they need, such as LLVM/Clang/lld tools and their licenses.
+- Platform SDKs or system frameworks that cannot be redistributed, such as Apple SDK files or Microsoft SDK libraries, may remain build-machine requirements; document those clearly and do not treat them as end-user installation steps.
+
 ### Code size and file maintainability
 
 - Keep source files small, focused, and reviewable.

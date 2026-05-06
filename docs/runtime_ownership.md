@@ -116,3 +116,13 @@ Managed native handles become invalid after close. Repeated close on a managed n
 
 Native finalizers must run at most once for each managed native handle, whether
 the handle is closed explicitly or finalized by runtime cleanup.
+# Runtime Ownership Example
+
+```c
+jayess_string text = jayess_value_to_string_copy(value);
+use_string(text.data);
+jayess_string_free(text);
+```
+
+Use copied strings or bytes for long-lived native state. Borrowed runtime views
+should only be used during the current native call.

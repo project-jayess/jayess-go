@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-func copyLLVMTools(sourceRoot string, outputDir string, tools []string) ([]string, []string, error) {
-	sourceDir := llvmBuildBinDir(sourceRoot)
+func copyLLVMTools(buildDir string, outputDir string, tools []string) ([]string, []string, error) {
+	sourceDir := llvmBuildBinDir(buildDir)
 	var copied []string
 	var diagnostics []string
 	for _, tool := range tools {
@@ -25,8 +25,8 @@ func copyLLVMTools(sourceRoot string, outputDir string, tools []string) ([]strin
 	return copied, diagnostics, nil
 }
 
-func copyLLVMLibraries(sourceRoot string, outputDir string) ([]string, error) {
-	sourceDir := llvmBuildLibDir(sourceRoot)
+func copyLLVMLibraries(buildDir string, outputDir string) ([]string, error) {
+	sourceDir := llvmBuildLibDir(buildDir)
 	entries, err := os.ReadDir(sourceDir)
 	if err != nil {
 		if os.IsNotExist(err) {

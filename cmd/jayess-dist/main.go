@@ -22,6 +22,7 @@ func run(args []string) error {
 	version := flags.String("version", dist.DefaultVersion, "package version")
 	out := flags.String("out", dist.DefaultOutDir, "distribution output directory")
 	sourceRoot := flags.String("source-root", dist.DefaultSourceRoot, "Jayess repository root")
+	llvmBuildDir := flags.String("llvm-build-dir", "", "LLVM build directory containing bin and lib")
 	archive := flags.Bool("archive", true, "write a compressed archive")
 	buildCompiler := flags.Bool("build-compiler", true, "build the Jayess compiler into the package")
 	strictTools := flags.Bool("strict-tools", true, "fail when requested LLVM tools are missing")
@@ -35,6 +36,7 @@ func run(args []string) error {
 		Version:       *version,
 		OutDir:        *out,
 		SourceRoot:    *sourceRoot,
+		LLVMBuildDir:  *llvmBuildDir,
 		Archive:       *archive,
 		BuildCompiler: *buildCompiler,
 		StrictTools:   *strictTools,

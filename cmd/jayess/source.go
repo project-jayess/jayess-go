@@ -38,13 +38,37 @@ func lowerInput(inputPath string, target llvmbackend.TargetConfig) (loweredInput
 	if err != nil {
 		return loweredInput{}, fmt.Errorf("parse input: %w", err)
 	}
+	module, err := llvmbackend.LowerJayessStatementProgram(llvmbackend.JayessStatementProgram{
+		Name:       moduleName(inputPath),
+		Target:     target,
+		Statements: jayessEntryStatements(program),
+	})
+	if err != nil {
+		module = lowerFoldedReturnCodeProgram(inputPath, target, program)
+	}
+	return loweredInput{IR: llvmbackend.EmitLLVMIR(module), Program: program}, nil
+}
+
+func lowerFoldedReturnCodeProgram(inputPath string, target llvmbackend.TargetConfig, program *ast.Program) llvmbackend.Module {
 	returnCode, _ := lowering.MainReturnCode(program)
-	module := llvmbackend.LowerJayessProgram(llvmbackend.JayessProgram{
+	return llvmbackend.LowerJayessProgram(llvmbackend.JayessProgram{
 		Name:       moduleName(inputPath),
 		Target:     target,
 		ReturnCode: returnCode,
 	})
-	return loweredInput{IR: llvmbackend.EmitLLVMIR(module), Program: program}, nil
+}
+
+func jayessEntryStatements(program *ast.Program) []ast.Statement {
+	if program == nil {
+		return nil
+	}
+	for _, statement := range program.Statements {
+		function, ok := statement.(*ast.FunctionDecl)
+		if ok && function.Name == "main" {
+			return function.Body
+		}
+	}
+	return program.Statements
 }
 
 func moduleName(path string) string {

@@ -7,6 +7,7 @@ const (
 	NullValue      ValueKind = "null"
 	BooleanValue   ValueKind = "boolean"
 	NumberValue    ValueKind = "number"
+	BigIntValue    ValueKind = "bigint"
 	StringValue    ValueKind = "string"
 	ObjectValue    ValueKind = "object"
 	ArrayValue     ValueKind = "array"
@@ -20,6 +21,7 @@ func ValueKinds() []ValueKind {
 		NullValue,
 		BooleanValue,
 		NumberValue,
+		BigIntValue,
 		StringValue,
 		ObjectValue,
 		ArrayValue,

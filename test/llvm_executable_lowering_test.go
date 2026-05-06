@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"jayess-go/ast"
 	"jayess-go/llvmbackend"
 )
 
@@ -20,6 +21,35 @@ func TestLLVMLowersJayessProgramToIRModule(t *testing.T) {
 	ir := llvmbackend.EmitLLVMIR(module)
 	if !strings.Contains(ir, "; ModuleID = 'app'") || !strings.Contains(ir, "ret i32 7") {
 		t.Fatalf("expected lowered Jayess program IR, got:\n%s", ir)
+	}
+}
+
+func TestLLVMLowersJayessStatementsThroughRuntimeMainWrapper(t *testing.T) {
+	target, ok := llvmbackend.TargetConfigFor("linux-x64")
+	if !ok {
+		t.Fatal("expected linux target config")
+	}
+	module, err := llvmbackend.LowerJayessStatementProgram(llvmbackend.JayessStatementProgram{
+		Name:   "app",
+		Target: target,
+		Statements: []ast.Statement{
+			&ast.ReturnStatement{Value: &ast.NumberLiteral{Value: "7"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("lower statement program: %v", err)
+	}
+	ir := llvmbackend.EmitLLVMIR(module)
+	for _, want := range []string{
+		"define i32 @main()",
+		"call %jayess.value @__jayess_user_main()",
+		"call i32 @jayess_value_to_exit_code",
+		"define %jayess.value @__jayess_user_main()",
+		"ret %jayess.value",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("expected statement program IR to contain %q:\n%s", want, ir)
+		}
 	}
 }
 

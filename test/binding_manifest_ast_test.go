@@ -20,6 +20,8 @@ func TestBindingManifestFromDefaultBindExport(t *testing.T) {
 			libraryDirs: ["./vendor/lib"],
 			sharedLibraries: ["mylib", "./vendor/libhelper.so"],
 			licenseFiles: ["./vendor/LICENSE.helper"],
+			runtimeAssets: ["./data/schema.json"],
+			helperAssets: ["./bin/helper"],
 			cflags: ["-DMYLIB=1"],
 			ldflags: ["-lm"],
 			exports: {
@@ -38,6 +40,8 @@ func TestBindingManifestFromDefaultBindExport(t *testing.T) {
 	requireStringSlice(t, manifest.LibraryDirs, []string{"./vendor/lib"})
 	requireStringSlice(t, manifest.SharedLibraries, []string{"mylib", "./vendor/libhelper.so"})
 	requireStringSlice(t, manifest.LicenseFiles, []string{"./vendor/LICENSE.helper"})
+	requireStringSlice(t, manifest.RuntimeAssets, []string{"./data/schema.json"})
+	requireStringSlice(t, manifest.HelperAssets, []string{"./bin/helper"})
 	requireStringSlice(t, manifest.CFlags, []string{"-DMYLIB=1"})
 	requireStringSlice(t, manifest.LDFlags, []string{"-lm"})
 	if len(manifest.Exports) != 2 {
@@ -64,6 +68,8 @@ func TestBindingManifestFromDefaultBindExportReadsPlatforms(t *testing.T) {
 					libraryDirs: ["./linux/lib"],
 					sharedLibraries: ["gtk-3"],
 					licenseFiles: ["./LICENSE.gtk"],
+					runtimeAssets: ["./linux/data.dat"],
+					helperAssets: ["./linux/helper"],
 					cflags: ["-DLINUX=1"],
 					ldflags: ["-ldl"]
 				}
@@ -84,6 +90,8 @@ func TestBindingManifestFromDefaultBindExportReadsPlatforms(t *testing.T) {
 	requireStringSlice(t, linux.LibraryDirs, []string{"./linux/lib"})
 	requireStringSlice(t, linux.SharedLibraries, []string{"gtk-3"})
 	requireStringSlice(t, linux.LicenseFiles, []string{"./LICENSE.gtk"})
+	requireStringSlice(t, linux.RuntimeAssets, []string{"./linux/data.dat"})
+	requireStringSlice(t, linux.HelperAssets, []string{"./linux/helper"})
 	requireStringSlice(t, linux.CFlags, []string{"-DLINUX=1"})
 	requireStringSlice(t, linux.LDFlags, []string{"-ldl"})
 }

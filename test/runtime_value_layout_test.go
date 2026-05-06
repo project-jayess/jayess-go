@@ -12,6 +12,7 @@ func TestRuntimeValueKindsCoverDynamicJayessValues(t *testing.T) {
 		jayessruntime.NullValue,
 		jayessruntime.BooleanValue,
 		jayessruntime.NumberValue,
+		jayessruntime.BigIntValue,
 		jayessruntime.StringValue,
 		jayessruntime.ObjectValue,
 		jayessruntime.ArrayValue,
@@ -45,6 +46,13 @@ func TestRuntimeValueLayoutUsesImmediateAndManagedPayloads(t *testing.T) {
 	if object.Payload != jayessruntime.PointerPayload || !object.HeapAllocated || !object.Managed {
 		t.Fatalf("object should be managed pointer payload, got %#v", object)
 	}
+	bigint, ok := jayessruntime.LayoutForKind(jayessruntime.BigIntValue)
+	if !ok {
+		t.Fatal("missing bigint layout")
+	}
+	if bigint.Payload != jayessruntime.PointerPayload || !bigint.HeapAllocated || !bigint.Managed {
+		t.Fatalf("bigint should be managed pointer payload, got %#v", bigint)
+	}
 }
 
 func TestRuntimeValueConstructorSymbolsAreModeled(t *testing.T) {
@@ -53,6 +61,7 @@ func TestRuntimeValueConstructorSymbolsAreModeled(t *testing.T) {
 		"jayess_value_null",
 		"jayess_value_from_boolean",
 		"jayess_value_from_number",
+		"jayess_value_from_bigint_string",
 		"jayess_value_from_string_copy",
 		"jayess_object_new",
 		"jayess_array_new",
@@ -77,6 +86,9 @@ func TestRuntimeValueConstructorsPreservePrimitivePayloads(t *testing.T) {
 	}
 	if value := jayessruntime.NewNumber(42.5); value.Kind() != jayessruntime.NumberValue || value.Number() != 42.5 {
 		t.Fatalf("expected numeric value, got kind=%s number=%v", value.Kind(), value.Number())
+	}
+	if value := jayessruntime.NewBigInt("42"); value.Kind() != jayessruntime.BigIntValue || value.BigInt() != "42" {
+		t.Fatalf("expected bigint value, got kind=%s bigint=%q", value.Kind(), value.BigInt())
 	}
 	if value := jayessruntime.NewString("jayess"); value.Kind() != jayessruntime.StringValue || value.Text() != "jayess" {
 		t.Fatalf("expected string value, got kind=%s text=%q", value.Kind(), value.Text())
