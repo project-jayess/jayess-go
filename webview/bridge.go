@@ -10,6 +10,20 @@ const (
 	BridgeErrorPropagation BridgeFeature = "bridge-error-propagation"
 )
 
+type HostCallKind string
+
+const (
+	CreateWindowCall    HostCallKind = "create-window"
+	MountContentCall    HostCallKind = "mount-content"
+	DispatchEventCall   HostCallKind = "dispatch-event"
+	EmitHostMessageCall HostCallKind = "emit-host-message"
+)
+
+type BridgeContract struct {
+	Calls  []HostCallKind
+	Events []EventKind
+}
+
 func BridgeFeatures() []BridgeFeature {
 	return []BridgeFeature{
 		ExposeJayessFunction,
@@ -17,5 +31,23 @@ func BridgeFeatures() []BridgeFeature {
 		SafeStringJSONBoundary,
 		SafeCallbackLifetime,
 		BridgeErrorPropagation,
+	}
+}
+
+func DefaultBridgeContract() BridgeContract {
+	return BridgeContract{
+		Calls: []HostCallKind{
+			CreateWindowCall,
+			MountContentCall,
+			DispatchEventCall,
+			EmitHostMessageCall,
+		},
+		Events: []EventKind{
+			WindowOpenedEvent,
+			WindowClosedEvent,
+			HostMessageEvent,
+			DialogResultEvent,
+			FileDropEvent,
+		},
 	}
 }

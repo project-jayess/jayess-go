@@ -40,6 +40,6 @@ func PlatformSupportFor(platform string) (PlatformSupport, bool) {
 	}
 	return PlatformSupport{
 		Platform:   platform,
-		Diagnostic: "webview platform support is not configured",
+		Diagnostic: UnsupportedPlatformDiagnostic(platform),
 	}, false
 }

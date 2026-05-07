@@ -28,6 +28,9 @@ func TestCoreRuntimePackagesStayGoFirst(t *testing.T) {
 	if !jayessruntime.HasGoRuntimePackage("mvp-globals") {
 		t.Fatal("expected mvp-globals Go runtime package")
 	}
+	if !jayessruntime.HasGoRuntimePackage("webview") {
+		t.Fatal("expected webview Go runtime package")
+	}
 	if jayessruntime.HasGoRuntimePackage("native-c-runtime") {
 		t.Fatal("did not expect native C runtime package in core runtime model")
 	}

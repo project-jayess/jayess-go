@@ -2552,3 +2552,83 @@ reviewable.
 - [x] add tests under `test/` for queued PCM ordering, drain behavior, gain, pan, and mixing
 
 ---
+
+## 39. First-party internal webview toolkit
+
+This section tracks a Jayess-owned GUI foundation built as a first-party
+internal package rather than an externally installed dependency. The goal is a
+small, focused, cross-platform design that keeps the Jayess-facing API stable
+while the native host layer stays internal. Work in this section should prefer
+generalized mechanisms over per-widget or per-case special handling.
+
+### 39.1 Package ownership and distribution model
+
+- [x] define `@jayess/webview` as a first-party Jayess package owned by the compiler/runtime distribution
+- [x] ensure normal use of `@jayess/webview` does not require separate end-user package installation outside the Jayess distribution flow
+- [x] ensure the package design does not require app authors to ship unrelated third-party GUI libraries alongside compiled apps
+- [x] document any unavoidable platform SDK requirements as build-machine requirements only
+- [x] keep package, runtime, and distribution responsibilities separated clearly in docs and code layout
+
+### 39.2 Public API shape
+
+- [x] define a small Jayess-facing window and app lifecycle API
+- [x] define a small generalized UI tree or mount model instead of exposing raw per-platform widget APIs directly
+- [x] define event, callback, and message flow APIs that do not depend on ad hoc platform-specific special cases
+- [x] keep raw escape hatches explicit and secondary to the main Jayess GUI API
+- [x] document initial non-goals so the first API stays small and reviewable
+
+### 39.3 Internal backend architecture
+
+- [x] keep the public `@jayess/webview` API separate from the internal native host implementation
+- [x] define a small internal bridge for window creation, content mounting, event dispatch, and host-to-Jayess messaging
+- [x] keep platform-specific code isolated by target instead of mixing it into frontend package logic
+- [x] prefer shared generalized host abstractions over repeated per-platform feature branches where behavior is conceptually the same
+- [x] keep source files and tests small, focused, and reviewable as the backend grows
+
+### 39.4 Cross-platform baseline behavior
+
+- [x] define the initial supported platform set for Windows, macOS, and Linux
+- [x] define baseline behavior for window open, close, title, size, navigation, and app shutdown
+- [x] define baseline drag-and-drop behavior for source files and app assets
+- [x] define baseline file dialog behavior for open and save flows
+- [x] define consistent diagnostics for missing platform support or unsupported host capabilities
+
+### 39.5 Asset, content, and packaging model
+
+- [x] define how HTML, CSS, script, and static assets are owned and packaged by Jayess applications
+- [x] ensure asset loading and runtime startup work from packaged app output without external installation steps
+- [x] define a generalized content mount model that can support embedded assets and generated UI content
+- [x] keep distribution behavior explicit so compiled apps do not silently depend on developer-machine paths
+- [x] add distribution tests proving packaged GUI apps run with only the produced app bundle and documented platform prerequisites
+
+### 39.6 Compiler, runtime, and test integration
+
+- [x] add focused compile and runtime tests for minimal `@jayess/webview` imports
+- [x] add integration tests for window lifecycle, event dispatch, and file-drop flows where practical
+- [x] add packaging tests for Windows, macOS, and Linux GUI app outputs as support lands
+- [x] keep documentation in small focused files under `docs/` instead of growing one large GUI design document
+- [x] ensure future self-hosting work can migrate higher-level toolkit logic into Jayess without breaking the public package surface
+
+### 39.7 Internal webview runtime completion
+
+- [x] implement the first internal `runtime/webview` host layer for window lifecycle without requiring a separately installed Jayess package
+- [x] implement internal content mounting for embedded HTML, CSS, script, and generated document content through `@jayess/webview`
+- [x] implement internal event delivery for window lifecycle, host messages, dialog results, and file-drop flows
+- [x] implement internal open/save dialog support through the Jayess-owned webview runtime surface
+- [x] ensure normal `@jayess/webview` apps do not require separate end-user installation steps outside the Jayess-produced app bundle and documented platform prerequisites
+- [x] ensure the Jayess-owned webview path does not require shipping unrelated third-party GUI libraries alongside compiled apps
+- [x] add focused runtime and app-distribution tests proving the internal webview path works from packaged output on supported targets
+
+### 39.8 Native webview backend completion
+
+- [ ] implement the real Windows native backend that opens and manages webview windows through the Jayess-owned runtime surface
+- [ ] implement the real macOS native backend that opens and manages webview windows through the Jayess-owned runtime surface
+- [ ] implement the real Linux native backend that opens and manages webview windows through the Jayess-owned runtime surface
+- [ ] connect internal content mounting to actual native webview rendering on supported targets
+- [ ] connect internal dialog requests to actual native open and save dialogs on supported targets
+- [ ] connect internal file-drop delivery to actual native drag-and-drop events on supported targets
+- [x] ensure a Jayess-compiled `@jayess/webview` app does not require the user to separately install a Jayess webview package
+- [x] package backend/runtime requirements through Jayess app distribution where redistribution is supported, and document unavoidable system prerequisites where redistribution is not supported
+- [ ] add focused runtime and packaging tests proving a compiler-built app can open a real webview window from packaged output on supported targets without a separate Jayess webview package install
+
+---

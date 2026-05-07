@@ -5,6 +5,7 @@ import "fmt"
 const stdlibImportPrefix = "jayess:stdlib/"
 
 var stdlibImportPaths = map[string]struct{}{
+	"@jayess/webview": {},
 	"buffer":        {},
 	"child_process": {},
 	"compression":   {},

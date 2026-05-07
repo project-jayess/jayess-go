@@ -1,6 +1,11 @@
 # Webview Apps
 
 Webview support allows native desktop apps with platform webview dependencies.
+The first-party toolkit layout proposal lives in `docs/webview_toolkit.md`.
+The Jayess-facing import path should be `@jayess/webview` rather than a local
+binding import when using the first-party package surface.
+Focused API and distribution notes live in `docs/webview_api.md` and
+`docs/webview_distribution.md`.
 
 ## Platform Dependencies
 
@@ -22,7 +27,7 @@ installed separately.
 ## Example Shape
 
 ```js
-import { createWindow, run } from "./native/webview.js";
+import { createWindow, run } from "@jayess/webview";
 
 function main() {
   const window = createWindow("Jayess", "https://example.com");

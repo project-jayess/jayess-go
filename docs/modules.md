@@ -14,6 +14,9 @@ import { add } from "./native/math.js";
 Reserved package imports such as `"ffi"` and `"llvm"` are handled by compiler
 packages.
 
+First-party Jayess packages can also use scoped imports such as
+`"@jayess/webview"` when the compiler/runtime provides that package directly.
+
 ## Exports
 
 Modules can export declarations and named values. Binding modules export a

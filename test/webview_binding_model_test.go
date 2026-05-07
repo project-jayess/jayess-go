@@ -1,6 +1,7 @@
 package test
 
 import (
+	"path/filepath"
 	"testing"
 
 	"jayess-go/binding"
@@ -63,7 +64,7 @@ func TestWebviewBindingBuildPlanLinksNativeSources(t *testing.T) {
 	if len(plan.CompileUnits) != 1 {
 		t.Fatalf("expected one webview compile unit, got %#v", plan.CompileUnits)
 	}
-	requireStringSlice(t, plan.CompileUnits[0].IncludeDirs, []string{"native/include", "./runtime"})
+	requireStringSlice(t, plan.CompileUnits[0].IncludeDirs, []string{filepath.Join("native", "include"), "./runtime"})
 	requireStringSlice(t, plan.CompileUnits[0].CFlags, []string{"-DJAYESS_WEBVIEW=1"})
 	requireStringSlice(t, plan.LDFlags, []string{"-lgtk-3", "-lwebkit2gtk-4.1"})
 }

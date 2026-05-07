@@ -36,6 +36,16 @@ func TestResolverRoutesEditorFriendlyStdlibImports(t *testing.T) {
 	}
 }
 
+func TestResolverRoutesJayessProvidedWebviewPackage(t *testing.T) {
+	resolved, err := resolver.ResolveImport("/project/src/main.js", "@jayess/webview")
+	if err != nil {
+		t.Fatalf("ResolveImport returned error: %v", err)
+	}
+	if resolved != "jayess:stdlib/@jayess/webview" {
+		t.Fatalf("expected Jayess webview package import, got %s", resolved)
+	}
+}
+
 func TestResolverKeepsUnknownBareImportsAsPackages(t *testing.T) {
 	root := createImportResolverFixture(t, map[string]string{
 		"src/main.js":                    ``,

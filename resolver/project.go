@@ -76,16 +76,13 @@ func (l *projectLoader) loadModule(path string) ProjectModule {
 	dependencies := l.resolveDependencies(path, program)
 	l.graph.AddResolvedModule(path, dependencies)
 	for _, dependency := range dependencies {
-		if IsResolvedStdlibImport(dependency.Path) {
-			continue
-		}
 		l.enqueue(dependency.Path)
 	}
 	return ProjectModule{Path: path, Program: program, Dependencies: dependencies}
 }
 
 func (l *projectLoader) parseModule(path string) (*ast.Program, bool) {
-	source, err := os.ReadFile(path)
+	source, _, err := loadResolvedModuleSource(path)
 	if err != nil {
 		l.diagnostics = append(l.diagnostics, ProjectDiagnostic{Path: path, Message: "read module: " + err.Error()})
 		return nil, false
@@ -99,10 +96,15 @@ func (l *projectLoader) parseModule(path string) (*ast.Program, bool) {
 }
 
 func (l *projectLoader) resolveDependencies(path string, program *ast.Program) []ResolvedModuleDependency {
+	importerPath, err := resolvedModuleSourcePath(path)
+	if err != nil {
+		l.diagnostics = append(l.diagnostics, ProjectDiagnostic{Path: path, Message: "resolve importer path: " + err.Error()})
+		return nil
+	}
 	dependencies := ast.CompactModuleDependencies(ast.ModuleDependencies(program))
 	resolved := make([]ResolvedModuleDependency, 0, len(dependencies))
 	for _, dependency := range dependencies {
-		resolvedPath, err := ResolveImport(path, dependency.Source)
+		resolvedPath, err := ResolveImport(importerPath, dependency.Source)
 		if err != nil {
 			l.diagnostics = append(l.diagnostics, projectDiagnostic(
 				path,

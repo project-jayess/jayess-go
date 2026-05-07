@@ -1,0 +1,15 @@
+{
+  "package": "@jayess/webview",
+  "mounts": [
+    "embedded-document",
+    "embedded-assets",
+    "generated-content"
+  ],
+  "events": [
+    "window-opened",
+    "window-closed",
+    "host-message",
+    "dialog-result",
+    "file-drop"
+  ]
+}

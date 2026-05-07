@@ -27,6 +27,7 @@ func GoRuntimePackages() []PackageModel {
 		{Name: "process", Import: "jayess-go/runtime", Role: SystemRole, Language: GoRuntime},
 		{Name: "network", Import: "jayess-go/runtime", Role: StdlibRole, Language: GoRuntime},
 		{Name: "storage", Import: "jayess-go/runtime", Role: StdlibRole, Language: GoRuntime},
+		{Name: "webview", Import: "jayess-go/runtime/webview", Role: StdlibRole, Language: GoRuntime},
 		{Name: "worker", Import: "jayess-go/runtime", Role: SystemRole, Language: GoRuntime},
 	}
 }
