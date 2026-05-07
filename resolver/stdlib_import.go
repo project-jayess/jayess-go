@@ -18,6 +18,7 @@ var stdlibImportPaths = map[string]struct{}{
 	"os":            {},
 	"path":          {},
 	"process":       {},
+	"storage":       {},
 	"stream":        {},
 	"tcp":           {},
 	"terminal":      {},

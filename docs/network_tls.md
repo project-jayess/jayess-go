@@ -1,30 +1,38 @@
 # Network TLS Boundaries
 
-Networking packages should keep TLS responsibilities explicit.
+Jayess TLS and HTTPS use compiler-owned Go runtime helpers for supported paths.
+Applications should not require end users to install OpenSSL, libcurl, libuv, or
+another TLS library after packaging.
 
 ## Boundaries
 
-- libcurl can own TLS for client transfers when built against TLS support
-- OpenSSL bindings can expose lower-level crypto or TLS primitives
-- embedded server packages should document whether they terminate TLS directly
-  or expect a proxy
+- `tls` owns TLS configuration, certificate loading, trust stores, ALPN, and
+  hostname verification data structures.
+- `https` owns HTTPS client/server facades and reuses the internal HTTP request,
+  response, handler, stream, and event model.
+- optional native bindings may still expose OpenSSL, libcurl, or platform TLS,
+  but those are explicit package imports and not required for internal
+  `tls`/`https`.
 
 ## Distribution
 
-When TLS relies on shared native libraries, package those libraries and license
-files with the application distribution.
+Internal TLS and HTTPS do not add shared-library runtime assets. If a future
+target needs redistributable TLS backend assets, the compiler must package them
+automatically when `tls` or `https` is imported.
 
 ## Configuration
 
 Certificates, keys, and trust store paths should be explicit application
 configuration, not hidden global state.
 
-## Example Configuration
+## Example
 
 ```js
-const tls = {
-  certFile: "./certs/server.crt",
-  keyFile: "./certs/server.key",
-  trustStore: "./certs/ca.pem"
-};
+const cert = tls.certificate("./certs/server.crt", "./certs/server.key");
+const server = https.createServer({ cert: cert }, (req, res) => {
+	http.status(res, 200);
+	http.writeBody(res, "secure hello");
+});
+
+server.listen("127.0.0.1:8443");
 ```

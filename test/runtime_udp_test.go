@@ -1,7 +1,9 @@
 package test
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	jayessruntime "jayess-go/runtime"
 )
@@ -50,6 +52,44 @@ func TestRuntimeUDPCapabilitiesDeclareEntrypoints(t *testing.T) {
 		if capability.Kind != "function" {
 			t.Fatalf("UDP capability %s has unsupported kind %q", capability.Name, capability.Kind)
 		}
+	}
+}
+
+func TestRuntimeUDPBindSendReceiveClose(t *testing.T) {
+	receiver := jayessruntime.UDPWithTimeout(jayessruntime.NewUDPSocket(), time.Second)
+	if err := jayessruntime.UDPBind(receiver, "127.0.0.1:0"); err != nil {
+		t.Fatalf("bind UDP receiver: %v", err)
+	}
+	defer jayessruntime.UDPClose(receiver)
+
+	sender := jayessruntime.UDPWithTimeout(jayessruntime.NewUDPSocket(), time.Second)
+	if err := jayessruntime.UDPBind(sender, "127.0.0.1:0"); err != nil {
+		t.Fatalf("bind UDP sender: %v", err)
+	}
+	defer jayessruntime.UDPClose(sender)
+
+	if _, err := jayessruntime.UDPSend(sender, []byte("hello"), receiver.LocalAddress()); err != nil {
+		t.Fatalf("send UDP: %v", err)
+	}
+	packet, err := jayessruntime.UDPReceive(receiver, 64)
+	if err != nil {
+		t.Fatalf("receive UDP: %v", err)
+	}
+	if string(packet.Data) != "hello" || packet.Address == "" {
+		t.Fatalf("unexpected UDP packet: %#v", packet)
+	}
+}
+
+func TestRuntimeUDPBroadcastAndUnsupportedMulticast(t *testing.T) {
+	socket := jayessruntime.NewUDPSocket()
+	if err := jayessruntime.UDPSetBroadcast(socket, true); err != nil {
+		t.Fatalf("set UDP broadcast: %v", err)
+	}
+	if !socket.Broadcast {
+		t.Fatal("expected UDP broadcast flag")
+	}
+	if err := jayessruntime.UDPJoinMulticast(socket, "224.0.0.1"); !errors.Is(err, jayessruntime.ErrUnsupportedUDPFeature) {
+		t.Fatalf("expected unsupported multicast error, got %v", err)
 	}
 }
 

@@ -1,6 +1,8 @@
 # SQLite
 
-SQLite support is provided through native package or binding integration.
+SQLite support is optional native package or binding integration. For simple
+dependency-free persistence, prefer Jayess internal `storage`, documented in
+`docs/storage.md`.
 
 ## Setup
 

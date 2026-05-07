@@ -859,6 +859,17 @@ A memory-safety item may only be marked done when covered by focused tests.
 - [x] keep-alive
 - [x] timeout handling
 
+### 11.1.1 Internal HTTP server runtime
+
+- [x] HTTP server and Node-style event API are backed internally by Go standard library runtime code
+- [x] HTTP server request and response objects are implemented without external native libraries
+- [x] HTTP runtime client helper supports timeout and keep-alive request metadata
+- [x] HTTP response body streams are backed by runtime streams
+- [x] Direct `http.*` calls lower to `jayess_http_*` LLVM runtime symbols
+- [x] HTTP server example exists under `examples/`
+- [x] HTTP server runtime and LLVM bridge tests are covered under `test/`
+- [x] Internal HTTP server documentation exists in `docs/network_http_server.md`
+
 ### 11.2 HTTPS
 
 - [x] HTTPS server
@@ -2373,5 +2384,171 @@ document small and focused; use `README.md` only as the top-level entry point.
 - [x] document testing strategy, test package layout, smoke tests, and release verification commands in `docs/testing.md`
 - [x] document contributor rules for keeping files small, avoiding protected directories, and using `temp/` in `docs/contributing.md`
 - [x] document release checklist from clean checkout through distributable smoke test in `docs/release.md`
+
+---
+
+## 36. Internal Node-like runtime libraries
+
+This section tracks Node-like standard capabilities that should be Jayess-owned
+runtime/compiler features instead of app-level external native library
+requirements. Keep each item generalized and backed by small runtime files,
+tests under `test/`, and docs under `docs/`.
+
+### 36.1 Crypto without required OpenSSL installs
+
+- [x] implement internal random byte generation runtime helpers
+- [x] implement internal hash runtime helpers for common digests
+- [x] implement internal HMAC runtime helpers
+- [x] implement internal secure compare helpers
+- [x] define packaging fallback rules for algorithms that still need native crypto backends
+- [x] update crypto docs to distinguish internal crypto from packaged native fallback crypto
+- [x] add runtime and LLVM bridge tests for internal crypto calls
+
+### 36.2 TLS and HTTPS without user-installed TLS libraries
+
+- [x] implement internal TLS client/server facade over compiler-owned runtime support
+- [x] implement internal HTTPS client/server facade using the internal HTTP server model
+- [x] define certificate, key, trust store, and ALPN runtime data structures
+- [x] define packaging rules for redistributable TLS backend assets when a platform requires them
+- [x] update TLS/HTTPS docs to remove user-installed library assumptions for supported paths
+- [x] add runtime and distribution tests for HTTPS/TLS imports
+
+### 36.3 Compression without external zlib/Brotli installs
+
+- [x] implement internal gzip and gunzip helpers
+- [x] implement internal deflate and inflate helpers
+- [x] implement compression stream wrappers using the shared Jayess stream model
+- [x] decide and document Brotli support as internal, packaged fallback, or explicitly unsupported
+- [x] add runtime and LLVM bridge tests for compression calls
+
+### 36.4 DNS without c-ares or external resolver libraries
+
+- [x] implement internal lookup and reverse lookup helpers
+- [x] implement internal IP parse/classification helpers
+- [x] define resolver configuration data structures without external library assumptions
+- [x] document platform DNS behavior and unsupported resolver features
+- [x] add runtime and LLVM bridge tests for DNS calls
+
+### 36.5 TCP and UDP without libuv dependency
+
+- [x] implement internal TCP client/listen/accept/read/write/close helpers
+- [x] implement internal UDP socket/bind/send/receive helpers
+- [x] integrate TCP/UDP IO with the shared Jayess stream/backpressure model
+- [x] document socket timeout and error behavior
+- [x] add runtime and LLVM bridge tests for TCP and UDP calls
+
+### 36.6 Event loop, timers, and microtasks without app-level libuv
+
+- [x] implement Jayess-owned timer scheduling for timeout and interval APIs
+- [x] implement microtask queue semantics for runtime promises and queueMicrotask
+- [x] define event loop lifecycle behavior for CLI, HTTP, streams, and child processes
+- [x] ensure imported code does not require libuv as an end-user dependency
+- [x] add deterministic runtime tests for timer and microtask ordering
+
+### 36.7 Workers without external thread runtime
+
+- [x] implement internal worker creation and message passing model
+- [x] implement worker cleanup and error propagation behavior
+- [x] define shared memory and atomic support boundaries
+- [x] document worker limitations compared with Node.js workers
+- [x] add runtime tests for worker message and cleanup behavior
+
+### 36.8 Shared internal stream, Buffer, URL, and util completion
+
+- [x] finish shared stream primitives for readable, writable, duplex, transform, pipe, and backpressure
+- [x] finish Buffer and binary data helpers without native buffer libraries
+- [x] finish URL and query helpers without native parser libraries
+- [x] finish util format/inspect helpers without external formatting libraries
+- [x] add cross-runtime integration tests that reuse streams across fs, HTTP, child process, compression, TCP, and UDP
+
+### 36.9 External dependency retirement checks
+
+- [x] update `docs/external-lib.md` when a Node-like feature moves from external/native fallback to internal runtime support
+- [x] add distribution tests proving internalized Node-like imports do not package external native libraries
+- [x] keep optional non-Node packages such as SQLite, GUI, graphics, and audio in native package/binding flow
+- [x] document any remaining platform SDK requirements as build-machine requirements, not end-user install steps
+
+---
+
+## 37. Internal library dependency reduction
+
+This section tracks remaining opportunities to replace optional external/native
+dependencies with Jayess-owned internal libraries. Keep each item focused on
+general runtime mechanisms, small Go files, tests under `test/`, and docs under
+`docs/`. Optional platform-backed packages should remain explicit packaged
+bindings when they cannot reasonably be internal.
+
+### 37.1 Internal crypto completion
+
+- [x] implement internal symmetric encryption and decryption helpers
+- [x] implement internal signing and verification helpers
+- [x] implement internal key generation, import, and export helpers
+- [x] implement internal certificate parsing helpers
+- [x] update crypto docs to show which OpenSSL-backed paths are now optional only
+- [x] add runtime and LLVM bridge tests for completed crypto helpers
+
+### 37.2 External networking retirement
+
+- [x] document libcurl as optional advanced transport only for proxies, FTP, cookie jar parity, custom TLS backends, and HTTP/2 or HTTP/3 extras
+- [x] document Mongoose as optional alternative embedded server only
+- [x] document picohttpparser as optional low-level parser only
+- [x] add distribution tests proving normal `http` and `https` apps do not package libcurl, Mongoose, or picohttpparser assets
+- [x] update networking docs to prefer internal `http`, `https`, TCP, UDP, DNS, and stream APIs for standard apps
+
+### 37.3 libuv retirement
+
+- [x] document libuv as optional binding experiment support only
+- [x] add distribution tests proving timers, microtasks, filesystem, process, TCP, and UDP imports do not package libuv assets
+- [x] update async/runtime docs to route core scheduling and IO through Jayess-owned runtime services
+- [x] keep libuv binding docs separate from core runtime docs
+
+### 37.4 Compression completion
+
+- [x] keep Brotli explicitly unsupported or implement a Jayess-owned Brotli helper
+- [x] document the selected Brotli policy in compression docs
+- [x] add runtime and distribution tests for the selected Brotli policy
+- [x] ensure gzip and deflate remain internal and do not package external zlib assets
+
+### 37.5 Internal storage alternative
+
+- [x] design a small Jayess-owned key-value or document storage API
+- [x] implement internal storage runtime helpers without SQLite
+- [x] add persistence, read, write, delete, and scan tests under `test/`
+- [x] document internal storage as the dependency-free default for simple apps
+- [x] keep SQLite documented as an optional native package for SQL compatibility
+
+### 37.6 Asset and media helpers
+
+- [x] implement internal asset manifest and file loading helpers
+- [x] implement internal WAV or PCM parsing helpers
+- [x] implement internal audio metadata helpers
+- [x] implement simple internal PCM mixing helpers where no device playback is required
+- [x] document real audio device playback as optional platform/native package support
+- [x] add tests for asset lookup, WAV/PCM parsing, and simple mixing
+
+---
+
+## 38. Internal dependency reduction follow-up
+
+This section tracks the next dependency-reduction pass. Keep each item focused
+on internal mechanisms that reduce external library need without cloning large
+third-party projects. Source files, tests, and docs should stay small and
+reviewable.
+
+### 38.1 Brotli decision and internal path
+
+- [x] decide whether Jayess keeps Brotli explicitly unsupported or implements a Jayess-owned Brotli helper
+- [x] if implementing Brotli, add small internal runtime entrypoints for compress and decompress without requiring external Brotli libraries
+- [x] if keeping unsupported, tighten runtime, docs, and distribution tests so Brotli never packages external libraries silently
+- [x] update `docs/compression.md` and `docs/external-lib.md` with the final Brotli policy
+- [x] add runtime and LLVM bridge tests for the final Brotli behavior
+
+### 38.2 Internal audio queue and mixer
+
+- [x] design a platform-neutral audio buffer queue API that does not open playback or capture devices
+- [x] implement internal queue, drain, seek, and mix helpers for PCM data
+- [x] add gain and pan controls to the internal mixer without requiring device libraries
+- [x] document real device playback and capture as optional platform/native package support
+- [x] add tests under `test/` for queued PCM ordering, drain behavior, gain, pan, and mixing
 
 ---

@@ -19,6 +19,18 @@ func HTTPCapabilities() []HTTPCapability {
 		{Name: "streamBody", RuntimeSymbol: "jayess_http_stream_body", Kind: "function"},
 		{Name: "keepAlive", RuntimeSymbol: "jayess_http_keep_alive", Kind: "function"},
 		{Name: "withTimeout", RuntimeSymbol: "jayess_http_with_timeout", Kind: "function"},
+		{Name: "listen", RuntimeSymbol: "jayess_http_server_listen", Kind: "function"},
+		{Name: "close", RuntimeSymbol: "jayess_http_server_close", Kind: "function"},
+		{Name: "address", RuntimeSymbol: "jayess_http_server_address", Kind: "function"},
+		{Name: "on", RuntimeSymbol: "jayess_http_server_on", Kind: "function"},
+		{Name: "addListener", RuntimeSymbol: "jayess_http_server_add_listener", Kind: "function"},
+		{Name: "once", RuntimeSymbol: "jayess_http_server_once", Kind: "function"},
+		{Name: "off", RuntimeSymbol: "jayess_http_server_off", Kind: "function"},
+		{Name: "removeListener", RuntimeSymbol: "jayess_http_server_remove_listener", Kind: "function"},
+		{Name: "removeAllListeners", RuntimeSymbol: "jayess_http_server_remove_all_listeners", Kind: "function"},
+		{Name: "emit", RuntimeSymbol: "jayess_http_server_emit", Kind: "function"},
+		{Name: "eventNames", RuntimeSymbol: "jayess_http_server_event_names", Kind: "function"},
+		{Name: "listenerCount", RuntimeSymbol: "jayess_http_server_listener_count", Kind: "function"},
 	}
 }
 

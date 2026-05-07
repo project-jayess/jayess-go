@@ -1,6 +1,9 @@
 package test
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"testing"
 
 	jayessruntime "jayess-go/runtime"
@@ -48,6 +51,60 @@ func TestRuntimeTLSCapabilitiesDeclareEntrypoints(t *testing.T) {
 		if capability.Kind != "function" {
 			t.Fatalf("TLS capability %s has unsupported kind %q", capability.Name, capability.Kind)
 		}
+	}
+}
+
+func TestRuntimeTLSCertificateAndConfig(t *testing.T) {
+	certPEM, keyPEM := selfSignedTLSPEM(t, "localhost")
+	certificate, err := jayessruntime.NewTLSCertificate(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("load certificate: %v", err)
+	}
+	config := jayessruntime.TLSWithALPN(jayessruntime.TLSRuntimeConfig{
+		ServerName:   "localhost",
+		Certificates: []jayessruntime.TLSCertificate{certificate},
+	}, []string{"h2", "http/1.1"})
+
+	serverConfig := jayessruntime.TLSServerConfig(config)
+	if len(serverConfig.Certificates) != 1 {
+		t.Fatalf("expected server certificate")
+	}
+	if serverConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("expected secure TLS minimum version, got %#x", serverConfig.MinVersion)
+	}
+	if got := serverConfig.NextProtos; len(got) != 2 || got[0] != "h2" {
+		t.Fatalf("unexpected ALPN protocols %#v", got)
+	}
+
+	clientConfig := jayessruntime.TLSClientConfig(config)
+	if clientConfig.ServerName != "localhost" {
+		t.Fatalf("unexpected client server name %q", clientConfig.ServerName)
+	}
+}
+
+func TestRuntimeTLSTrustStoreAndHostnameVerification(t *testing.T) {
+	certPEM, _ := selfSignedTLSPEM(t, "localhost")
+	store, err := jayessruntime.NewTLSTrustStore(certPEM)
+	if err != nil {
+		t.Fatalf("load trust store: %v", err)
+	}
+	if store.Subjects != 1 {
+		t.Fatalf("expected one trust store subject, got %d", store.Subjects)
+	}
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("expected PEM certificate")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+	if err := jayessruntime.TLSVerifyHostname(certificate, "localhost"); err != nil {
+		t.Fatalf("verify hostname: %v", err)
+	}
+	if err := jayessruntime.TLSVerifyHostname(certificate, "example.com"); err == nil {
+		t.Fatal("expected hostname mismatch")
 	}
 }
 

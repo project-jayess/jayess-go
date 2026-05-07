@@ -32,6 +32,7 @@ var builtinGlobals = []string{
 	"readLine",
 	"setInterval",
 	"setTimeout",
+	"storage",
 	"sleep",
 	"stream",
 	"Symbol",

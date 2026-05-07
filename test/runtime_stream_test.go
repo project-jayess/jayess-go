@@ -1,6 +1,8 @@
 package test
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	jayessruntime "jayess-go/runtime"
@@ -51,6 +53,44 @@ func TestRuntimeStreamCapabilitiesDeclareEntrypoints(t *testing.T) {
 		if capability.Kind != "function" {
 			t.Fatalf("stream capability %s has unsupported kind %q", capability.Name, capability.Kind)
 		}
+	}
+}
+
+func TestRuntimeStreamPrimitivesAndBackpressure(t *testing.T) {
+	source := jayessruntime.StreamReadable([]byte("hello"))
+	transformed, err := jayessruntime.StreamTransform(source, func(data []byte) ([]byte, error) {
+		return []byte(strings.ToUpper(string(data))), nil
+	})
+	if err != nil {
+		t.Fatalf("transform stream: %v", err)
+	}
+	output, target := jayessruntime.StreamWritable()
+	written, err := jayessruntime.StreamPipe(transformed, output)
+	if err != nil {
+		t.Fatalf("pipe stream: %v", err)
+	}
+	if written != 5 || target.String() != "HELLO" {
+		t.Fatalf("unexpected stream pipe written=%d target=%q", written, target.String())
+	}
+	if !jayessruntime.StreamAwaitDrain(jayessruntime.StreamState{HighWaterMark: 8, Buffered: 4}) {
+		t.Fatal("expected stream to be below high water mark")
+	}
+	if jayessruntime.StreamAwaitDrain(jayessruntime.StreamState{HighWaterMark: 4, Buffered: 8}) {
+		t.Fatal("expected stream backpressure")
+	}
+}
+
+func TestRuntimeStreamDuplex(t *testing.T) {
+	duplex, sink := jayessruntime.StreamDuplex([]byte("in"))
+	data, err := jayessruntime.StreamReadAll(duplex)
+	if err != nil || !bytes.Equal(data, []byte("in")) {
+		t.Fatalf("duplex read got data=%q err=%v", data, err)
+	}
+	if _, err := duplex.WriteString("out"); err != nil {
+		t.Fatalf("duplex write: %v", err)
+	}
+	if sink.String() != "out" {
+		t.Fatalf("unexpected duplex sink %q", sink.String())
 	}
 }
 

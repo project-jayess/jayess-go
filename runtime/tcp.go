@@ -1,5 +1,7 @@
 package runtime
 
+import "net"
+
 type TCPCapability struct {
 	Name          string
 	RuntimeSymbol string
@@ -29,4 +31,8 @@ func HasTCPCapability(name string) bool {
 		}
 	}
 	return false
+}
+
+func listenTCP(address string) (net.Listener, error) {
+	return net.Listen("tcp", address)
 }

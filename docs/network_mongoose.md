@@ -1,6 +1,11 @@
 # Mongoose Embedded Server
 
-Mongoose can be exposed as an embedded web server through native bindings.
+Mongoose is optional alternative embedded-server support only. Standard Jayess
+HTTP servers should use the internal `http` runtime package, which is built from
+Jayess-owned Go helpers and does not require Mongoose to be installed or shipped.
+
+Use a Mongoose binding only when an application explicitly wants Mongoose API or
+behavior rather than the normal Jayess HTTP server API.
 
 ## Lifecycle
 
@@ -18,16 +23,21 @@ headers, and body into Jayess values before invoking user handlers.
 Server shutdown should release native resources and stop accepting new work
 before the application exits.
 
+Bindings must declare any redistributable Mongoose wrapper assets so app
+distribution can package them automatically. Apps that import only internal
+`http` do not need these assets.
+
 ## Example Shape
 
 ```js
-import { createServer } from "./native/mongoose.js";
+import { createServer } from "http";
 
 function main() {
-  const server = createServer("127.0.0.1:8080", (request) => {
-    return { status: 200, body: "ok" };
+  const server = createServer((request, response) => {
+    response.statusCode = 200;
+    response.end("ok");
   });
-  server.run();
+  server.listen(8080, "127.0.0.1");
   return 0;
 }
 ```
